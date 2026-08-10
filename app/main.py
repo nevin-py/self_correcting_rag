@@ -1,42 +1,30 @@
-import uuid
-from agent.graph import return_app  # your compiled graph
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-async def run_rag_query(query: str, user_id: uuid.UUID) -> str:
-    initial_state = {
-        "user_id": user_id,
-        "query": query,
-        "messages": [],
+from app.api.v1.api import api_router
 
-        "chunks": [],
-        "search": [],
+app = FastAPI(
+    title="Self-Correcting RAG",
+    description=(
+        "Agentic retrieval-augmented generation with hallucination detection, "
+        "self-repair, and web search fallback."
+    ),
+    version="0.1.0",
+)
 
-        "planner_state": "not_enough",   # harmless placeholder, planner overwrites it
-        "retrieval_queries": [],
-        "wiki_queries": [],
-        "tavily_queries": [],
+# CORS — tighten origins in production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        "executed_retrieval_queries": [],
-        "executed_wiki_queries": [],
-        "executed_tavily_queries": [],
-
-        "answer": "",
-
-        "need_repair": "repair",         # placeholder, hallucination checker overwrites it
-        "hallucination_reason": [],
-
-        "max_tries_planner": 0,
-        "max_tries_hallucinator": 0,
-    }
-    app=return_app()
-    result = await app.ainvoke(initial_state)
-    return result["answer"]
+# Include all API routes under /api/v1
+app.include_router(api_router)
 
 
-# Example call site (e.g. in a FastAPI route)
-if __name__ == "__main__":
-    import asyncio
-    answer = asyncio.run(run_rag_query(
-        query="What is our company's leave policy?",
-        user_id=uuid.UUID("...")
-    ))
-    print(answer)
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {"status": "ok"}

@@ -1,5 +1,5 @@
 import jwt
-import email
+import uuid as _uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,12 +52,17 @@ async def get_current_user(*,token_str:str=Depends(oauth2_scheme),db:AsyncSessio
         id_sub=decoded["sub"]
     except jwt.PyJWTError:
         raise HTTPException(status_code=401,detail="Could not validate credentials")
+    # JWT 'sub' field stores user_id as a string — parse it back to UUID
+    try:
+        user_uuid = _uuid.UUID(id_sub)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
     result=await db.execute(
-        select(User).where(User.user_id==id_sub)
+        select(User).where(User.user_id == user_uuid)
     )
     res=result.scalar_one_or_none()
-    if  res is None:
-        raise HTTPException(404)
+    if res is None:
+        raise HTTPException(status_code=401, detail="User not found")
     return res
 
 
