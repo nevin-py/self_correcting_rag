@@ -1,0 +1,5 @@
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+python-interpreter-path = "/home/ariva/work/project_self_rag/self_correcting_rag/.venv/bin/python"
