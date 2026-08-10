@@ -232,39 +232,59 @@ def embed_n_store(chunk_list:list[dict],user_id: uuid.UUID,chat_id:uuid.UUID,chr
 
 
 
-def full_pipeline(file_contents:bytes,filename:str,uid: uuid.UUID,chat_id:uuid.UUID):
-    if file_contents!=None:
-        text,metadata=ingestion_pipeline(file_contents,filename)
-        chunked_docs=chunking(text=text,metadata=metadata)
-        collection_name=embed_n_store(chunk_list=chunked_docs,user_id=uid,chat_id=chat_id,chroma_client=chroma_client)
-    return {'no_of_chunk':len(chunked_docs),'metadata':metadata,'collection_name':collection_name}   
+def full_pipeline(file_contents: bytes, filename: str, uid: uuid.UUID, chat_id: uuid.UUID):
+    """Ingest a file: extract → chunk → embed → store in ChromaDB."""
+    if not file_contents:
+        raise ValueError("file_contents is empty or None")
+
+    text, metadata = ingestion_pipeline(file_contents, filename)
+    chunked_docs = chunking(text=text, metadata=metadata)
+    collection_name = embed_n_store(
+        chunk_list=chunked_docs,
+        user_id=uid,
+        chat_id=chat_id,
+        chroma_client=chroma_client,
+    )
+    return {
+        "no_of_chunks": len(chunked_docs),
+        "metadata": metadata,
+        "collection_name": collection_name,
+    }
 
 
 
-async def retrieve_chunks(query:str,user_id:uuid.UUID,chroma_client,top_k:int=5)->list[dict]:
+def _embed_query_sync(query: str) -> list:
+    """Synchronous Nomic embedding call — run via asyncio.to_thread."""
+    nomic_response = embed.text(
+        texts=[query],
+        model="nomic-embed-text-v1.5",
+        task_type="search_query",
+    )
+    return nomic_response['embeddings'][0]
+
+
+async def retrieve_chunks(query: str, user_id: uuid.UUID, chroma_client, top_k: int = 5) -> list[dict]:
     collection_name = f"chat_{user_id.hex[:12]}"
     try:
-        collection=chroma_client.get_collection(name=collection_name)
+        collection = chroma_client.get_collection(name=collection_name)
     except Exception:
         return []
-    nomic_response =embed.text(
-                texts=[query],
-                model="nomic-embed-text-v1.5",
-                task_type="search_query"
-            )
-    query_embedding=nomic_response['embeddings'][0]
-    results=collection.query(
+
+    query_embedding = await asyncio.to_thread(_embed_query_sync, query)
+
+    results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=top_k
+        n_results=top_k,
     )
-    chunks_retrieved=[]
+
+    chunks_retrieved = []
     if results['documents']:
         for i in range(len(results['documents'][0])):
             chunks_retrieved.append({
-                'text':results['documents'][0][i],
-                "metadata": results['metadatas'][0][i] if results['metadatas'] else {},
-                "id": results['ids'][0][i],
-                "distance": results['distances'][0][i] if results['distances'] else None
+                'text': results['documents'][0][i],
+                'metadata': results['metadatas'][0][i] if results['metadatas'] else {},
+                'id': results['ids'][0][i],
+                'distance': results['distances'][0][i] if results['distances'] else None,
             })
     return chunks_retrieved
 async def multi_query_retrieval(query_list: list[str], user_id: uuid.UUID, chroma_client,top_k: int = 5):

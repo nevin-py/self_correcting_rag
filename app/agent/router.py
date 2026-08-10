@@ -6,9 +6,8 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update
 
-from app.core.database import get_db
+from app.core.database import get_db, AsyncLocalSession
 from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats, Agent_interact
@@ -147,12 +146,12 @@ async def query_agent(
     """
     Send a message to the self-correcting RAG agent.
 
-    1. Verifies the chat belongs to the user.
-    2. Runs the full LangGraph pipeline (retrieve → plan → search → generate → verify).
-    3. Logs the interaction to the agents table.
+    1. Verifies the chat belongs to the user (quick DB hit, then release).
+    2. Runs the full LangGraph pipeline — no DB session held open.
+    3. Logs the interaction with a fresh session (best-effort).
     4. Returns the final answer.
     """
-    # ── Verify chat ownership ────────────────────────────────────────────
+    # ── Step 1: Verify chat ownership (short-lived) ──────────────────────
     result = await db.execute(
         select(Chats).where(
             Chats.chat_id == chat_id,
@@ -163,7 +162,10 @@ async def query_agent(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # ── Run the RAG graph ────────────────────────────────────────────────
+    # Ownership confirmed — the db session from Depends(get_db) will close
+    # when this endpoint returns. The RAG graph below does not use it.
+
+    # ── Step 2: Run the RAG graph (no DB session held) ───────────────────
     initial_state = _build_initial_state(
         query=body.message,
         user_id=current_user.user_id,
@@ -185,26 +187,46 @@ async def query_agent(
     if not answer:
         answer = "I was unable to generate an answer. Please try rephrasing your question."
 
-    # ── Build a rough trajectory from the state ──────────────────────────
     trajectory = _build_trajectory(final_state)
 
-    # ── Log the interaction ──────────────────────────────────────────────
-    interaction = Agent_interact(
+    # ── Step 3: Log interaction (fresh session, best-effort) ─────────────
+    await _log_interaction(
         chat_id=chat_id,
         user_input=body.message,
         agent_output=answer,
         routing_path=trajectory,
-        token_metric=_estimate_tokens(body.message) + _estimate_tokens(answer),
-        latency=round(elapsed, 4),
+        latency=elapsed,
     )
-    db.add(interaction)
-    await db.commit()
 
     return QueryResponse(
         answer=answer,
         chat_id=chat_id,
         latency_ms=latency_ms,
     )
+
+
+async def _log_interaction(
+    chat_id: uuid.UUID,
+    user_input: str,
+    agent_output: str,
+    routing_path: str,
+    latency: float,
+) -> None:
+    """Write one interaction row in a short-lived session. Failure is logged, not raised."""
+    try:
+        async with AsyncLocalSession() as session:
+            interaction = Agent_interact(
+                chat_id=chat_id,
+                user_input=user_input,
+                agent_output=agent_output,
+                routing_path=routing_path,
+                token_metric=_estimate_tokens(user_input) + _estimate_tokens(agent_output),
+                latency=round(latency, 4),
+            )
+            session.add(interaction)
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to log interaction for chat %s", chat_id)
 
 
 def _build_trajectory(state: dict) -> str:
