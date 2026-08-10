@@ -30,6 +30,9 @@ pypdf>=5.3.0
 pandas>=2.3.0
 Pillow>=11.2.0
 
+# Rate limiting
+slowapi>=0.1.9
+
 # Search & scraping
 tavily-python>=0.7.0
 httpx>=0.28.0

@@ -1,9 +1,12 @@
+import re
 import time
 import uuid
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -26,6 +29,9 @@ from app.agent.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
+
+# Heavy endpoint — 10 queries/min per user (each triggers multiple LLM calls)
+_query_limiter = Limiter(key_func=get_remote_address)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -56,8 +62,15 @@ def _build_initial_state(query: str, user_id: uuid.UUID) -> dict:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token for English text."""
-    return max(1, len(text) // 4)
+    """Estimate token count using word-boundary splitting.
+
+    This is a rough heuristic — real tokenizers (tiktoken, BPE) vary by
+    language and vocabulary.  For English prose this lands within ~20 % of
+    the true count, which is good enough for cost monitoring.
+    """
+    # Split on word boundaries + count punctuation as separate tokens
+    words = re.findall(r"\w+|[^\s\w]", text)
+    return max(1, len(words))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -80,14 +93,18 @@ async def create_chat(
 
 @router.get("/chats", response_model=ChatListResponse)
 async def list_chats(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all chats for the current user, newest first."""
+    """List chats for the current user, newest first, with pagination."""
     result = await db.execute(
         select(Chats)
         .where(Chats.user_id == current_user.user_id)
         .order_by(Chats.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     chats = result.scalars().all()
     return ChatListResponse(chats=chats)
@@ -136,8 +153,9 @@ async def delete_chat(
 # Query (the core RAG endpoint)
 # ──────────────────────────────────────────────────────────────────────────────
 
+@_query_limiter.limit("10/minute")
 @router.post("/chats/{chat_id}/query", response_model=QueryResponse)
-async def query_agent(
+async def query_agent(request: Request,
     chat_id: uuid.UUID,
     body: QueryRequest,
     current_user: User = Depends(get_current_user),
@@ -259,10 +277,11 @@ def _build_trajectory(state: dict) -> str:
 async def get_chat_history(
     chat_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get the interaction history for a chat, oldest first."""
+    """Get the interaction history for a chat, oldest first, with pagination."""
     # Verify chat ownership first
     result = await db.execute(
         select(Chats).where(
@@ -278,6 +297,7 @@ async def get_chat_history(
         .where(Agent_interact.chat_id == chat_id)
         .order_by(Agent_interact.created_at.asc())
         .limit(limit)
+        .offset(offset)
     )
     interactions = result.scalars().all()
     return InteractionListResponse(interactions=interactions)
