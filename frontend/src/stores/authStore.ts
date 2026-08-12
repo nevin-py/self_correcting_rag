@@ -11,9 +11,17 @@ interface AuthState {
   token: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string) => Promise<string>;
+  verifyEmail: (email: string, code: string) => Promise<void>;
   logout: () => void;
   loadUser: () => void;
+}
+
+function persistSession(access: string, refresh: string | undefined, email: string, set: (s: Partial<AuthState>) => void) {
+  localStorage.setItem("token", access);
+  if (refresh) localStorage.setItem("refresh_token", refresh);
+  const payload = JSON.parse(atob(access.split(".")[1]));
+  set({ user: { user_id: payload.sub, email }, token: access, isLoading: false });
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -25,12 +33,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true });
     try {
       const res = await authApi.login(email, password);
-      const token = res.data.access_token;
-      localStorage.setItem("token", token);
-
-      // Decode JWT to get user info
-      const payload = JSON.parse(atob(token.split(".")[1]));
-      set({ user: { user_id: payload.sub, email }, token, isLoading: false });
+      persistSession(res.data.access_token, res.data.refresh_token, email, set);
     } catch (err) {
       set({ isLoading: false });
       throw err;
@@ -41,12 +44,19 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true });
     try {
       await authApi.register(email, password);
-      // Auto-login after registration
-      const res = await authApi.login(email, password);
-      const token = res.data.access_token;
-      localStorage.setItem("token", token);
-      const payload = JSON.parse(atob(token.split(".")[1]));
-      set({ user: { user_id: payload.sub, email }, token, isLoading: false });
+      set({ isLoading: false });
+      return email;
+    } catch (err) {
+      set({ isLoading: false });
+      throw err;
+    }
+  },
+
+  verifyEmail: async (email, code) => {
+    set({ isLoading: true });
+    try {
+      const res = await authApi.verifyEmail(email, code);
+      persistSession(res.data.access_token, res.data.refresh_token, email, set);
     } catch (err) {
       set({ isLoading: false });
       throw err;
@@ -54,7 +64,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    const refresh = typeof window !== "undefined" ? localStorage.getItem("refresh_token") : null;
+    if (refresh) {
+      authApi.logout(refresh).catch(() => undefined);
+    }
     localStorage.removeItem("token");
+    localStorage.removeItem("refresh_token");
     set({ user: null, token: null });
   },
 
@@ -67,6 +82,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         set({ user: { user_id: payload.sub, email: "" }, token });
       } catch {
         localStorage.removeItem("token");
+        localStorage.removeItem("refresh_token");
       }
     }
   },

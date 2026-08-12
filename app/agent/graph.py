@@ -3,29 +3,28 @@ Business-ready self-correcting RAG graph.
 
 Pipeline
 --------
-1. classify_query      → structured intent & source needs
-2. build_plan          → typed plan with steps
-3. retrieve_documents  → knowledge-base evidence (conditional)
-4. search_web          → public-web evidence (conditional)
-5. assemble_evidence   → scoring, conflict detection, context assembly
-6. extract_verify_claims → pre-verification of expected claims
-7. generate_answer     → cited answer generation
-8. verify_answer_claims → claim-level hallucination check
-9. repair_claims       → targeted repair or termination
+1. classify_and_plan   → intent + typed plan (single LLM call)
+2. retrieve_documents  → knowledge-base evidence (conditional)
+3. search_web          → public-web evidence (conditional)
+4. assemble_evidence   → scoring, conflict detection, context assembly
+5. extract_verify_claims → pre-verification (currently a no-op)
+6. generate_answer     → cited answer + hard citation flags
+7. verify_answer_claims → cascade or LLM claim-level check
+8. repair_claims       → surgical patch (or legacy re-search) / terminate
 
-The graph loops between (4-5-6-7-8-9) until claims are satisfied or guard
-limits are reached.
+When USE_VERIFY_CASCADE is on and a coverage-gap search runs:
+  assemble → repair_claims (patch only, skip generate) → END
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from langgraph.graph import StateGraph, END
 
 from app.agent.nodes import (
-    classify_query,
-    build_plan,
+    classify_and_plan,
     retrieve_documents,
     search_web,
     assemble_evidence,
@@ -35,10 +34,13 @@ from app.agent.nodes import (
     repair_claims,
     should_retrieve_documents,
     should_search_web,
+    should_post_assemble,
     hallucination_router,
 )
-from app.agent.state import RAGState
+from app.agent.state import RAGState, RepairDecision
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _new_state(
@@ -59,6 +61,7 @@ def _new_state(
         search_count=0,
         retrieval_count=0,
         regeneration_count=0,
+        repair_pass_count=0,
         max_graph_steps=settings.MAX_GRAPH_STEPS,
         max_searches=settings.MAX_SEARCHES,
         max_retrievals=settings.MAX_RETRIEVALS,
@@ -67,19 +70,22 @@ def _new_state(
         claims=[],
         conflicts=[],
         citation_usage=[],
+        cite_map={},
+        coverage_gaps=[],
+        repair_mode="",
         chunks=[],
         search=[],
         retrieval_queries=[],
         wiki_queries=[],
         tavily_queries=[],
+        searxng_queries=[],
     )
 
 
 # Build graph
 builder = StateGraph(RAGState)
 
-builder.add_node("classify_query", classify_query)
-builder.add_node("build_plan", build_plan)
+builder.add_node("classify_and_plan", classify_and_plan)
 builder.add_node("retrieve_documents", retrieve_documents)
 builder.add_node("search_web", search_web)
 builder.add_node("assemble_evidence", assemble_evidence)
@@ -88,14 +94,10 @@ builder.add_node("generate_answer", generate_answer)
 builder.add_node("verify_answer_claims", verify_answer_claims)
 builder.add_node("repair_claims", repair_claims)
 
-builder.set_entry_point("classify_query")
+builder.set_entry_point("classify_and_plan")
 
-# classify → plan
-builder.add_edge("classify_query", "build_plan")
-
-# plan → conditional retrieval / web / assembly
 builder.add_conditional_edges(
-    "build_plan",
+    "classify_and_plan",
     should_retrieve_documents,
     {
         "retrieve_documents": "retrieve_documents",
@@ -103,7 +105,6 @@ builder.add_conditional_edges(
     },
 )
 
-# retrieval → conditional web / assembly
 builder.add_conditional_edges(
     "retrieve_documents",
     should_search_web,
@@ -113,51 +114,86 @@ builder.add_conditional_edges(
     },
 )
 
-# web → assembly
 builder.add_edge("search_web", "assemble_evidence")
-
-# assembly → extract/verify claims
-builder.add_edge("assemble_evidence", "extract_verify_claims")
-
-# pre-verified claims → generate answer
+builder.add_conditional_edges(
+    "assemble_evidence",
+    should_post_assemble,
+    {
+        "extract_verify_claims": "extract_verify_claims",
+        "repair_claims": "repair_claims",
+    },
+)
 builder.add_edge("extract_verify_claims", "generate_answer")
-
-# answer → claim-level verification
 builder.add_edge("generate_answer", "verify_answer_claims")
 
-# verification → repair, satisfactory, or max attempts
 builder.add_conditional_edges(
     "verify_answer_claims",
     hallucination_router,
     {
         "satisfactory": END,
-        "max_attempts": END,
+        "max_attempts": "repair_claims",
         "repair": "repair_claims",
     },
 )
 
+
 def _repair_next(state: RAGState) -> str:
-    """Route repair to the first action in the new repair plan."""
+    """Route repair: surgical coverage-gap search only; else end."""
+    repair_state = state.get("repair_state")
+    if repair_state in (
+        RepairDecision.SATISFACTORY.value,
+        RepairDecision.MAX_ATTEMPTS.value,
+        "satisfactory",
+        "max_attempts",
+    ):
+        return "end"
+
     plan = state.get("plan")
+    retrieval_count = state.get("retrieval_count", 0)
+    search_count = state.get("search_count", 0)
+    max_retrievals = state.get("max_retrievals", settings.MAX_RETRIEVALS)
+    max_searches = state.get("max_searches", settings.MAX_SEARCHES)
+
+    retrieval_available = retrieval_count < max_retrievals
+    search_available = search_count < max_searches
+
+    # Cascade path: only follow search_web for coverage gaps (never blind retrieve)
+    if settings.USE_VERIFY_CASCADE and state.get("repair_mode") == "surgical":
+        if plan and plan.steps and search_available:
+            for step in plan.steps:
+                if step.action == "search_web":
+                    return "search_web"
+        return "end"
+
     if plan and plan.steps:
         for step in plan.steps:
-            if step.action == "retrieve_documents":
+            if step.action == "retrieve_documents" and retrieval_available:
                 return "retrieve_documents"
-    return "search_web"
+            if step.action == "search_web" and search_available:
+                return "search_web"
+
+    logger.warning(
+        "Repair requested but no remaining plan steps (retrievals %d/%d, searches %d/%d)",
+        retrieval_count,
+        max_retrievals,
+        search_count,
+        max_searches,
+    )
+    return "end"
 
 
-# repair → either re-retrieve or re-search based on plan, then back to assembly
 builder.add_conditional_edges(
     "repair_claims",
     _repair_next,
     {
         "retrieve_documents": "retrieve_documents",
         "search_web": "search_web",
+        "end": END,
     },
 )
 
 graph = builder.compile()
-rag_app = graph
+rag_app = graph.with_config({"recursion_limit": settings.MAX_GRAPH_STEPS})
 
 
 def create_initial_state(

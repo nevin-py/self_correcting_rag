@@ -18,21 +18,50 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 — only clear token on auth endpoints, not on every 401
+// Handle 401 — try refresh once, then clear session on auth endpoints
 api.interceptors.response.use(
   (res) => res,
-  (err) => {
+  async (err) => {
     const status = err.response?.status;
     const url = err.config?.url || "";
+    const original = err.config as { _retry?: boolean; url?: string; headers?: Record<string, string> } | undefined;
+    if (!original) return Promise.reject(err);
 
-    // Only force-logout on auth endpoint failures (not on chat list, etc.)
+    if (
+      status === 401 &&
+      typeof window !== "undefined" &&
+      !original._retry &&
+      !url.includes("/auth/login") &&
+      !url.includes("/auth/register") &&
+      !url.includes("/auth/refresh") &&
+      !url.includes("/auth/verify-email")
+    ) {
+      const refresh = localStorage.getItem("refresh_token");
+      if (refresh) {
+        original._retry = true;
+        try {
+          const res = await api.post("/api/v1/auth/refresh", { refresh_token: refresh });
+          localStorage.setItem("token", res.data.access_token);
+          if (res.data.refresh_token) {
+            localStorage.setItem("refresh_token", res.data.refresh_token);
+          }
+          original.headers = original.headers || {};
+          original.headers.Authorization = `Bearer ${res.data.access_token}`;
+          return api.request(original);
+        } catch {
+          localStorage.removeItem("token");
+          localStorage.removeItem("refresh_token");
+        }
+      }
+    }
+
     if (status === 401 && typeof window !== "undefined") {
       const isAuthEndpoint = url.includes("/auth/login") || url.includes("/auth/register");
       if (isAuthEndpoint) {
         localStorage.removeItem("token");
+        localStorage.removeItem("refresh_token");
         window.location.href = new URL("/login", window.location.origin).href;
       }
-      // For non-auth endpoints, let the caller handle the error
     }
     return Promise.reject(err);
   }
@@ -49,7 +78,84 @@ export const authApi = {
       new URLSearchParams({ username: email, password }),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     ),
-  refresh: () => api.post("/api/v1/auth/refresh"),
+  verifyEmail: (email: string, code: string) =>
+    api.post("/api/v1/auth/verify-email", { email, code }),
+  resendOtp: (email: string, purpose: "verify_email" | "reset_password" = "verify_email") =>
+    api.post("/api/v1/auth/resend-otp", { email, purpose }),
+  changePassword: (current_password: string, new_password: string) =>
+    api.post("/api/v1/auth/change-password", { current_password, new_password }),
+  forgotPassword: (email: string) =>
+    api.post("/api/v1/auth/forgot-password", { email }),
+  resetPassword: (email: string, code: string, new_password: string) =>
+    api.post("/api/v1/auth/reset-password", { email, code, new_password }),
+  refresh: (refresh_token: string) =>
+    api.post("/api/v1/auth/refresh", { refresh_token }),
+  logout: (refresh_token: string) =>
+    api.post("/api/v1/auth/logout", { refresh_token }),
+};
+
+export interface ProviderSettings {
+  provider: string;
+  has_key: boolean;
+  masked_key: string | null;
+  has_fallback_key: boolean;
+  masked_fallback_key: string | null;
+  planner_model: string | null;
+  generator_model: string | null;
+  verifier_model: string | null;
+  default_planner_model: string;
+  default_generator_model: string;
+  default_verifier_model: string;
+  has_server_key: boolean;
+}
+
+export const settingsApi = {
+  listProviders: () => api.get<{ providers: ProviderSettings[] }>("/api/v1/settings/providers"),
+  upsertProvider: (
+    provider: string,
+    body: {
+      api_key?: string;
+      fallback_api_key?: string;
+      clear_fallback?: boolean;
+      planner_model?: string | null;
+      generator_model?: string | null;
+      verifier_model?: string | null;
+    }
+  ) => api.put(`/api/v1/settings/providers/${provider}`, body),
+  deleteProvider: (provider: string) => api.delete(`/api/v1/settings/providers/${provider}`),
+};
+
+export interface MemoryChunk {
+  id: string;
+  document_preview: string;
+  filename: string | null;
+  chat_id: string | null;
+  chunk_index: number | null;
+  parent_id: string | null;
+  file_hash: string | null;
+  chunk_type: string | null;
+}
+
+export const memoryApi = {
+  getChunks: (params?: { chat_id?: string; limit?: number; offset?: number; q?: string }) =>
+    api.get<{
+      collection: string;
+      total: number;
+      limit: number;
+      offset: number;
+      chunks: MemoryChunk[];
+    }>("/api/v1/memory/chunks", { params }),
+  getStats: () =>
+    api.get<{
+      collection: string;
+      chunk_count: number;
+      files: Array<{
+        filename: string;
+        chat_id: string | null;
+        chunk_count: number;
+        file_hash: string | null;
+      }>;
+    }>("/api/v1/memory/stats"),
 };
 
 // ── Chats ───────────────────────────────────────────────────────────────────
@@ -121,11 +227,4 @@ export const documentApi = {
   },
   status: (ingestionId: string) =>
     api.get(`/api/v1/documents/ingestions/${ingestionId}`),
-};
-
-// ── Memory ──────────────────────────────────────────────────────────────────
-
-export const memoryApi = {
-  getNodes: () => api.get("/api/v1/memory/nodes"),
-  getPermanent: () => api.get("/api/v1/memory/permanent"),
 };

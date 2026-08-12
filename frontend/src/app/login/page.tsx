@@ -2,16 +2,15 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
-import { Eye, EyeOff } from "lucide-react";
+import { Input } from "@/components/ui/Input";
+import { Button } from "@/components/ui/Button";
 
 export default function LoginPage() {
   const router = useRouter();
   const { login, isLoading } = useAuthStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -21,44 +20,66 @@ export default function LoginPage() {
       await login(email, password);
       router.push("/chat");
     } catch (err) {
-      const detail = err && typeof err === "object" && "response" in err
-        ? (err.response as { data?: { detail?: string } })?.data?.detail
-        : undefined;
-      setError(detail || "Invalid email or password");
+      const status =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { status?: number; data?: { detail?: string } })?.status
+          : undefined;
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: string } })?.data?.detail
+          : undefined;
+      if (status === 403 && String(detail || "").toLowerCase().includes("not verified")) {
+        router.push(`/verify-email?email=${encodeURIComponent(email)}`);
+        return;
+      }
+      setError(detail || "Authentication failed");
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-[var(--midnight)]">
-      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-[400px] p-8 rounded-[var(--radius-md)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-        <h1 className="font-display text-2xl text-[var(--arctic)] mb-6 text-center">Welcome Back</h1>
-        <form onSubmit={handleSubmit} className="space-y-4">
+    <div className="flex min-h-screen items-center justify-center bg-void px-4 grid-bg">
+      <div className="w-full max-w-[420px] border border-border bg-surface">
+        <div className="border-b border-border px-6 py-4">
+          <p className="label-caps">Access Terminal</p>
+          <h1 className="font-display text-xl font-semibold text-text-primary">Sign In</h1>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4 p-6">
           <div>
-            <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Email</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/20 focus:border-[var(--glacier)] focus:outline-none text-[var(--slopes)] text-sm transition-colors duration-[var(--duration-micro)]" required />
+            <label className="label-caps mb-1.5 block">Email</label>
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus />
           </div>
           <div>
-            <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Password</label>
-            <div className="relative">
-              <input type={showPw ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/20 focus:border-[var(--glacier)] focus:outline-none text-[var(--slopes)] text-sm pr-10 transition-colors duration-[var(--duration-micro)]" required />
-              <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--apres-ski)] hover:text-[var(--slopes)] transition-colors">
-                {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
+            <label className="label-caps mb-1.5 block">Password</label>
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
           </div>
-          {error && <p className="text-[var(--error)] text-sm">{error}</p>}
-          <button type="submit" disabled={isLoading}
-            className="w-full py-3 rounded-[var(--radius-pill)] bg-[var(--glacier)] text-[var(--midnight)] font-semibold text-sm hover:opacity-90 transition-opacity disabled:opacity-50">
-            {isLoading ? "Signing in..." : "Sign In"}
-          </button>
+          {error && (
+            <p className="border border-error bg-accent-glow px-3 py-2 font-mono text-xs text-error">{error}</p>
+          )}
+          <Button type="submit" variant="accent" size="lg" disabled={isLoading} className="w-full">
+            {isLoading ? "Authenticating..." : "Enter Workspace"}
+          </Button>
         </form>
-        <p className="text-center text-sm text-[var(--apres-ski)] mt-6">
-          Don&apos;t have an account? <a href="/register" className="text-[var(--glacier)] hover:underline">Sign up</a>
-        </p>
-      </motion.div>
+
+        <div className="border-t border-border px-6 py-4 text-center space-y-2">
+          <p className="text-xs text-text-muted">
+            <a href="/forgot-password" className="font-mono text-accent-bright hover:text-accent">
+              Forgot password?
+            </a>
+          </p>
+          <p className="text-xs text-text-muted">
+            No access?{" "}
+            <a href="/register" className="font-mono text-accent-bright hover:text-accent">
+              Initialize account →
+            </a>
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

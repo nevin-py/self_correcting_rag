@@ -1,0 +1,112 @@
+# Production stack — do not publish Postgres / SearXNG / Chroma to the host.
+# Usage:
+#   cp .env.example .env   # fill secrets; set ENVIRONMENT=production
+#   docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
+#
+# Required env (in .env or shell):
+#   SECRET_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DOMAIN (for TLS),
+#   NOMIC_API_KEY, TAVILY_API_KEY, SMTP_* for OTP email
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-self_correcting_rag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-self_correcting_rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-self_correcting_rag}
+      ENVIRONMENT: production
+      SQL_ECHO: "false"
+      SEARXNG_URL: http://searxng:8080
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS to your frontend origin(s)}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-14}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+    volumes:
+      - chroma_data:/app/data/chroma
+    depends_on:
+      db:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health/ready"]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    # API is only reachable via the reverse proxy on the edge network
+    expose:
+      - "8000"
+    networks:
+      - internal
+      - edge
+
+  # Caddy terminates TLS (or serves HTTP if DOMAIN is unset / use http://)
+  # Set DOMAIN=api.example.com and open 80/443. Caddy obtains certs automatically.
+  # For local smoke without TLS: DOMAIN=:80  or omit ACME with CADDY_HTTP_ONLY=1
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN e.g. api.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - edge
+
+networks:
+  # Private bridge — no host port publishes for db/searxng; egress allowed for LLM/search
+  internal:
+  edge:
+
+volumes:
+  pgdata:
+  chroma_data:
+  caddy_data:
+  caddy_config:

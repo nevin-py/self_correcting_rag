@@ -16,7 +16,7 @@ Also covers:
 """
 
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -557,9 +557,9 @@ class TestFactVsInference:
             Claim(text="inference claim", status=ClaimStatus.UNVERIFIED, claim_type=ClaimType.INFERENCE, repair_action="search_web"),
             Claim(text="speculation claim", status=ClaimStatus.UNCERTAIN, claim_type=ClaimType.SPECULATION, repair_action="rephrase"),
         ]
-        result = repair_claims(_base_state(claims=claims, classification=QueryClassification()))
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", False):
+            result = repair_claims(_base_state(claims=claims, classification=QueryClassification()))
         assert result["repair_state"] == RepairDecision.REPAIR.value
-        # Should have 3 repair steps (one per failed claim)
         assert len(result["plan"].steps) >= 1
 
 
@@ -771,5 +771,6 @@ class TestExistingBehaviorPreserved:
 
     def test_repair_claims_backward_compatible(self):
         claims = [Claim(text="bad", status=ClaimStatus.UNVERIFIED, claim_type=ClaimType.INFERENCE, repair_action="search_web")]
-        result = repair_claims(_base_state(claims=claims, classification=QueryClassification()))
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", False):
+            result = repair_claims(_base_state(claims=claims, classification=QueryClassification()))
         assert result["repair_state"] == RepairDecision.REPAIR.value

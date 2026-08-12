@@ -14,9 +14,14 @@ import app.agent.message_models  # noqa: E402, F401
 import app.documents.models  # noqa: E402, F401
 
 
+_sql_echo = (
+    settings.SQL_ECHO
+    if settings.ENVIRONMENT != "production"
+    else False
+)
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=(settings.ENVIRONMENT == "development"),
+    echo=_sql_echo,
 )
 
 AsyncLocalSession = async_sessionmaker(

@@ -42,7 +42,14 @@ from app.agent.normalization import (
     compose_search_query,
     geographic_match,
 )
-from app.agent.ranking import rank_evidence, metric_match, select_latest_per_key, combined_score
+from app.agent.ranking import (
+    rank_evidence,
+    metric_match,
+    select_latest_per_key,
+    combined_score,
+    evidence_fits_classification,
+    filter_evidence_by_classification,
+)
 from app.agent.source_authority import authority_tier, classify_source_quality, authority_score
 from app.agent.state import (
     Claim,
@@ -250,6 +257,22 @@ class TestGeographicMismatch:
                       metric_type=MetricType.GSDP, geography="Maharashtra")
         ranked = rank_evidence([ev_right, ev_wrong], q)
         assert ranked[0].evidence_id == ev_right.evidence_id
+
+    def test_hard_drop_geo_mismatch_when_geography_classified(self):
+        from app.agent.state import QueryClassification
+        q = QueryClassification(geography="India")
+        ev_right = _ev("India GDP grew 8.2%", geography="India")
+        ev_wrong = _ev("Unrelated coaching centres debate in another region", geography="Bihar")
+        kept = filter_evidence_by_classification([ev_right, ev_wrong], q)
+        assert ev_right in kept
+        assert ev_wrong not in kept
+
+    def test_no_geo_drop_when_geography_unclassified(self):
+        from app.agent.state import QueryClassification
+        q = QueryClassification(geography="")
+        ev = _ev("Unrelated coaching centres debate")
+        assert evidence_fits_classification(ev, q) is True
+        assert filter_evidence_by_classification([ev], q) == [ev]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

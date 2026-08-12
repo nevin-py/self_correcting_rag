@@ -1,149 +1,62 @@
 "use client";
 
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Copy, Check, User, Bot, FileText, Shield, AlertTriangle, BookOpen, ExternalLink, ChevronDown } from "lucide-react";
+import { Copy, Check } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import type { Citation, Claim, Conflict } from "@/lib/api";
+import { Badge } from "@/components/ui/Badge";
+import { cn } from "@/lib/utils";
+import { useChatStore } from "@/stores/chatStore";
 
 interface MessageProps {
+  id: string;
   role: "user" | "assistant" | "system";
   content: string;
   isLatest?: boolean;
+  isStreaming?: boolean;
   meta?: { filename?: string; status?: string };
   citations?: Citation[];
   claims?: Claim[];
   conflicts?: Conflict[];
   finalStatus?: string;
   latencyMs?: number;
+  timestamp: Date;
 }
 
-function StatusBadge({ status, claims }: { status?: string; claims?: Claim[] }) {
-  if (!status) return null;
-  const failed = claims?.filter((c) => ["unverified", "contradicted", "uncertain"].includes(c.status)) || [];
-  const ok = failed.length === 0;
+function VerificationSummary({ claims, conflicts }: { claims?: Claim[]; conflicts?: Conflict[] }) {
+  const failed = claims?.filter((c) => ["unverified", "contradicted", "uncertain"].includes(c.status)) ?? [];
+  const hasConflicts = (conflicts?.length ?? 0) > 0;
+
+  if (!claims?.length && !hasConflicts) return null;
+
   return (
-    <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[var(--radius-sm)] text-[10px] border ${ok ? "bg-green-500/10 border-green-500/30 text-green-400" : "bg-amber-500/10 border-amber-500/30 text-amber-400"}`}>
-      {ok ? <Shield size={10} /> : <AlertTriangle size={10} />}
-      <span>{ok ? "Verified" : `${failed.length} claim${failed.length > 1 ? "s" : ""} need review`}</span>
+    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-2">
+      {hasConflicts && <Badge variant="accent">Conflict Resolved</Badge>}
+      {failed.length === 0 ? (
+        <Badge variant="success">Verified</Badge>
+      ) : (
+        <Badge variant="warning">{failed.length} claim{failed.length > 1 ? "s" : ""} flagged</Badge>
+      )}
     </div>
   );
 }
 
-function CollapsibleSection({ title, icon: Icon, children, defaultOpen = false }: {
-  title: string;
-  icon: React.ElementType;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="mt-3 border border-[var(--apres-ski)]/10 rounded-[var(--radius-md)] overflow-hidden">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-[11px] font-medium text-[var(--slopes)] bg-[var(--midnight)]/40 hover:bg-[var(--midnight)] transition-colors"
-      >
-        <span className="flex items-center gap-1.5"><Icon size={12} className="text-[var(--glacier)]" /> {title}</span>
-        <ChevronDown size={12} className={`text-[var(--apres-ski)] transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="px-3 py-2.5">
-              {children}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-function ClaimPanel({ claims }: { claims?: Claim[] }) {
-  if (!claims || claims.length === 0) return null;
-  return (
-    <CollapsibleSection title={`Claim verification (${claims.length})`} icon={Shield}>
-      <div className="space-y-1.5">
-        {claims.map((claim) => {
-          const statusClasses: Record<string, string> = {
-            verified: "text-green-400 border-green-500/30 bg-green-500/10",
-            partial: "text-yellow-400 border-yellow-500/30 bg-yellow-500/10",
-            contradicted: "text-red-400 border-red-500/30 bg-red-500/10",
-            unverified: "text-[var(--apres-ski)] border-[var(--apres-ski)]/20 bg-[var(--midnight)]",
-            uncertain: "text-orange-400 border-orange-500/30 bg-orange-500/10",
-          };
-          return (
-            <div key={claim.claim_id} className={`text-[11px] px-2.5 py-1.5 rounded-[var(--radius-sm)] border ${statusClasses[claim.status] || statusClasses.unverified}`}>
-              <p className="leading-relaxed">{claim.text}</p>
-              {claim.reasoning && <p className="mt-1 opacity-80 text-[10px]">{claim.reasoning}</p>}
-            </div>
-          );
-        })}
-      </div>
-    </CollapsibleSection>
-  );
-}
-
-function CitationPanel({ citations }: { citations?: Citation[] }) {
-  if (!citations || citations.length === 0) return null;
-  return (
-    <CollapsibleSection title={`Sources (${citations.length})`} icon={BookOpen} defaultOpen={true}>
-      <div className="grid gap-2">
-        {citations.map((c) => (
-          <div key={c.evidence_id} className="p-2.5 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/10 text-xs">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-[var(--arctic)] font-medium min-w-0">
-                <span className="uppercase text-[9px] px-1 rounded bg-[var(--glacier)]/10 text-[var(--glacier)] shrink-0">{c.source_type}</span>
-                <span className="truncate">{c.source_name}</span>
-              </div>
-              {c.source_url && (
-                <a href={c.source_url} target="_blank" rel="noopener noreferrer" className="shrink-0 text-[var(--glacier)] hover:text-[var(--slopes)]">
-                  <ExternalLink size={12} />
-                </a>
-              )}
-            </div>
-            <p className="mt-1 text-[var(--apres-ski)] line-clamp-3">{c.text}</p>
-            <div className="mt-1.5 flex flex-wrap gap-3 text-[10px] text-[var(--apres-ski)]/60">
-              {c.source_date && <span>{new Date(c.source_date).toLocaleDateString()}</span>}
-              <span>Authority {(c.authority_score * 100).toFixed(0)}%</span>
-              <span>Recency {(c.recency_score * 100).toFixed(0)}%</span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </CollapsibleSection>
-  );
-}
-
-function ConflictPanel({ conflicts }: { conflicts?: Conflict[] }) {
-  if (!conflicts || conflicts.length === 0) return null;
-  return (
-    <div className="mt-3 p-2.5 rounded-[var(--radius-sm)] border border-amber-500/30 bg-amber-500/10 text-xs">
-      <p className="font-medium text-amber-400 flex items-center gap-1.5 mb-1">
-        <AlertTriangle size={12} /> Conflicting evidence detected
-      </p>
-      <p className="text-[var(--apres-ski)]">{conflicts.length} conflict{conflicts.length > 1 ? "s" : ""} resolved using source authority.</p>
-    </div>
-  );
-}
-
-export default function ChatMessage(props: MessageProps) {
-  const {
-    role,
-    content,
-    citations,
-    claims,
-    conflicts,
-    finalStatus,
-    latencyMs,
-  } = props;
+export default function ChatMessage({
+  id,
+  role,
+  content,
+  isStreaming,
+  meta,
+  citations,
+  claims,
+  conflicts,
+  finalStatus,
+  latencyMs,
+  timestamp,
+}: MessageProps) {
   const [copied, setCopied] = useState(false);
+  const { selectedMessageId, setSelectedMessage } = useChatStore();
+  const isSelected = selectedMessageId === id;
   const isUser = role === "user";
   const isSystem = role === "system";
 
@@ -155,69 +68,112 @@ export default function ChatMessage(props: MessageProps) {
 
   if (isSystem) {
     return (
-      <motion.div
-        initial={{ opacity: 0, y: 4 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.2 }}
-        className="flex justify-center"
-      >
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-[var(--radius-pill)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10 text-xs text-[var(--apres-ski)]">
-          <FileText size={12} className="text-[var(--glacier)]" />
-          <span>{content}</span>
+      <div className="flex justify-center py-2">
+        <div
+          className={cn(
+            "border px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider",
+            meta?.status === "failed"
+              ? "border-error bg-accent-glow text-error"
+              : "border-border bg-surface-raised text-text-secondary"
+          )}
+        >
+          {content}
         </div>
-      </motion.div>
+      </div>
     );
   }
 
+  const timeStr = timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-      className={`flex gap-3 group ${isUser ? "justify-end" : "justify-start"}`}
-    >
-      {!isUser && (
-        <div className="w-7 h-7 rounded-full bg-[var(--glacier)]/10 flex items-center justify-center shrink-0 mt-1">
-          <Bot size={14} className="text-[var(--glacier)]" />
-        </div>
+    <article
+      onClick={() => !isUser && setSelectedMessage(id)}
+      className={cn(
+        "group relative border transition-colors",
+        isUser
+          ? "ml-8 border-border bg-surface-raised"
+          : cn(
+              "mr-0 border-border bg-surface cursor-pointer hover:border-border-strong",
+              isSelected && "border-accent bg-accent-glow/30",
+              isStreaming && "border-accent-bright"
+            )
       )}
-
-      <div className="max-w-[85%] md:max-w-[75%] relative">
-        {isUser ? (
-          <div className="bg-[var(--arctic)] text-[var(--midnight)] px-4 py-2.5 rounded-[var(--radius-md)] rounded-br-[var(--radius-sm)] text-sm">
-            {content}
-          </div>
-        ) : (
-          <div className="bg-transparent border border-[var(--apres-ski)]/20 px-4 py-3 rounded-[var(--radius-md)] rounded-bl-[var(--radius-sm)] text-sm">
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <StatusBadge status={finalStatus} claims={claims} />
-              {typeof latencyMs === "number" && (
-                <span className="text-[10px] text-[var(--apres-ski)]/50">{latencyMs.toFixed(0)}ms</span>
-              )}
-            </div>
-            <MarkdownRenderer content={content} />
-            <ConflictPanel conflicts={conflicts} />
-            <ClaimPanel claims={claims} />
-            <CitationPanel citations={citations} />
-          </div>
-        )}
-
+    >
+      {/* Header rail */}
+      <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[9px] uppercase tracking-[0.15em] text-text-muted">
+            {isUser ? "Operator" : "System Response"}
+          </span>
+          <span className="font-mono text-[9px] text-text-muted">{timeStr}</span>
+        </div>
         {!isUser && (
-          <button
-            onClick={handleCopy}
-            className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded bg-[var(--mountainside)] border border-[var(--apres-ski)]/20 hover:border-[var(--glacier)]/40"
-            title="Copy answer"
-          >
-            {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} className="text-[var(--apres-ski)]" />}
-          </button>
+          <div className="flex items-center gap-2">
+            {finalStatus && <Badge variant="mono">{finalStatus}</Badge>}
+            {typeof latencyMs === "number" && (
+              <span className="font-mono text-[9px] text-text-muted">{latencyMs.toFixed(0)}ms</span>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleCopy();
+              }}
+              className="opacity-0 transition-opacity group-hover:opacity-100"
+              title="Copy response"
+            >
+              {copied ? (
+                <Check size={11} className="text-success" />
+              ) : (
+                <Copy size={11} className="text-text-muted hover:text-text-primary" />
+              )}
+            </button>
+          </div>
         )}
       </div>
 
-      {isUser && (
-        <div className="w-7 h-7 rounded-full bg-[var(--apres-ski)]/20 flex items-center justify-center shrink-0 mt-1">
-          <User size={14} className="text-[var(--slopes)]" />
+      {/* Content */}
+      <div className={cn("px-4 py-3 select-text", isUser ? "text-sm text-text-primary" : "")}>
+        {isUser ? (
+          <p className="leading-relaxed">{content}</p>
+        ) : (
+          <>
+            <MarkdownRenderer content={content} citations={citations} />
+            <VerificationSummary claims={claims} conflicts={conflicts} />
+            {citations && citations.length > 0 && (
+              <div className="mt-3 space-y-1 border-t border-border pt-2">
+                <p className="label-caps text-text-muted">Sources</p>
+                <div className="flex flex-col gap-1">
+                  {citations.slice(0, 8).map((c, i) => (
+                    <div key={c.evidence_id} className="flex items-start gap-2 font-mono text-[10px]">
+                      <span className="shrink-0 text-accent-bright">[{i + 1}]</span>
+                      {c.source_url ? (
+                        <a
+                          href={c.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="truncate text-text-secondary hover:text-accent-bright"
+                        >
+                          {c.source_name}
+                        </a>
+                      ) : (
+                        <span className="truncate text-text-secondary">{c.source_name}</span>
+                      )}
+                      <span className="shrink-0 text-text-muted">{c.source_type}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {isStreaming && (
+        <div className="flex items-center gap-1 border-t border-accent px-3 py-1">
+          <span className="inline-block h-1 w-1 bg-accent-bright pipeline-active" />
+          <span className="font-mono text-[9px] uppercase tracking-wider text-accent-bright">Transmitting</span>
         </div>
       )}
-    </motion.div>
+    </article>
   );
 }

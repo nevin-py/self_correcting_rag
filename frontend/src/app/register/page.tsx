@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
+import { Input } from "@/components/ui/Input";
+import { Button } from "@/components/ui/Button";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -16,53 +17,83 @@ export default function RegisterPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    if (password !== confirm) { setError("Passwords do not match"); return; }
-    if (password.length < 8) { setError("Password must be at least 8 characters"); return; }
+    if (password !== confirm) {
+      setError("Password mismatch");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Minimum 8 characters required");
+      return;
+    }
     try {
-      await register(email, password);
-      router.push("/chat");
+      const registeredEmail = await register(email, password);
+      router.push(`/verify-email?email=${encodeURIComponent(registeredEmail)}`);
     } catch (err) {
-      const res = err && typeof err === "object" && "response" in err
-        ? (err.response as { data?: { detail?: unknown } })?.data
-        : undefined;
+      const res =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: unknown } })?.data
+          : undefined;
       const detail = res?.detail;
       if (typeof detail === "string") setError(detail);
-      else if (Array.isArray(detail)) setError(detail.map((d) => d && typeof d === "object" && "msg" in d ? String(d.msg) : String(d)).join(". "));
+      else if (Array.isArray(detail))
+        setError(
+          detail
+            .map((d) => (d && typeof d === "object" && "msg" in d ? String(d.msg) : String(d)))
+            .join(". ")
+        );
       else setError("Registration failed");
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-[var(--midnight)]">
-      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-[400px] p-8 rounded-[var(--radius-md)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-        <h1 className="font-display text-2xl text-[var(--arctic)] mb-6 text-center">Create Account</h1>
-        <form onSubmit={handleSubmit} className="space-y-4">
+    <div className="flex min-h-screen items-center justify-center bg-void px-4 grid-bg">
+      <div className="w-full max-w-[420px] border border-border bg-surface">
+        <div className="border-b border-border px-6 py-4">
+          <p className="label-caps">Access Terminal</p>
+          <h1 className="font-display text-xl font-semibold text-text-primary">Initialize Access</h1>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4 p-6">
           <div>
-            <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Email</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/20 focus:border-[var(--glacier)] focus:outline-none text-[var(--slopes)] text-sm transition-colors duration-[var(--duration-micro)]" required />
+            <label className="label-caps mb-1.5 block">Email</label>
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus />
           </div>
           <div>
-            <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Password</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8}
-              className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/20 focus:border-[var(--glacier)] focus:outline-none text-[var(--slopes)] text-sm transition-colors duration-[var(--duration-micro)]" required />
+            <label className="label-caps mb-1.5 block">Password</label>
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              minLength={8}
+              required
+            />
           </div>
           <div>
-            <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Confirm Password</label>
-            <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)}
-              className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--midnight)] border border-[var(--apres-ski)]/20 focus:border-[var(--glacier)] focus:outline-none text-[var(--slopes)] text-sm transition-colors duration-[var(--duration-micro)]" required />
+            <label className="label-caps mb-1.5 block">Confirm Password</label>
+            <Input
+              type="password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              required
+            />
           </div>
-          {error && <p className="text-[var(--error)] text-sm">{error}</p>}
-          <button type="submit" disabled={isLoading}
-            className="w-full py-3 rounded-[var(--radius-pill)] bg-[var(--glacier)] text-[var(--midnight)] font-semibold text-sm hover:opacity-90 transition-opacity disabled:opacity-50">
-            {isLoading ? "Creating account..." : "Create Account"}
-          </button>
+          {error && (
+            <p className="border border-error bg-accent-glow px-3 py-2 font-mono text-xs text-error">{error}</p>
+          )}
+          <Button type="submit" variant="accent" size="lg" disabled={isLoading} className="w-full">
+            {isLoading ? "Creating..." : "Create Access"}
+          </Button>
         </form>
-        <p className="text-center text-sm text-[var(--apres-ski)] mt-6">
-          Already have an account? <a href="/login" className="text-[var(--glacier)] hover:underline">Sign in</a>
-        </p>
-      </motion.div>
+
+        <div className="border-t border-border px-6 py-4 text-center">
+          <p className="text-xs text-text-muted">
+            Existing operator?{" "}
+            <a href="/login" className="font-mono text-accent-bright hover:text-accent">
+              Sign in →
+            </a>
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

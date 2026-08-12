@@ -101,6 +101,28 @@ class ASGICorsMiddleware:
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
+def _validate_production_settings() -> None:
+    """Fail fast on unsafe production configuration."""
+    if settings.ENVIRONMENT != "production":
+        return
+    problems: list[str] = []
+    if not settings.cors_origin_set:
+        problems.append("CORS_ORIGINS must list your frontend origin(s) in production")
+    weak_secrets = {
+        "",
+        "your_secret_key_here",
+        "changeme",
+        "secret",
+        "supersecretkey123",
+    }
+    if settings.SECRET_KEY.strip().lower() in weak_secrets or len(settings.SECRET_KEY.strip()) < 32:
+        problems.append("SECRET_KEY must be a strong value (openssl rand -hex 32)")
+    if problems:
+        raise RuntimeError("Production config invalid: " + "; ".join(problems))
+
+
+_validate_production_settings()
+
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 app = FastAPI(
@@ -113,7 +135,10 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS is the outermost layer — pure ASGI, not Starlette middleware ────────
-origins = _dev_origins if settings.ENVIRONMENT == "development" else set()
+if settings.ENVIRONMENT == "development":
+    origins = _dev_origins | settings.cors_origin_set
+else:
+    origins = settings.cors_origin_set
 app.add_middleware(ASGICorsMiddleware, allowed_origins=origins, allow_credentials=True)
 
 # ── Custom middleware (skip OPTIONS) ────────────────────────────────────────

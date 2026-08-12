@@ -3,10 +3,10 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ariva}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nevin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-self_correcting_rag}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,11 +18,11 @@ services:
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "8899:8080"  # Host port 8899 → container port 8080
+      - "${SEARXNG_HOST_PORT:-8899}:8080"
     volumes:
       - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
     environment:
-      - SEARXNG_SECRET=supersecretkey123
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 10s
@@ -34,14 +34,15 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "${API_HOST_PORT:-8000}:8000"
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://ariva:nevin@db:5432/self_correcting_rag
-      ENVIRONMENT: development
-      # SearXNG is a sibling container — use Docker service name
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ariva}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-self_correcting_rag}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       SEARXNG_URL: http://searxng:8080
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
     depends_on:
       db:
         condition: service_healthy
@@ -49,13 +50,14 @@ services:
         condition: service_healthy
     volumes:
       - chroma_data:/app/data/chroma
-
-  chromadb:
-    image: chromadb/chroma:latest
-    ports:
-      - "8100:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
 
 volumes:
   pgdata:

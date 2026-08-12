@@ -25,6 +25,7 @@ from app.agent.state import (
     SourceType,
 )
 from app.agent.nodes import (
+    classify_and_plan,
     classify_query,
     build_plan,
     retrieve_documents,
@@ -112,27 +113,44 @@ class TestClassification:
 
     @pytest.mark.asyncio
     async def test_classify_query_returns_classification(self):
-        mock_response = QueryClassification(
-            primary_need=QueryNeed.FACTUAL,
-            needs_documents=True,
-            needs_web=False,
-            rewrite="what is the test query",
+        mock_response = PlannerOutput(
+            classification=QueryClassification(
+                primary_need=QueryNeed.FACTUAL,
+                needs_documents=True,
+                needs_web=False,
+                rewrite="what is the test query",
+            ),
+            steps=[PlanStep(action="retrieve_documents", queries=["what is the test query"], rationale="test")],
         )
-        with patch("app.agent.nodes.openrouter_planner_llm", None):
-            with patch("app.agent.nodes.routing_llm") as mock_llm:
-                mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(return_value=mock_response)))
-                result = classify_query(_base_state(query="test query"))
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(return_value=mock_response)))
+        with patch("app.agent.nodes.resolve_llms") as mock_resolve:
+            mock_resolve.return_value = MagicMock(
+                planner=mock_llm, planner_fallbacks=(),
+                generator=mock_llm, generator_fallbacks=(),
+                verifier=mock_llm, verifier_fallbacks=(),
+                label="groq",
+            )
+            result = classify_and_plan(_base_state(query="test query"))
 
         assert result["classification"].primary_need == QueryNeed.FACTUAL
         assert result["classification"].needs_documents is True
+        assert result["plan"].steps
 
     @pytest.mark.asyncio
     async def test_classify_query_fallback_on_failure(self):
-        with patch("app.agent.nodes.routing_llm") as mock_llm:
-            mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(side_effect=ValueError("bad"))))
-            with patch("app.agent.nodes.openrouter_planner_llm", None):
-                result = classify_query(_base_state(query="test query"))
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(side_effect=ValueError("bad"))))
+        with patch("app.agent.nodes.resolve_llms") as mock_resolve:
+            mock_resolve.return_value = MagicMock(
+                planner=mock_llm, planner_fallbacks=(),
+                generator=mock_llm, generator_fallbacks=(),
+                verifier=mock_llm, verifier_fallbacks=(),
+                label="groq",
+            )
+            result = classify_and_plan(_base_state(query="test query"))
         assert result["classification"].rewrite == "test query"
+        assert result["plan"].steps
 
 
 # ── Planner node ─────────────────────────────────────────────────────────────
@@ -148,18 +166,40 @@ class TestPlanner:
                 PlanStep(action="retrieve_documents", queries=["test query"], expected_claims=["answer"], rationale="retrieve"),
             ],
         )
-        with patch("app.agent.nodes.routing_llm") as mock_llm:
-            mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(return_value=mock_response)))
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(return_value=mock_response)))
+        with patch("app.agent.nodes.resolve_llms") as mock_resolve:
+            mock_resolve.return_value = MagicMock(
+                planner=mock_llm, planner_fallbacks=(),
+                generator=mock_llm, generator_fallbacks=(),
+                verifier=mock_llm, verifier_fallbacks=(),
+                label="groq",
+            )
             result = build_plan(_base_state(query="test query", classification=classification))
 
         assert result["plan"].steps[0].action == "retrieve_documents"
 
+    def test_build_plan_skips_when_already_planned(self):
+        classification = QueryClassification(rewrite="q")
+        plan = PlannerOutput(
+            classification=classification,
+            steps=[PlanStep(action="retrieve_documents", queries=["q"], rationale="r")],
+        )
+        result = build_plan(_base_state(query="q", classification=classification, plan=plan))
+        assert result["plan"] is plan
+
     def test_build_plan_fallback_on_failure(self):
         classification = QueryClassification(needs_documents=True, rewrite="test query")
-        with patch("app.agent.nodes.routing_llm") as mock_llm:
-            mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(side_effect=ValueError("bad"))))
-            with patch("app.agent.nodes.openrouter_planner_llm", None):
-                result = build_plan(_base_state(query="test query", classification=classification))
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(return_value=MagicMock(invoke=MagicMock(side_effect=ValueError("bad"))))
+        with patch("app.agent.nodes.resolve_llms") as mock_resolve:
+            mock_resolve.return_value = MagicMock(
+                planner=mock_llm, planner_fallbacks=(),
+                generator=mock_llm, generator_fallbacks=(),
+                verifier=mock_llm, verifier_fallbacks=(),
+                label="groq",
+            )
+            result = build_plan(_base_state(query="test query", classification=classification))
         assert result["plan"].steps[0].action == "retrieve_documents"
 
 
@@ -184,6 +224,7 @@ class TestHallucinationRouter:
         state = _base_state(
             claims=[Claim(text="bad", status=ClaimStatus.UNVERIFIED)],
             regeneration_count=settings.MAX_REGENERATIONS,
+            repair_pass_count=settings.MAX_REPAIR_PASSES,
         )
         assert hallucination_router(state) == "max_attempts"
 
@@ -202,23 +243,60 @@ class TestRepair:
         result = repair_claims(state)
         assert result["repair_state"] == RepairDecision.SATISFACTORY.value
 
-    def test_failed_claim_returns_repair_plan(self):
+    def test_failed_claim_surgical_patches_without_blind_search(self):
+        """Cascade path: reuse evidence and patch; no blind re-search plan."""
+        state = _base_state(
+            claims=[Claim(text="bad claim without support", status=ClaimStatus.UNVERIFIED, repair_action="search_web")],
+            classification=QueryClassification(),
+            answer="bad claim without support",
+            coverage_gaps=[],
+            cite_map={},
+            evidence=[_evidence("supporting text about the topic")],
+        )
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", True), patch(
+            "app.agent.nodes.resolve_llms"
+        ) as mock_llms, patch("app.agent.nodes._invoke_chat", return_value=("Patched sentence [E1].", "primary")):
+            mock_llms.return_value = MagicMock()
+            result = repair_claims(state)
+        assert result["repair_state"] == RepairDecision.SATISFACTORY.value
+        assert result["final_status"] in ("partial", "answered")
+        assert result.get("repair_pass_count", 0) >= 1
+
+    def test_coverage_gap_schedules_one_search(self):
+        state = _base_state(
+            claims=[Claim(text="bad", status=ClaimStatus.UNVERIFIED)],
+            classification=QueryClassification(),
+            answer="bad",
+            coverage_gaps=["missing high-score evidence for: Maharashtra"],
+            search_count=0,
+            max_searches=2,
+        )
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", True):
+            result = repair_claims(state)
+        assert result["repair_state"] == RepairDecision.REPAIR.value
+        assert result["plan"].steps[0].action == "search_web"
+        assert result.get("repair_mode") == "surgical"
+
+    def test_max_repair_passes_returns_max_attempts(self):
+        state = _base_state(
+            claims=[Claim(text="bad", status=ClaimStatus.UNVERIFIED)],
+            repair_pass_count=settings.MAX_REPAIR_PASSES,
+            classification=QueryClassification(),
+            answer="bad",
+        )
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", True):
+            result = repair_claims(state)
+        assert result["repair_state"] == RepairDecision.MAX_ATTEMPTS.value
+
+    def test_legacy_failed_claim_returns_repair_plan(self):
         state = _base_state(
             claims=[Claim(text="bad", status=ClaimStatus.UNVERIFIED, repair_action="search_web")],
             classification=QueryClassification(),
         )
-        result = repair_claims(state)
+        with patch("app.agent.nodes.settings.USE_VERIFY_CASCADE", False):
+            result = repair_claims(state)
         assert result["repair_state"] == RepairDecision.REPAIR.value
         assert result["plan"].steps[0].action == "search_web"
-
-    def test_max_regenerations_returns_max_attempts(self):
-        state = _base_state(
-            claims=[Claim(text="bad", status=ClaimStatus.UNVERIFIED)],
-            regeneration_count=settings.MAX_REGENERATIONS,
-            classification=QueryClassification(),
-        )
-        result = repair_claims(state)
-        assert result["repair_state"] == RepairDecision.MAX_ATTEMPTS.value
 
 
 # ── Deterministic contradiction detection ────────────────────────────────────
@@ -271,6 +349,12 @@ class TestEvidenceAssembly:
         # Higher authority source should rank first
         assert result["evidence"][0].source_name == "Reuters"
 
+    def test_document_source_name_from_filename_metadata(self):
+        from app.agent.nodes import _chunks_to_evidence
+        chunks = [{"text": "A factual paragraph about output.", "score": 0.8, "metadata": {"source": "survey.pdf"}}]
+        evs = _chunks_to_evidence(chunks, SourceType.DOCUMENT)
+        assert evs[0].source_name == "survey.pdf"
+
 
 # ── Graph compilation ────────────────────────────────────────────────────────
 
@@ -285,8 +369,7 @@ class TestGraphCompilation:
         from app.agent.graph import rag_app
         node_names = set(rag_app.get_graph().nodes.keys())
         expected = {
-            "classify_query",
-            "build_plan",
+            "classify_and_plan",
             "retrieve_documents",
             "search_web",
             "assemble_evidence",

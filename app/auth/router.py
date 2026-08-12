@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 import jwt
 import uuid as _uuid
@@ -8,9 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
-from app.core.security import hash_password, verify_password, create_token_access
+from app.core.security import hash_password, verify_password
 from app.auth.models import User
-from app.auth.schemas import UserCreate, UserResponse, Token
+from app.auth.otp import create_and_send_otp, verify_otp, resend_allowed
+from app.auth.tokens import issue_token_pair, rotate_refresh_token, revoke_refresh_token
+from app.auth.schemas import (
+    UserCreate,
+    Token,
+    RefreshRequest,
+    VerifyEmailRequest,
+    ResendOtpRequest,
+    MessageResponse,
+    ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    RegisterPendingResponse,
+)
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -19,48 +33,16 @@ router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
-# ── Helpers (plain async functions — receive db as a regular parameter) ──────
-
 async def user_exist(email: str, db: AsyncSession):
-    """Check if a user with this email already exists."""
-    result = await db.execute(
-        select(User).where(User.email == email)
-    )
+    result = await db.execute(select(User).where(User.email == email))
     return result.scalar_one_or_none()
 
-
-async def passwrd_check(email: str, passwrd: str, db: AsyncSession):
-    """Validate credentials and return a JWT. Raises HTTPException on failure."""
-    user = await user_exist(email, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not verify_password(passwrd, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_token_access({'sub': str(user.user_id)})
-    return token
-
-
-async def create_user(user: UserCreate, db: AsyncSession):
-    """Insert a new user row and return it."""
-    hashed = hash_password(user.password)
-    db_user = User(
-        email=user.email,
-        hashed_password=hashed,
-    )
-    db.add(db_user)
-    await db.commit()
-    await db.refresh(db_user)
-    return db_user
-
-
-# ── Dependency ────────────────────────────────────────────────────────────────
 
 async def get_current_user(
     *,
     token_str: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
-    """Decode the JWT, look up the user, and return the User row."""
     try:
         decoded = jwt.decode(
             token_str,
@@ -76,29 +58,121 @@ async def get_current_user(
     except (ValueError, AttributeError):
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
-    result = await db.execute(
-        select(User).where(User.user_id == user_uuid)
-    )
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
     res = result.scalar_one_or_none()
     if res is None:
         raise HTTPException(status_code=401, detail="User not found")
     if not res.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
+    if not res.email_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
     return res
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@router.post("/register", response_model=UserResponse, status_code=201)
+@router.post("/register", response_model=RegisterPendingResponse, status_code=201)
 async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
+    """Create an unverified user and send email OTP. No JWT until verified."""
     logger.info("Registration attempt for email=%s", user.email)
     exists = await user_exist(user.email, db)
     if exists:
-        logger.warning("Registration rejected — email already exists: %s", user.email)
-        raise HTTPException(status_code=400, detail="Email already exists")
-    created = await create_user(user, db)
-    logger.info("Registration successful: user_id=%s email=%s", created.user_id, created.email)
-    return created
+        if exists.email_verified:
+            raise HTTPException(status_code=400, detail="Email already exists")
+        # Allow re-registering unverified account: reset password + resend OTP
+        exists.hashed_password = hash_password(user.password)
+        await db.commit()
+        target = exists
+    else:
+        target = User(
+            email=user.email,
+            hashed_password=hash_password(user.password),
+            email_verified=False,
+        )
+        db.add(target)
+        await db.commit()
+        await db.refresh(target)
+
+    try:
+        await create_and_send_otp(
+            db,
+            target,
+            "verify_email",
+            subject="Verify your email",
+            body_template=(
+                "Your verification code is {code}.\n"
+                "It expires in {minutes} minutes.\n"
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to send verification email to %s", user.email)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not send verification email. Check SMTP settings or try again.",
+        )
+
+    logger.info("Registration pending verification: user_id=%s", target.user_id)
+    return RegisterPendingResponse(
+        detail="Verification code sent. Check your email.",
+        email=target.email,
+        email_verified=False,
+    )
+
+
+@router.post("/verify-email", response_model=Token)
+async def verify_email(body: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    user = await user_exist(body.email, db)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.email_verified:
+        return await issue_token_pair(db, user)
+
+    try:
+        await verify_otp(db, user, "verify_email", body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    user.email_verified = True
+    user.email_verified_at = datetime.now(UTC).replace(tzinfo=None)
+    await db.commit()
+
+    logger.info("Email verified for user_id=%s", user.user_id)
+    return await issue_token_pair(db, user)
+
+@router.post("/resend-otp", response_model=MessageResponse)
+async def resend_otp(body: ResendOtpRequest, db: AsyncSession = Depends(get_db)):
+    user = await user_exist(body.email, db)
+    # Always return generic success to avoid email enumeration
+    if not user:
+        return MessageResponse(detail="If that email exists, a code was sent.")
+
+    if body.purpose == "verify_email" and user.email_verified:
+        return MessageResponse(detail="Email is already verified.")
+
+    if not await resend_allowed(db, user, body.purpose):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Wait {settings.OTP_RESEND_COOLDOWN_SECONDS}s before resending.",
+        )
+
+    subject = (
+        "Verify your email"
+        if body.purpose == "verify_email"
+        else "Reset your password"
+    )
+    try:
+        await create_and_send_otp(
+            db,
+            user,
+            body.purpose,
+            subject=subject,
+            body_template=(
+                "Your code is {code}.\nIt expires in {minutes} minutes.\n"
+            ),
+        )
+    except Exception:
+        logger.exception("Resend OTP failed for %s", body.email)
+        raise HTTPException(status_code=503, detail="Could not send email.")
+
+    return MessageResponse(detail="If that email exists, a code was sent.")
 
 
 @router.post("/login", response_model=Token)
@@ -107,16 +181,87 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     logger.info("Login attempt for email=%s", form_data.username)
-    token = await passwrd_check(form_data.username, form_data.password, db)
+    user = await user_exist(form_data.username, db)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. Check your inbox or resend the code.",
+        )
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
     logger.info("Login successful for email=%s", form_data.username)
-    return {"access_token": token, "token_type": "bearer"}
+    return await issue_token_pair(db, user)
+
+
+@router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    body: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not verify_password(body.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    current_user.hashed_password = hash_password(body.new_password)
+    await db.commit()
+    return MessageResponse(detail="Password updated.")
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    user = await user_exist(body.email, db)
+    if user and user.email_verified:
+        if not await resend_allowed(db, user, "reset_password"):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Wait {settings.OTP_RESEND_COOLDOWN_SECONDS}s before resending.",
+            )
+        try:
+            await create_and_send_otp(
+                db,
+                user,
+                "reset_password",
+                subject="Reset your password",
+                body_template=(
+                    "Your password reset code is {code}.\n"
+                    "It expires in {minutes} minutes.\n"
+                ),
+            )
+        except Exception:
+            logger.exception("Forgot-password email failed for %s", body.email)
+    return MessageResponse(detail="If that email exists, a reset code was sent.")
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    user = await user_exist(body.email, db)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid code or email")
+    try:
+        await verify_otp(db, user, "reset_password", body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    user.hashed_password = hash_password(body.new_password)
+    if not user.email_verified:
+        user.email_verified = True
+        user.email_verified_at = datetime.now(UTC).replace(tzinfo=None)
+    await db.commit()
+    return MessageResponse(detail="Password reset. You can log in now.")
 
 
 @router.post("/refresh", response_model=Token)
-async def refresh_token(
-    current_user: User = Depends(get_current_user),
-):
-    """Issue a fresh access token using the current valid token."""
-    new_token = create_token_access({"sub": str(current_user.user_id)})
-    logger.info("Token refreshed for user_id=%s", current_user.user_id)
-    return {"access_token": new_token, "token_type": "bearer"}
+async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    """Rotate refresh token and issue a new access token."""
+    try:
+        return await rotate_refresh_token(db, body.refresh_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/logout", response_model=MessageResponse)
+async def logout(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    await revoke_refresh_token(db, body.refresh_token)
+    return MessageResponse(detail="Logged out.")

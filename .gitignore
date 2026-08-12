@@ -72,8 +72,8 @@ graph.png
 *.log
 logs/
 
-# Alembic (generated migrations will be tracked, but local env overrides won't)
-alembic.ini
+# Alembic (keep alembic.ini in repo so Docker builds work; local overrides via env)
+# alembic.ini
 
 # ==============================================================================
 # Docker
@@ -83,7 +83,4 @@ docker-compose.override.yml
 # ==============================================================================
 # Misc
 # ==============================================================================
-*.tmp
-*.bak
-*.orig
-test.txt
+backups/

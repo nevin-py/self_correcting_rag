@@ -1,69 +1,165 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+/* ── ARCHIVE TERMINAL DESIGN TOKENS ───────────────────────────────────────── */
 :root {
-  --midnight: #090F15;
-  --mountainside: #262E36;
-  --apres-ski: #6C6D74;
-  --slopes: #B3B7BA;
-  --arctic: #D3D1CE;
-  --glacier: #8FD6DE;
+  --void: #0a0a0a;
+  --surface: #0f0f0f;
+  --surface-raised: #141414;
+  --surface-inset: #080808;
+  --border: #2a2a2a;
+  --border-strong: #3d3d3d;
+  --text-primary: #e8e4dc;
+  --text-secondary: #9a9590;
+  --text-muted: #5c5854;
+  --accent: #8b3a2b;
+  --accent-bright: #c45c2c;
+  --accent-dim: #5c2419;
+  --accent-glow: rgba(139, 58, 43, 0.15);
+  --success: #4a6b4a;
+  --warning: #8b6914;
+  --error: #8b3a2b;
 
-  --error: #E85D5D;
-  --error-bg: #3D1A1A;
+  --font-display: var(--font-display-loaded, "Space Grotesk", sans-serif);
+  --font-body: var(--font-body-loaded, "Space Grotesk", sans-serif);
+  --font-mono: var(--font-mono-loaded, "IBM Plex Mono", monospace);
 
-  --font-display: "Fraunces", serif;
-  --font-body: "Inter", sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --sidebar-width: 240px;
+  --sidebar-collapsed: 56px;
+  --panel-width: 340px;
+  --header-height: 48px;
 
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-pill: 999px;
-
-  --duration-micro: 120ms;
-  --duration-standard: 240ms;
-  --duration-slow: 600ms;
-
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 80ms;
+  --duration-normal: 160ms;
 }
 
 @theme inline {
-  --color-midnight: var(--midnight);
-  --color-mountainside: var(--mountainside);
-  --color-apres-ski: var(--apres-ski);
-  --color-slopes: var(--slopes);
-  --color-arctic: var(--arctic);
-  --color-glacier: var(--glacier);
+  --color-void: var(--void);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-inset: var(--surface-inset);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-bright: var(--accent-bright);
+  --color-accent-dim: var(--accent-dim);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-error: var(--error);
-  --color-error-bg: var(--error-bg);
 
   --font-display: var(--font-display);
   --font-body: var(--font-body);
   --font-mono: var(--font-mono);
 }
 
-body {
-  background: var(--midnight);
-  color: var(--slopes);
-  font-family: var(--font-body);
-  -webkit-font-smoothing: antialiased;
+/* ── BASE ─────────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  border-radius: 0;
 }
 
-/* ── Focus rings ───────────────────────────────────────────────────────────── */
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--text-primary);
+}
+
 :focus-visible {
-  outline: 2px solid var(--glacier);
+  outline: 1px solid var(--accent-bright);
   outline-offset: 2px;
 }
 
-/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--apres-ski); border-radius: 3px; }
+/* ── GRID / RULER MOTIFS ──────────────────────────────────────────────────── */
+.grid-bg {
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: -1px -1px;
+}
 
-/* ── Reduced motion ────────────────────────────────────────────────────────── */
+.ruler-x {
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent,
+    transparent 23px,
+    var(--border) 23px,
+    var(--border) 24px
+  );
+}
+
+.archival-frame {
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* ── SCROLLBAR ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--void);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ── TYPOGRAPHY UTILITIES ─────────────────────────────────────────────────── */
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+.label-caps {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── PIPELINE ANIMATION ───────────────────────────────────────────────────── */
+@keyframes pulse-accent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes scan-line {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+.pipeline-active {
+  animation: pulse-accent 1.2s ease-in-out infinite;
+}
+
+/* ── REDUCED MOTION ────────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }

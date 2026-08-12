@@ -158,8 +158,13 @@ async def hybrid_search_chunks(
     query_tokens = _tokenize_for_bm25(query)
     bm25_scores = bm25.get_scores(query_tokens)
     
-    # Normalize BM25 scores
-    max_bm25 = max(bm25_scores) if bm25_scores and max(bm25_scores) > 0 else 1.0
+    # Normalize BM25 scores (bm25_scores is a numpy array — never truth-test it)
+    if getattr(bm25_scores, "size", len(bm25_scores)) == 0:
+        max_bm25 = 1.0
+    else:
+        max_bm25 = float(max(bm25_scores))
+        if max_bm25 <= 0:
+            max_bm25 = 1.0
     
     # 3. Fuse scores
     hybrid_results = []
@@ -168,7 +173,7 @@ async def hybrid_search_chunks(
         vec_sim = 1.0 - min(1.0, max(0.0, float(doc.get("distance", 0.5))))
         
         # Normalize BM25 score
-        bm25_norm = bm25_scores[i] / max_bm25 if max_bm25 > 0 else 0.0
+        bm25_norm = float(bm25_scores[i]) / max_bm25
         
         # Hybrid score (weighted combination)
         hybrid_score = alpha * vec_sim + (1 - alpha) * bm25_norm
@@ -209,11 +214,11 @@ async def _add_parent_context(chunks: list[dict], collection) -> list[dict]:
     if not parent_ids_to_fetch:
         return chunks
     
-    # Fetch parent chunks
+    # Fetch parent chunks by their document IDs (stored on children as parent_id)
     try:
         parent_results = collection.get(
-            where={"parent_id": {"$in": list(parent_ids_to_fetch)}},
-            include=["documents", "metadatas", "ids"]
+            ids=list(parent_ids_to_fetch),
+            include=["documents", "metadatas"],
         )
     except Exception as e:
         logger.warning(f"Failed to fetch parent context: {e}")
@@ -224,8 +229,8 @@ async def _add_parent_context(chunks: list[dict], collection) -> list[dict]:
     if parent_results.get("ids"):
         for i, pid in enumerate(parent_results["ids"]):
             parent_map[pid] = {
-                "text": parent_results["documents"][i] if parent_results["documents"] else "",
-                "metadata": parent_results["metadatas"][i] if parent_results["metadatas"] else {},
+                "text": parent_results["documents"][i] if parent_results.get("documents") else "",
+                "metadata": parent_results["metadatas"][i] if parent_results.get("metadatas") else {},
             }
     
     # Add parent context to each chunk
@@ -365,6 +370,8 @@ def ingestion_pipeline(file_contents: bytes, filename: str):
 
     base_metadata = {
         "source": filename,
+        "filename": filename,
+        "source_name": filename,
         "file_type": extension,
         "file_size_kb": round(len(file_contents) / 1024),
     }

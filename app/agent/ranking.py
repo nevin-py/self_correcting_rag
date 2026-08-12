@@ -13,7 +13,7 @@ import math
 
 from app.agent.normalization import (
     geographic_match as _geo_match,
-    metric_search_term,
+    normalize_geography,
     parse_year,
 )
 from app.agent.state import (
@@ -105,7 +105,54 @@ def combined_score(ev: Evidence, classification: QueryClassification | None = No
     if metric < 0.5:
         base *= 0.7
 
-    return max(0.0, min(1.0, base))
+    return max(0.0, min(1.0, float(base)))
+
+
+def evidence_fits_classification(
+    ev: Evidence,
+    classification: QueryClassification | None,
+) -> bool:
+    """Keep/drop using classified geo/metric only. Unknown constraints never drop.
+
+    Geography: when the query names a place, the evidence geography field or body
+    must match that phrase (generic containment via geographic_match / substring).
+    Metric: drop only when both sides have a known, conflicting metric type.
+    """
+    if classification is None:
+        return True
+
+    query_geo = (classification.geography or "").strip()
+    if query_geo:
+        geo_field = _geo_match(query_geo, ev.geography or "")
+        body = f"{ev.text or ''} {ev.source_name or ''}"
+        in_body = normalize_geography(query_geo) in normalize_geography(body)
+        # Soft-neutral (empty evidence geo) is 0.8 — that is not a match.
+        field_hit = bool(ev.geography) and geo_field >= 0.5
+        if not field_hit and not in_body:
+            return False
+
+    query_metric = classification.metric_hint if classification else MetricType.UNKNOWN
+    if query_metric not in (MetricType.UNKNOWN, MetricType.OTHER, None):
+        ev_metric = ev.metric_type
+        if ev_metric not in (MetricType.UNKNOWN, MetricType.OTHER) and metric_match(query_metric, ev_metric) < 0.5:
+            return False
+
+    return True
+
+
+def filter_evidence_by_classification(
+    evidence: list[Evidence],
+    classification: QueryClassification | None,
+) -> list[Evidence]:
+    """Exclude misfit items when geography/metric are classified.
+
+    If the filter would drop everything, return the original list so we never
+    assemble an empty context from an over-strict drop.
+    """
+    if not evidence or classification is None:
+        return evidence
+    kept = [ev for ev in evidence if evidence_fits_classification(ev, classification)]
+    return kept if kept else evidence
 
 
 def rank_evidence(

@@ -3,6 +3,7 @@ import json
 import time
 import uuid as _uuid
 import logging
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db, get_session_factory
+from app.core.config import settings
 from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats, Agent_interact
@@ -67,7 +69,7 @@ _query_limiter = Limiter(key_func=_user_key_func)
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_initial_state(query: str, user_id: _uuid.UUID, chat_id: _uuid.UUID, provider: str = "auto", history: list = None, prior_evidence_summary: str = "", prior_evidence_state: EvidenceState | None = None) -> dict:
+def _build_initial_state(query: str, user_id: _uuid.UUID, chat_id: _uuid.UUID, provider: str = "auto", history: list = None, prior_evidence_summary: str = "", prior_evidence_state: EvidenceState | None = None, user_credentials: dict | None = None) -> dict:
     """Build the initial LangGraph state dict for a new query."""
     from app.core.config import settings
 
@@ -80,6 +82,7 @@ def _build_initial_state(query: str, user_id: _uuid.UUID, chat_id: _uuid.UUID, p
         "chat_id": chat_id,
         "query": effective_query,
         "provider": provider,
+        "user_credentials": user_credentials or {},
         "messages": history or [],
         "chunks": [],
         "search": [],
@@ -132,11 +135,45 @@ async def create_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new chat session."""
+    """Create a new chat session (rate-limited)."""
+    from datetime import UTC, datetime, timedelta
+    from sqlalchemy import func
+    from app.core.usage import record_usage, count_events_since
+
+    total = await db.execute(
+        select(func.count()).select_from(Chats).where(Chats.user_id == current_user.user_id)
+    )
+    if int(total.scalar_one() or 0) >= settings.MAX_CHATS_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Chat limit reached ({settings.MAX_CHATS_PER_USER} total).",
+        )
+
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+    # Prefer UsageEvent; also count recent Chats.created_at as a safety net
+    creates = await count_events_since(db, current_user.user_id, "chat_create", since)
+    if creates >= settings.MAX_CHAT_CREATES_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
+        )
+    recent_chats = await db.execute(
+        select(func.count()).select_from(Chats).where(
+            Chats.user_id == current_user.user_id,
+            Chats.created_at >= since,
+        )
+    )
+    if int(recent_chats.scalar_one() or 0) >= settings.MAX_CHAT_CREATES_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
+        )
+
     chat = Chats(user_id=current_user.user_id, title=body.title)
     db.add(chat)
     await db.commit()
     await db.refresh(chat)
+    await record_usage(db, current_user.user_id, "chat_create")
     logger.info("Chat created: chat_id=%s user_id=%s title=%s", chat.chat_id, current_user.user_id, body.title)
     return chat
 
@@ -376,10 +413,19 @@ async def query_agent(request: Request,
     # ── Step 1: Ownership check + load history + prior evidence (short-lived session) ────
     history = []
     prior_evidence_state: EvidenceState | None = None
+    user_credentials: dict = {}
     async with session_factory() as verify_session:
+        from app.core.usage import enforce_query_rate, record_usage
+        from app.settings.router import load_user_provider_credentials
+
+        await enforce_query_rate(verify_session, current_user.user_id)
         await _verify_chat_ownership(verify_session, chat_id, current_user.user_id)
         history = await _load_history(verify_session, chat_id)
         prior_evidence_state = await _load_prior_evidence_state(verify_session, chat_id)
+        user_credentials = await load_user_provider_credentials(
+            verify_session, current_user.user_id
+        )
+        await record_usage(verify_session, current_user.user_id, "query")
     turn = (prior_evidence_state.turn + 1) if prior_evidence_state else 1
     logger.info("Query started: chat_id=%s user_id=%s history=%d msgs prior_state=%s turn=%d message=%s...",
                 chat_id, current_user.user_id, len(history),
@@ -393,11 +439,32 @@ async def query_agent(request: Request,
         history=history,
         provider=body.provider,
         prior_evidence_state=prior_evidence_state,
+        user_credentials=user_credentials,
     )
 
     start_time = time.perf_counter()
     try:
-        final_state = await rag_app.ainvoke(initial_state)
+        if settings.QUERY_TIMEOUT_SECONDS and settings.QUERY_TIMEOUT_SECONDS > 0:
+            final_state = await asyncio.wait_for(
+                rag_app.ainvoke(initial_state),
+                timeout=settings.QUERY_TIMEOUT_SECONDS,
+            )
+        else:
+            final_state = await rag_app.ainvoke(initial_state)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Query timeout for chat %s after %ds (user: %s)",
+            chat_id,
+            settings.QUERY_TIMEOUT_SECONDS,
+            current_user.user_id,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Your request timed out after {settings.QUERY_TIMEOUT_SECONDS} seconds. "
+                "Please try a simpler question."
+            ),
+        )
     except Exception as e:
         logger.exception("RAG graph failed for chat %s", chat_id)
         raise HTTPException(
@@ -431,7 +498,7 @@ async def query_agent(request: Request,
 
     evidence = final_state.get("evidence", [])
     claims = final_state.get("claims", [])
-    verification_errors = [e.to_dict() for e in final_state.get("verification_errors", [])]
+    verification_errors = _normalize_verification_errors(final_state.get("verification_errors", []))
     citations = [
         CitationResponse(
             evidence_id=ev.evidence_id,
@@ -483,6 +550,7 @@ async def query_agent(request: Request,
 # ──────────────────────────────────────────────────────────────────────────────
 
 NODE_LABELS = {
+    "classify_and_plan": "Understanding & planning",
     "classify_query": "Understanding your question",
     "build_plan": "Planning search strategy",
     "retrieve_documents": "Retrieving documents",
@@ -495,22 +563,26 @@ NODE_LABELS = {
 }
 
 
+def _normalize_verification_errors(errors) -> list[dict]:
+    """Accept VerificationError objects or already-serialized dicts."""
+    out: list[dict] = []
+    for e in errors or []:
+        if hasattr(e, "to_dict"):
+            out.append(e.to_dict())
+        elif isinstance(e, dict):
+            out.append(e)
+    return out
+
+
 async def _stream_query(
-    chat_id: _uuid.UUID, user_id: _uuid.UUID, message: str, session_factory, provider: str = "auto"
+    chat_id: _uuid.UUID,
+    user_id: _uuid.UUID,
+    message: str,
+    session_factory,
+    provider: str = "auto",
+    user_credentials: dict | None = None,
 ):
     """SSE generator that yields node-level status events during graph execution."""
-    NODE_LABELS = {
-        "classify_query": "Understanding your question",
-        "build_plan": "Planning search strategy",
-        "retrieve_documents": "Retrieving documents",
-        "search_web": "Searching the web",
-        "assemble_evidence": "Assembling evidence",
-        "extract_verify_claims": "Extracting claims",
-        "generate_answer": "Generating answer",
-        "verify_answer_claims": "Verifying facts",
-        "repair_claims": "Repairing answer",
-    }
-
     start_time = time.perf_counter()
     # Load prior cross-turn evidence state (short-lived session).
     prior_state: EvidenceState | None = None
@@ -518,62 +590,101 @@ async def _stream_query(
         await _verify_chat_ownership(_vs, chat_id, user_id)
         prior_state = await _load_prior_evidence_state(_vs, chat_id)
     turn = (prior_state.turn + 1) if prior_state else 1
-    initial_state = _build_initial_state(query=message, user_id=user_id, chat_id=chat_id, provider=provider, prior_evidence_state=prior_state)
+    initial_state = _build_initial_state(
+        query=message,
+        user_id=user_id,
+        chat_id=chat_id,
+        provider=provider,
+        prior_evidence_state=prior_state,
+        user_credentials=user_credentials or {},
+    )
     answer = ""
     accumulated_state: dict = {**initial_state}
     trajectory_nodes = []
 
     try:
         # Use stream_mode="updates" which gives {node_name: output} per node
-        async for event in rag_app.astream(initial_state, stream_mode="updates"):
-            for node_name, node_output in event.items():
-                if node_name in ("__start__", "__end__"):
-                    continue
+        async def _run_stream():
+            nonlocal answer, accumulated_state, trajectory_nodes
+            async for event in rag_app.astream(initial_state, stream_mode="updates"):
+                for node_name, node_output in event.items():
+                    if node_name in ("__start__", "__end__"):
+                        continue
 
-                # Track trajectory
-                if node_name not in trajectory_nodes:
-                    trajectory_nodes.append(node_name)
+                    # Track trajectory
+                    if node_name not in trajectory_nodes:
+                        trajectory_nodes.append(node_name)
 
-                # Build rich status details based on node
-                detail = ""
-                if node_name == "build_plan" and isinstance(node_output, dict):
-                    plan = node_output.get("plan")
-                    if plan:
-                        actions = ", ".join({s.action for s in plan.steps})
-                        detail = f"Planned actions: {actions}"
-                elif node_name == "search_web" and isinstance(node_output, dict):
-                    search_count = len(node_output.get("search", []))
-                    detail = f"Found {search_count} web results"
-                elif node_name == "retrieve_documents" and isinstance(node_output, dict):
-                    chunk_count = len(node_output.get("chunks", []))
-                    detail = f"Found {chunk_count} document matches"
-                elif node_name == "assemble_evidence" and isinstance(node_output, dict):
-                    conflict_count = len(node_output.get("conflicts", []))
-                    detail = f"Detected {conflict_count} evidence conflicts"
-                elif node_name == "verify_answer_claims" and isinstance(node_output, dict):
-                    claims = node_output.get("claims", [])
-                    failed = [c for c in claims if c.status.value in ("unverified", "contradicted", "uncertain")]
-                    detail = f"Claims: {len(claims)} total, {len(failed)} need repair"
+                    # Build rich status details based on node
+                    detail = ""
+                    if node_name == "classify_and_plan" and isinstance(node_output, dict):
+                        plan = node_output.get("plan")
+                        if plan:
+                            actions = ", ".join({s.action for s in plan.steps})
+                            detail = f"Planned actions: {actions}"
+                    elif node_name == "build_plan" and isinstance(node_output, dict):
+                        plan = node_output.get("plan")
+                        if plan:
+                            actions = ", ".join({s.action for s in plan.steps})
+                            detail = f"Planned actions: {actions}"
+                    elif node_name == "search_web" and isinstance(node_output, dict):
+                        search_count = len(node_output.get("search", []))
+                        detail = f"Found {search_count} web results"
+                    elif node_name == "retrieve_documents" and isinstance(node_output, dict):
+                        chunk_count = len(node_output.get("chunks", []))
+                        detail = f"Found {chunk_count} document matches"
+                    elif node_name == "assemble_evidence" and isinstance(node_output, dict):
+                        conflict_count = len(node_output.get("conflicts", []))
+                        detail = f"Detected {conflict_count} evidence conflicts"
+                    elif node_name == "verify_answer_claims" and isinstance(node_output, dict):
+                        claims = node_output.get("claims", [])
+                        failed = [
+                            c for c in claims
+                            if getattr(getattr(c, "status", None), "value", c.status if isinstance(c.status, str) else "")
+                            in ("unverified", "contradicted", "uncertain")
+                        ]
+                        detail = f"Claims: {len(claims)} total, {len(failed)} need repair"
 
-                # Send status update
-                label = NODE_LABELS.get(node_name, node_name)
-                yield f"event: status\ndata: {json.dumps({'node': node_name, 'label': label, 'detail': detail, 'status': 'running'})}\n\n"
+                    # Send status update
+                    label = NODE_LABELS.get(node_name, node_name)
+                    yield f"event: status\ndata: {json.dumps({'node': node_name, 'label': label, 'detail': detail, 'status': 'running'})}\n\n"
 
-                # If answer generation completed, stream the answer tokens
-                if node_name == "generate_answer" and isinstance(node_output, dict):
-                    new_answer = node_output.get("answer", "")
-                    if new_answer and new_answer != answer:
-                        answer = new_answer
-                        chunk_size = 100
-                        for i in range(0, len(answer), chunk_size):
-                            yield f"event: token\ndata: {json.dumps({'content': answer[i:i+chunk_size]})}\n\n"
+                    # If answer generation completed, stream the answer tokens
+                    if node_name == "generate_answer" and isinstance(node_output, dict):
+                        new_answer = node_output.get("answer", "")
+                        if new_answer and new_answer != answer:
+                            answer = new_answer
+                            chunk_size = 100
+                            for i in range(0, len(answer), chunk_size):
+                                yield f"event: token\ndata: {json.dumps({'content': answer[i:i+chunk_size]})}\n\n"
 
-                # Accumulate node outputs so we can build the provenance payload without re-running the graph.
-                if isinstance(node_output, dict):
-                    accumulated_state.update(node_output)
+                    # Accumulate node outputs so we can build the provenance payload without re-running the graph.
+                    if isinstance(node_output, dict):
+                        accumulated_state.update(node_output)
+
+                    # Push evidence to the UI as soon as it exists (don't wait for verify/done).
+                    if node_name in ("assemble_evidence", "generate_answer") and isinstance(node_output, dict):
+                        ev = accumulated_state.get("evidence") or []
+                        if ev:
+                            yield (
+                                "event: provenance\ndata: "
+                                + json.dumps({"citations": _citations_payload(ev), "conflicts": accumulated_state.get("conflicts", [])})
+                                + "\n\n"
+                            )
+
+        # Overall query timeout (0 / unset = disabled for slow OpenRouter / networks)
+        deadline = None
+        if settings.QUERY_TIMEOUT_SECONDS and settings.QUERY_TIMEOUT_SECONDS > 0:
+            deadline = start_time + settings.QUERY_TIMEOUT_SECONDS
+        async for chunk in _run_stream():
+            if deadline is not None and time.perf_counter() > deadline:
+                raise asyncio.TimeoutError()
+            yield chunk
 
         final_state = accumulated_state
         answer = answer or final_state.get("answer", "") or ""
+        if not answer.strip():
+            answer = "I was unable to generate an answer. Please try rephrasing your question."
 
         elapsed = time.perf_counter() - start_time
         trajectory = " → ".join(trajectory_nodes) if trajectory_nodes else "unknown"
@@ -581,60 +692,105 @@ async def _stream_query(
         # Persist the structured cross-turn evidence state for the next turn.
         merged_state = _finalize_evidence_state(final_state, prior_state, turn)
         trajectory = trajectory + "\n" + serialize_for_storage(merged_state)
-        verification_errors = [e.to_dict() for e in final_state.get("verification_errors", [])]
+        verification_errors = _normalize_verification_errors(final_state.get("verification_errors", []))
 
         # Build structured provenance payload from accumulated node outputs.
         evidence = final_state.get("evidence", []) if isinstance(final_state, dict) else []
         claims = final_state.get("claims", []) if isinstance(final_state, dict) else []
         conflicts = final_state.get("conflicts", []) if isinstance(final_state, dict) else []
-        citations = [
-            {
-                "evidence_id": ev.evidence_id,
-                "text": ev.text[:500],
-                "source_type": ev.source_type.value,
-                "source_name": ev.source_name,
-                "source_url": ev.source_url,
-                "source_date": ev.source_date.isoformat() if ev.source_date else None,
-                "authority_score": ev.authority_score,
-                "recency_score": ev.recency_score,
-            }
-            for ev in evidence[:10]
-        ]
-        claim_responses = [
-            {
-                "claim_id": c.claim_id,
-                "text": c.text,
-                "status": c.status.value,
-                "evidence_ids": c.evidence_ids,
-                "contradicting_evidence_ids": c.contradicting_evidence_ids,
-                "reasoning": c.reasoning,
-            }
-            for c in claims
-        ]
+        citations = _citations_payload(evidence)
+        claim_payload = _claims_payload(claims)
 
-        # Log interaction
+        # Persist interaction
         async with session_factory() as log_session:
             await _log_interaction(
-                db=log_session, chat_id=chat_id, user_input=message,
-                agent_output=answer, routing_path=trajectory, latency=elapsed,
+                db=log_session,
+                chat_id=chat_id,
+                user_input=message,
+                agent_output=answer,
+                routing_path=trajectory,
+                latency=elapsed,
             )
             await _store_messages(log_session, chat_id, message, answer)
 
-        yield f"event: done\ndata: {json.dumps({
-            'answer': answer,
-            'final_status': final_state.get('final_status', 'answered') if isinstance(final_state, dict) else 'answered',
-            'latency_ms': round(elapsed * 1000, 2),
-            'trajectory': trajectory,
-            'provider': provider,
-            'citations': citations,
-            'claims': claim_responses,
-            'conflicts': conflicts,
-            'verification_errors': verification_errors,
-        }, default=str)}\n\n"
-
+        yield (
+            "event: done\ndata: "
+            + json.dumps(
+                {
+                    "answer": answer,
+                    "chat_id": str(chat_id),
+                    "latency_ms": round(elapsed * 1000, 2),
+                    "provider_used": final_state.get("provider_used"),
+                    "final_status": final_state.get("final_status"),
+                    "claims": claim_payload,
+                    "citations": citations,
+                    "conflicts": conflicts,
+                    "verification_errors": verification_errors,
+                    "trajectory": trajectory,
+                }
+            )
+            + "\n\n"
+        )
     except Exception as e:
-        logger.exception("Streaming query failed for chat %s", chat_id)
-        yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
+        # Timeout, GraphRecursionError, or any mid-pipeline failure: keep answer + evidence.
+        is_timeout = isinstance(e, asyncio.TimeoutError)
+        status = "timeout" if is_timeout else "partial"
+        if is_timeout:
+            logger.error("Streaming query timeout for chat %s after %ds", chat_id, settings.QUERY_TIMEOUT_SECONDS)
+        else:
+            logger.exception("Streaming query failed for chat %s", chat_id)
+
+        if answer:
+            elapsed = time.perf_counter() - start_time
+            evidence = accumulated_state.get("evidence", []) if isinstance(accumulated_state, dict) else []
+            claims = accumulated_state.get("claims", []) if isinstance(accumulated_state, dict) else []
+            if not claims:
+                from app.agent.nodes import _claims_from_answer_citations
+                try:
+                    claims = _claims_from_answer_citations(answer, evidence)
+                except Exception:
+                    claims = []
+            citations = _citations_payload(evidence)
+            claim_payload = _claims_payload(claims)
+            suffix = f" ({status})"
+            try:
+                async with session_factory() as log_session:
+                    await _log_interaction(
+                        db=log_session,
+                        chat_id=chat_id,
+                        user_input=message,
+                        agent_output=answer,
+                        routing_path=" → ".join(trajectory_nodes) + suffix,
+                        latency=elapsed,
+                    )
+                    await _store_messages(log_session, chat_id, message, answer)
+            except Exception:
+                logger.exception("Failed to persist partial answer after %s for chat %s", status, chat_id)
+            yield (
+                "event: done\ndata: "
+                + json.dumps(
+                    {
+                        "answer": answer,
+                        "chat_id": str(chat_id),
+                        "latency_ms": round(elapsed * 1000, 2),
+                        "provider_used": accumulated_state.get("provider_used"),
+                        "final_status": status,
+                        "claims": claim_payload,
+                        "citations": citations,
+                        "conflicts": accumulated_state.get("conflicts", []),
+                        "verification_errors": [],
+                        "trajectory": " → ".join(trajectory_nodes) + suffix,
+                    }
+                )
+                + "\n\n"
+            )
+        else:
+            detail = (
+                f"Request timed out after {settings.QUERY_TIMEOUT_SECONDS}s"
+                if is_timeout
+                else str(e)
+            )
+            yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
 
 
 @_query_limiter.limit("10/minute")
@@ -647,12 +803,27 @@ async def query_agent_stream(
     session_factory=Depends(get_session_factory),
 ):
     """Streaming query endpoint — returns SSE events for real-time node status."""
-    # Verify chat ownership
+    user_credentials: dict = {}
     async with session_factory() as verify_session:
+        from app.core.usage import enforce_query_rate, record_usage
+        from app.settings.router import load_user_provider_credentials
+
+        await enforce_query_rate(verify_session, current_user.user_id)
         await _verify_chat_ownership(verify_session, chat_id, current_user.user_id)
+        user_credentials = await load_user_provider_credentials(
+            verify_session, current_user.user_id
+        )
+        await record_usage(verify_session, current_user.user_id, "query")
 
     return StreamingResponse(
-        _stream_query(chat_id, current_user.user_id, body.message, session_factory, provider=body.provider),
+        _stream_query(
+            chat_id,
+            current_user.user_id,
+            body.message,
+            session_factory,
+            provider=body.provider,
+            user_credentials=user_credentials,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -682,12 +853,55 @@ async def _log_interaction(
         logger.exception("Failed to log interaction for chat %s", chat_id)
 
 
+def _citations_payload(evidence: list, limit: int = 15) -> list[dict]:
+    """Serialize evidence for SSE/API provenance panels."""
+    out: list[dict] = []
+    for ev in (evidence or [])[:limit]:
+        out.append(
+            {
+                "evidence_id": ev.evidence_id,
+                "text": (ev.text or "")[:500],
+                "source_type": ev.source_type.value if hasattr(ev.source_type, "value") else str(ev.source_type),
+                "source_name": ev.source_name,
+                "source_url": ev.source_url,
+                "source_date": ev.source_date.isoformat() if ev.source_date else None,
+                "authority_score": ev.authority_score,
+                "recency_score": ev.recency_score,
+                "metric_type": ev.metric_type.value if hasattr(ev, "metric_type") and hasattr(ev.metric_type, "value") else "unknown",
+                "metric_value": getattr(ev, "metric_value", "") or "",
+                "geographic_scope": ev.geographic_scope.value if hasattr(ev, "geographic_scope") and hasattr(ev.geographic_scope, "value") else "unknown",
+                "geography": getattr(ev, "geography", "") or "",
+                "year_period": getattr(ev, "year_period", "") or "",
+                "temporal_qualifier": ev.temporal_qualifier.value if hasattr(ev, "temporal_qualifier") and hasattr(ev.temporal_qualifier, "value") else "unknown",
+                "source_quality": ev.source_quality.value if hasattr(ev, "source_quality") and hasattr(ev.source_quality, "value") else "unknown",
+            }
+        )
+    return out
+
+
+def _claims_payload(claims: list) -> list[dict]:
+    out: list[dict] = []
+    for c in claims or []:
+        out.append(
+            {
+                "claim_id": c.claim_id,
+                "text": c.text,
+                "status": c.status.value if hasattr(c.status, "value") else str(c.status),
+                "claim_type": c.claim_type.value if hasattr(c, "claim_type") and hasattr(c.claim_type, "value") else "fact",
+                "evidence_ids": c.evidence_ids,
+                "contradicting_evidence_ids": c.contradicting_evidence_ids,
+                "reasoning": c.reasoning,
+            }
+        )
+    return out
+
+
 def _build_trajectory(state: dict) -> str:
     """
     Reconstruct which nodes were visited based on the final state.
     Also stores key evidence metadata for cross-turn carry-forward.
     """
-    steps = ["classify_query", "build_plan"]
+    steps = ["classify_and_plan"]
 
     if state.get("retrieval_count", 0) > 0:
         steps.append("retrieve_documents")
@@ -821,8 +1035,9 @@ async def ws_query(websocket: WebSocket, chat_id: _uuid.UUID):
         initial_state = _build_initial_state(query=message, user_id=user_id, chat_id=chat_id, provider=provider)
         start_time = time.perf_counter()
 
-        # Use astream_events for node-level streaming
+        # Use astream for node-level streaming — accumulate answer, never re-run graph
         trajectory_nodes = []
+        answer = ""
         async for event in rag_app.astream(initial_state, stream_mode="updates"):
             for node_name, node_output in event.items():
                 if node_name in ("__start__", "__end__"):
@@ -836,25 +1051,26 @@ async def ws_query(websocket: WebSocket, chat_id: _uuid.UUID):
 
                 # Stream tokens from answer generation
                 if node_name == "generate_answer" and isinstance(node_output, dict):
-                    answer = node_output.get("answer", "")
-                    if answer:
-                        # Send answer in chunks for progressive display
+                    new_answer = node_output.get("answer", "")
+                    if new_answer:
+                        answer = new_answer
                         chunk_size = 100
                         for i in range(0, len(answer), chunk_size):
                             await websocket.send_json({
                                 "type": "token",
                                 "content": answer[i:i + chunk_size],
                             })
+                elif node_name == "repair_claims" and isinstance(node_output, dict):
+                    # Caveated final answer after max attempts
+                    repaired = node_output.get("answer")
+                    if repaired:
+                        answer = repaired
 
         elapsed = time.perf_counter() - start_time
         latency_ms = round(elapsed * 1000, 2)
 
-        # Extract answer from streamed output - don't re-run the graph
-        # The graph was already fully executed in the astream loop above
         if not answer:
-            # Fallback: get final state using ainvoke with stream_mode='values' to get final accumulated state
-            async for state in rag_app.astream(initial_state, stream_mode="values"):
-                answer = state.get("answer", "")
+            answer = "I was unable to generate an answer. Please try rephrasing your question."
 
         # Log interaction using session factory
         async with session_factory() as log_session:

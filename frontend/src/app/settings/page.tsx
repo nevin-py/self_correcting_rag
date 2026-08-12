@@ -2,133 +2,349 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
-import { useChatStore } from "@/stores/chatStore";
-import Sidebar from "@/components/layout/Sidebar";
-import { Settings, User, Brain, Palette, Trash2, Cpu } from "lucide-react";
+import { authApi, settingsApi, type ProviderSettings } from "@/lib/api";
+import AppShell from "@/components/layout/AppShell";
+import { Input } from "@/components/ui/Input";
+import { Button } from "@/components/ui/Button";
+import { Badge } from "@/components/ui/Badge";
+import { cn } from "@/lib/utils";
 
-const PROVIDERS = [
-  { id: "auto", label: "Auto", desc: "Try Groq first, fall back to OpenRouter on rate limit" },
-  { id: "groq", label: "Groq", desc: "Fast, free tier. Uses Llama 3.3 70B for planning, GPT-OSS 120B for generation" },
-  { id: "openrouter", label: "OpenRouter", desc: "Paid. Uses MiMo-V2.5 for planning, Claude Haiku 4.5 for generation" },
+const ROUTING_PROVIDERS = [
+  { id: "auto", label: "AUTO", desc: "Uses whichever user or server keys exist (Groq → Google → OpenRouter)" },
+  { id: "groq", label: "GROQ", desc: "Require Groq key (user Settings or server env)" },
+  { id: "openrouter", label: "OPENROUTER", desc: "Require OpenRouter key" },
+  { id: "google", label: "GOOGLE", desc: "Require Google AI Studio key" },
 ] as const;
 
+const KEY_PROVIDERS = ["openrouter", "google", "groq"] as const;
+
 const TABS = [
-  { id: "profile", label: "Profile", icon: User },
-  { id: "provider", label: "Provider", icon: Cpu },
-  { id: "memory", label: "Memory", icon: Brain },
-  { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "profile", label: "Profile" },
+  { id: "provider", label: "Provider" },
+  { id: "memory", label: "Retention" },
+  { id: "system", label: "System" },
 ];
 
 export default function SettingsPage() {
   const router = useRouter();
   const { token, user, loadUser } = useAuthStore();
-  const { sidebarOpen } = useChatStore();
   const [activeTab, setActiveTab] = useState("profile");
   const [confirmClear, setConfirmClear] = useState(false);
   const [provider, setProvider] = useState<string>(() => {
     if (typeof window === "undefined") return "auto";
     return localStorage.getItem("llm_provider") || "auto";
   });
+  const [providerRows, setProviderRows] = useState<ProviderSettings[]>([]);
+  const [editProvider, setEditProvider] = useState<(typeof KEY_PROVIDERS)[number]>("openrouter");
+  const [apiKey, setApiKey] = useState("");
+  const [fallbackKey, setFallbackKey] = useState("");
+  const [plannerModel, setPlannerModel] = useState("");
+  const [generatorModel, setGeneratorModel] = useState("");
+  const [verifierModel, setVerifierModel] = useState("");
+  const [providerMsg, setProviderMsg] = useState("");
+  const [providerErr, setProviderErr] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [pwMsg, setPwMsg] = useState("");
+  const [pwErr, setPwErr] = useState("");
 
-  useEffect(() => { loadUser(); }, [loadUser]);
-  useEffect(() => { if (!token) router.replace("/login"); }, [token, router]);
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
+
+  useEffect(() => {
+    if (!token) router.replace("/login");
+  }, [token, router]);
+
+  useEffect(() => {
+    if (!token) return;
+    settingsApi
+      .listProviders()
+      .then((res) => {
+        setProviderRows(res.data.providers);
+      })
+      .catch(() => setProviderRows([]));
+  }, [token]);
+
+  useEffect(() => {
+    const row = providerRows.find((p) => p.provider === editProvider);
+    if (!row) return;
+    setPlannerModel(row.planner_model || row.default_planner_model);
+    setGeneratorModel(row.generator_model || row.default_generator_model);
+    setVerifierModel(row.verifier_model || row.default_verifier_model);
+    setApiKey("");
+    setFallbackKey("");
+  }, [editProvider, providerRows]);
 
   const handleProviderChange = (id: string) => {
     setProvider(id);
     localStorage.setItem("llm_provider", id);
   };
 
+  const saveProviderKeys = async () => {
+    setProviderMsg("");
+    setProviderErr("");
+    try {
+      const body: Record<string, unknown> = {
+        planner_model: plannerModel,
+        generator_model: generatorModel,
+        verifier_model: verifierModel,
+      };
+      if (apiKey.trim()) body.api_key = apiKey.trim();
+      if (fallbackKey.trim()) body.fallback_api_key = fallbackKey.trim();
+      const res = await settingsApi.upsertProvider(editProvider, body);
+      setProviderRows((prev) =>
+        prev.map((p) => (p.provider === editProvider ? res.data : p))
+      );
+      setApiKey("");
+      setFallbackKey("");
+      setProviderMsg("Saved (keys stored encrypted; only masked values are shown).");
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: string } })?.data?.detail
+          : undefined;
+      setProviderErr(detail || "Save failed");
+    }
+  };
+
+  const clearProvider = async () => {
+    setProviderMsg("");
+    setProviderErr("");
+    try {
+      await settingsApi.deleteProvider(editProvider);
+      const res = await settingsApi.listProviders();
+      setProviderRows(res.data.providers);
+      setProviderMsg("Provider keys cleared.");
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: string } })?.data?.detail
+          : undefined;
+      setProviderErr(detail || "Clear failed");
+    }
+  };
+
+  const changePassword = async () => {
+    setPwMsg("");
+    setPwErr("");
+    try {
+      await authApi.changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setPwMsg("Password updated.");
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: string } })?.data?.detail
+          : undefined;
+      setPwErr(detail || "Password change failed");
+    }
+  };
+
+  const selectedRow = providerRows.find((p) => p.provider === editProvider);
+
+  const header = (
+    <header className="flex h-[var(--header-height)] items-center border-b border-border px-4">
+      <div>
+        <p className="label-caps">Configuration</p>
+        <h1 className="font-display text-sm font-semibold text-text-primary">System Settings</h1>
+      </div>
+    </header>
+  );
+
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar />
-      <div className={`flex-1 flex flex-col transition-all duration-[var(--duration-standard)] ${sidebarOpen ? "ml-[220px]" : "ml-[72px]"}`}>
-        <header className="h-14 border-b border-[var(--apres-ski)]/10 flex items-center px-6 gap-3 shrink-0">
-          <Settings size={18} className="text-[var(--apres-ski)]" />
-          <h1 className="font-display text-[var(--arctic)] text-base">Settings</h1>
-        </header>
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-2xl mx-auto px-6 py-8">
-            {/* Tabs */}
-            <div className="flex gap-1 mb-8 border-b border-[var(--apres-ski)]/10">
-              {TABS.map((tab) => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-4 py-2.5 text-sm transition-colors duration-[var(--duration-micro)] border-b-2 -mb-px ${
-                    activeTab === tab.id ? "border-[var(--glacier)] text-[var(--arctic)]" : "border-transparent text-[var(--apres-ski)] hover:text-[var(--slopes)]"
-                  }`}>
-                  <tab.icon size={16} /> {tab.label}
-                </button>
-              ))}
+    <AppShell header={header} showRightPanel={false}>
+      <div className="mx-auto max-w-2xl flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex border-b border-border">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "border-b-2 px-4 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors -mb-px",
+                activeTab === tab.id
+                  ? "border-accent text-text-primary"
+                  : "border-transparent text-text-muted hover:text-text-secondary"
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-6">
+          {activeTab === "profile" && (
+            <div className="space-y-4">
+              <div className="space-y-4 border border-border bg-surface p-4">
+                <div>
+                  <label className="label-caps mb-1.5 block">Operator Email</label>
+                  <Input value={user?.email || ""} disabled />
+                </div>
+                <div>
+                  <label className="label-caps mb-1.5 block">Operator ID</label>
+                  <Input value={user?.user_id || ""} disabled className="font-mono text-xs" />
+                </div>
+              </div>
+              <div className="space-y-3 border border-border bg-surface p-4">
+                <p className="label-caps">Change Password</p>
+                <Input
+                  type="password"
+                  placeholder="Current password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder="New password (min 8)"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  minLength={8}
+                />
+                {pwErr && <p className="font-mono text-xs text-error">{pwErr}</p>}
+                {pwMsg && <p className="font-mono text-xs text-text-secondary">{pwMsg}</p>}
+                <Button variant="accent" size="md" onClick={changePassword}>
+                  Update Password
+                </Button>
+              </div>
             </div>
+          )}
 
-            {activeTab === "profile" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                <div>
-                  <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">Email</label>
-                  <input value={user?.email || ""} disabled className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10 text-[var(--slopes)] text-sm" />
-                </div>
-                <div>
-                  <label className="block text-xs text-[var(--apres-ski)] mb-1.5 uppercase tracking-wider">User ID</label>
-                  <input value={user?.user_id || ""} disabled className="w-full px-4 py-3 rounded-[var(--radius-sm)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10 text-[var(--apres-ski)] text-sm font-mono" />
-                </div>
-              </motion.div>
-            )}
-
-            {activeTab === "provider" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                <div className="p-4 rounded-[var(--radius-md)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-                  <h3 className="text-sm text-[var(--arctic)] font-medium mb-2">LLM Provider</h3>
-                  <p className="text-xs text-[var(--apres-ski)] mb-4">Choose which AI provider powers your queries. This setting is saved in your browser.</p>
-                  <div className="space-y-3">
-                    {PROVIDERS.map((p) => (
-                      <button key={p.id} onClick={() => handleProviderChange(p.id)}
-                        className={`w-full text-left p-3 rounded-[var(--radius-sm)] border transition-colors duration-[var(--duration-micro)] ${
-                          provider === p.id
-                            ? "border-[var(--glacier)] bg-[var(--glacier)]/10"
-                            : "border-[var(--apres-ski)]/10 hover:border-[var(--apres-ski)]/30"
-                        }`}>
-                        <div className="flex items-center justify-between">
-                          <span className={`text-sm font-medium ${provider === p.id ? "text-[var(--glacier)]" : "text-[var(--arctic)]"}`}>{p.label}</span>
-                          {provider === p.id && <span className="text-xs text-[var(--glacier)]">Active</span>}
-                        </div>
-                        <p className="text-xs text-[var(--apres-ski)] mt-1">{p.desc}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </motion.div>
-            )}
-
-            {activeTab === "memory" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                <div className="p-4 rounded-[var(--radius-md)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-                  <h3 className="text-sm text-[var(--arctic)] font-medium mb-2">Data Retention</h3>
-                  <p className="text-xs text-[var(--apres-ski)] mb-4">Control how long your conversation history and memories are stored.</p>
-                  {!confirmClear ? (
-                    <button onClick={() => setConfirmClear(true)}
-                      className="flex items-center gap-2 px-4 py-2 rounded-[var(--radius-sm)] border border-[var(--error)]/30 text-[var(--error)] text-sm hover:bg-[var(--error)]/10 transition-colors">
-                      <Trash2 size={14} /> Clear All Data
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-3">
-                      <span className="text-[var(--error)] text-sm">Are you sure? This cannot be undone.</span>
-                      <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--error)] text-white text-sm">Confirm</button>
-                      <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--apres-ski)]/20 text-[var(--slopes)] text-sm">Cancel</button>
+          {activeTab === "provider" && (
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <p className="label-caps mb-2">Default routing preference</p>
+                {ROUTING_PROVIDERS.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => handleProviderChange(p.id)}
+                    className={cn(
+                      "w-full border p-4 text-left transition-colors",
+                      provider === p.id
+                        ? "border-accent bg-accent-glow"
+                        : "border-border bg-surface hover:border-border-strong"
+                    )}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs uppercase tracking-wider text-text-primary">
+                        {p.label}
+                      </span>
+                      {provider === p.id && <Badge variant="accent">Active</Badge>}
                     </div>
-                  )}
-                </div>
-              </motion.div>
-            )}
+                    <p className="mt-1 text-xs text-text-secondary">{p.desc}</p>
+                  </button>
+                ))}
+              </div>
 
-            {activeTab === "appearance" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                <p className="text-[var(--apres-ski)] text-sm">Dark mode is the default for v1. Light theme support coming soon.</p>
-              </motion.div>
-            )}
-          </div>
+              <div className="border border-border bg-surface p-4 space-y-3">
+                <p className="label-caps">Your API keys & models</p>
+                <p className="text-xs text-text-muted">
+                  OpenRouter, Google, and Groq keys are encrypted at rest. Tavily and Nomic remain
+                  system-configured.
+                </p>
+                <div className="flex gap-2">
+                  {KEY_PROVIDERS.map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setEditProvider(p)}
+                      className={cn(
+                        "border px-3 py-1 font-mono text-[10px] uppercase",
+                        editProvider === p ? "border-accent text-accent" : "border-border text-text-muted"
+                      )}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                {selectedRow && (
+                  <p className="font-mono text-[10px] text-text-muted">
+                    Saved key: {selectedRow.has_key ? selectedRow.masked_key : "none"}
+                    {selectedRow.has_server_key ? " · server fallback available" : ""}
+                  </p>
+                )}
+                <Input
+                  type="password"
+                  placeholder="Primary API key (leave blank to keep)"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder="Optional fallback API key"
+                  value={fallbackKey}
+                  onChange={(e) => setFallbackKey(e.target.value)}
+                />
+                <Input
+                  placeholder="Planner model"
+                  value={plannerModel}
+                  onChange={(e) => setPlannerModel(e.target.value)}
+                />
+                <Input
+                  placeholder="Generator model"
+                  value={generatorModel}
+                  onChange={(e) => setGeneratorModel(e.target.value)}
+                />
+                <Input
+                  placeholder="Verifier model"
+                  value={verifierModel}
+                  onChange={(e) => setVerifierModel(e.target.value)}
+                />
+                {providerErr && <p className="font-mono text-xs text-error">{providerErr}</p>}
+                {providerMsg && <p className="font-mono text-xs text-text-secondary">{providerMsg}</p>}
+                <div className="flex gap-2">
+                  <Button variant="accent" size="md" onClick={saveProviderKeys}>
+                    Save
+                  </Button>
+                  <Button variant="ghost" size="md" onClick={clearProvider}>
+                    Clear keys
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "memory" && (
+            <div className="border border-border bg-surface p-4">
+              <p className="text-sm text-text-secondary">
+                Control retention of conversation history and indexed memories.
+              </p>
+              {!confirmClear ? (
+                <Button variant="danger" size="md" onClick={() => setConfirmClear(true)} className="mt-4">
+                  Purge All Data
+                </Button>
+              ) : (
+                <div className="mt-4 flex items-center gap-3 border border-error bg-accent-glow p-3">
+                  <span className="text-xs text-error">Irreversible operation.</span>
+                  <Button variant="accent" size="sm" onClick={() => setConfirmClear(false)}>
+                    Confirm
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmClear(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "system" && (
+            <div className="border border-border bg-surface p-4 space-y-3">
+              <div className="flex justify-between border-b border-border pb-2">
+                <span className="label-caps">Interface</span>
+                <Badge variant="mono">Terminal Dark</Badge>
+              </div>
+              <div className="flex justify-between border-b border-border pb-2">
+                <span className="label-caps">Version</span>
+                <span className="font-mono text-xs text-text-muted">SCRAG v1.0</span>
+              </div>
+              <p className="text-xs text-text-muted">
+                Self-Correcting Enterprise Knowledge Workspace. Retrieval, verification, conflict detection,
+                and answer correction pipeline.
+              </p>
+            </div>
+          )}
         </div>
       </div>
-    </div>
+    </AppShell>
   );
 }

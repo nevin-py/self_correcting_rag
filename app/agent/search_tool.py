@@ -17,39 +17,122 @@ logger = logging.getLogger(__name__)
 
 # ── Text cleaning for LLM consumption ────────────────────────────────────────
 
-def _clean_search_text(text: str) -> str:
-    """Clean search output for LLM consumption.
+def _clean_search_text(text: str, max_chars: int = 1800) -> str:
+    """Clean search/snippet text for LLM consumption and evidence display.
 
-    Removes: HTML, entities, refs, citation markers, markdown tables,
-    tracking params, and normalizes whitespace.
+    Removes HTML, nav chrome, tracking junk, citation markers; keeps numbers/dates.
     """
     if not text:
         return ""
 
-    # 1. Strip HTML tags and decode entities
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = html_lib.unescape(text)
 
-    # 2. Remove Wikipedia refs [1], citation markers [citation needed], [edit], etc.
-    text = re.sub(r'\[\d+\]', '', text)
-    text = re.sub(r'\[(?:citation needed|edit|clarification needed|when\?|who\?)\]',
-                  '', text, flags=re.IGNORECASE)
+    # Drop common web chrome / cookie / share noise lines
+    noise = re.compile(
+        r"(?i)^\s*(?:cookie|subscribe|sign up|log in|menu|share|follow us|"
+        r"advertisement|related articles?|read more|click here|privacy policy|"
+        r"terms of (?:use|service)|all rights reserved).*$",
+        re.MULTILINE,
+    )
+    text = noise.sub(" ", text)
 
-    # 3. Clean markdown tables: pipes → spaces, remove separator lines
-    text = re.sub(r'\|\s*', ' ', text)
-    text = re.sub(r'[+][-]+[+]', '', text)
+    text = re.sub(r"\[\d+\]", "", text)
+    text = re.sub(
+        r"\[(?:citation needed|edit|clarification needed|when\?|who\?)\]",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\|\s*", " ", text)
+    text = re.sub(r"[+][-]+[+]", "", text)
+    text = re.sub(r"utm_[a-z]+=[^&\s]+&?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", "", text)  # URLs live in metadata; strip from body
 
-    # 4. Remove tracking params and short garbage lines
-    text = re.sub(r'utm_[a-z]+=[^&\s]+&?', '', text)
-    lines = [l for l in text.split('\n') if len(l.strip()) > 2 or not l.strip()]
-    text = '\n'.join(lines)
+    lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if len(stripped) <= 2:
+            continue
+        # Keep lines that look factual (digits, %, years) even if short
+        if len(stripped) < 25 and not re.search(r"\d", stripped):
+            continue
+        lines.append(stripped)
+    text = "\n".join(lines)
 
-    # 5. Normalize whitespace: collapse spaces, limit newlines, trim
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r'^\s+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"^\s+$", "", text, flags=re.MULTILINE)
+    text = text.strip()
 
-    return text.strip()
+    if len(text) > max_chars:
+        # Prefer cutting on sentence boundary near the limit
+        cut = text[:max_chars]
+        last_stop = max(cut.rfind(". "), cut.rfind("; "), cut.rfind("\n"))
+        if last_stop > max_chars // 2:
+            cut = cut[: last_stop + 1]
+        text = cut.strip() + "…"
+    return text
+
+
+def _normalize_result(
+    *,
+    content: str,
+    title: str,
+    url: str,
+    source: str,
+    published_date: Any = None,
+    score: float = 0.5,
+) -> Dict[str, Any] | None:
+    cleaned = _clean_search_text(content)
+    if len(cleaned) < 40:
+        return None
+    return {
+        "content": cleaned,
+        "title": _clean_search_text(title, max_chars=200) or "Untitled",
+        "url": url or "",
+        "source": source or (urllib.parse.urlparse(url or "").netloc or "web"),
+        "published_date": published_date,
+        "score": float(score or 0.5),
+    }
+
+
+def _dedupe_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for r in results:
+        key = (r.get("url") or "").rstrip("/").lower() or (r.get("content") or "")[:120].lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    out.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+    return out
+
+
+def _osint_query_variants(query: str) -> list[str]:
+    """Expand a query into a small set of OSINT-oriented search strings."""
+    q = query.strip()
+    if not q:
+        return []
+    year = time.strftime("%Y")
+    variants = [q]
+    # Prefer recent official / statistical phrasing without changing user intent
+    if not re.search(r"\b(20\d{2}|latest|current|recent)\b", q, re.I):
+        variants.append(f"{q} {year}")
+        variants.append(f"{q} latest official statistics")
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in variants:
+        key = v.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out[:3]
 
 
 def _extract_wiki_text(soup: BeautifulSoup) -> Optional[str]:
@@ -294,75 +377,154 @@ async def smart_search(req: Union[str, List[Dict[str, str]]]) -> str:
     return "\n\n--- SEARCH RESULT ---\n\n".join(valid_results)
 
 
-async def search_structured(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-    """
-    Structured web search returning provenance-preserving result dicts.
+async def _tavily_structured(
+    query: str,
+    max_results: int,
+    *,
+    topic: str = "general",
+    time_range: str | None = "year",
+) -> List[Dict[str, Any]]:
+    kwargs: Dict[str, Any] = {
+        "query": query,
+        "search_depth": "advanced",
+        "max_results": max_results,
+        "include_answer": False,
+        "topic": topic,
+    }
+    if time_range:
+        kwargs["time_range"] = time_range
+    if topic == "news":
+        kwargs["days"] = 365
 
-    Tries Tavily first (rich metadata), then SearXNG, then Wikipedia.
-    Each result contains: content, title, url, source, published_date, score.
-    """
-    results: List[Dict[str, Any]] = []
-
-    # 1. Tavily (has the best structured metadata)
-    try:
-        response = await asyncio.to_thread(
-            tavily_client.search,
-            query=query,
-            search_depth="advanced",
-            max_results=max_results,
-            include_answer=False,
+    response = await asyncio.to_thread(tavily_client.search, **kwargs)
+    out: List[Dict[str, Any]] = []
+    for res in response.get("results", []):
+        item = _normalize_result(
+            content=res.get("content", "") or res.get("raw_content", "") or "",
+            title=res.get("title", "Untitled"),
+            url=res.get("url", ""),
+            source=urllib.parse.urlparse(res.get("url", "")).netloc or "tavily",
+            published_date=res.get("published_date"),
+            score=float(res.get("score", 0.5)),
         )
-        for res in response.get("results", []):
-            results.append({
-                "content": _clean_search_text(res.get("content", "")),
-                "title": _clean_search_text(res.get("title", "Untitled")),
-                "url": res.get("url", ""),
-                "source": urllib.parse.urlparse(res.get("url", "")).netloc or "tavily",
-                "published_date": res.get("published_date"),
-                "score": float(res.get("score", 0.5)),
-            })
-        if results:
-            return results
-    except Exception as e:
-        logger.warning("Structured Tavily search failed for '%s': %s", query, e)
+        if item:
+            out.append(item)
+    return out
 
-    # 2. SearXNG
-    try:
-        searxng_url = settings.SEARXNG_URL.rstrip("/")
-        url = f"{searxng_url}/search"
-        params = {"q": query, "format": "json", "pageno": 1}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-        data = response.json()
-        for res in data.get("results", [])[:max_results]:
-            result_url = res.get("url", "")
-            results.append({
-                "content": _clean_search_text(res.get("content", "")),
-                "title": _clean_search_text(res.get("title", "Untitled")),
-                "url": result_url,
-                "source": urllib.parse.urlparse(result_url).netloc or res.get("engine", "searxng"),
-                "published_date": res.get("publishedDate") or res.get("published_date"),
-                "score": float(res.get("score", 0.5)),
-            })
-        if results:
-            return results
-    except Exception as e:
-        logger.warning("Structured SearXNG search failed for '%s': %s", query, e)
 
-    # 3. Wikipedia fallback (single article)
-    try:
-        wiki_text = await search_wiki(query)
-        if wiki_text:
-            results.append({
-                "content": wiki_text,
-                "title": f"Wikipedia: {query}",
-                "url": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
-                "source": "wikipedia.org",
-                "published_date": None,
-                "score": 0.5,
-            })
-    except Exception as e:
-        logger.warning("Structured Wikipedia search failed for '%s': %s", query, e)
+async def _searxng_structured(query: str, max_results: int) -> List[Dict[str, Any]]:
+    searxng_url = settings.SEARXNG_URL.rstrip("/")
+    url = f"{searxng_url}/search"
+    params = {
+        "q": query,
+        "format": "json",
+        "pageno": 1,
+        "time_range": "year",
+        "categories": "general,news",
+    }
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+    data = response.json()
+    out: List[Dict[str, Any]] = []
+    for res in data.get("results", [])[: max_results * 2]:
+        result_url = res.get("url", "")
+        item = _normalize_result(
+            content=res.get("content", "") or res.get("snippet", "") or "",
+            title=res.get("title", "Untitled"),
+            url=result_url,
+            source=urllib.parse.urlparse(result_url).netloc or res.get("engine", "searxng"),
+            published_date=res.get("publishedDate") or res.get("published_date"),
+            score=float(res.get("score", 0.5)),
+        )
+        if item:
+            out.append(item)
+    return out[:max_results]
 
+
+async def search_structured(
+    query: str,
+    max_results: int = 10,
+    *,
+    user_id=None,
+    allow_tavily: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Multi-source OSINT-style web search with recency bias and cleaned snippets.
+
+    Runs Tavily (general + news) and SearXNG in parallel, merges/dedupes, then
+    falls back to Wikipedia only if nothing else returned.
+    """
+    start = time.perf_counter()
+    variants = _osint_query_variants(query)
+    primary = variants[0] if variants else query
+
+    async def _safe(coro, label: str) -> List[Dict[str, Any]]:
+        try:
+            return await coro
+        except Exception as exc:
+            logger.warning("Structured %s search failed for '%s': %s", label, primary[:60], exc)
+            return []
+
+    tasks = []
+    if allow_tavily:
+        tasks.append(
+            _safe(_tavily_structured(primary, max_results, topic="general", time_range="year"), "tavily-general")
+        )
+        tasks.append(
+            _safe(
+                _tavily_structured(primary, max(4, max_results // 2), topic="news", time_range="year"),
+                "tavily-news",
+            )
+        )
+        if len(variants) > 1:
+            tasks.append(
+                _safe(
+                    _tavily_structured(variants[1], max(3, max_results // 3), topic="general", time_range="year"),
+                    "tavily-variant",
+                )
+            )
+    tasks.append(_safe(_searxng_structured(primary, max_results), "searxng"))
+
+    batches = await asyncio.gather(*tasks)
+    if allow_tavily and user_id is not None:
+        try:
+            from app.core.database import AsyncLocalSession
+            from app.core.usage import record_usage
+
+            async with AsyncLocalSession() as session:
+                await record_usage(session, user_id, "tavily", amount=1)
+        except Exception:
+            logger.exception("Failed to record Tavily usage")
+
+    merged: List[Dict[str, Any]] = []
+    for batch in batches:
+        merged.extend(batch)
+
+    results = _dedupe_results(merged)[:max_results]
+
+    if not results:
+        try:
+            wiki_text = await search_wiki(query)
+            if wiki_text:
+                item = _normalize_result(
+                    content=wiki_text,
+                    title=f"Wikipedia: {query}",
+                    url=f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
+                    source="wikipedia.org",
+                    published_date=None,
+                    score=0.4,
+                )
+                if item:
+                    results = [item]
+        except Exception as e:
+            logger.warning("Structured Wikipedia search failed for '%s': %s", query, e)
+
+    logger.info(
+        "[search_structured] '%s' → %d cleaned results — %.1fs (tavily=%s)",
+        primary[:50],
+        len(results),
+        time.perf_counter() - start,
+        allow_tavily,
+    )
     return results

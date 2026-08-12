@@ -1,0 +1,485 @@
+{
+  "version": 1,
+  "description": "Golden queries for self-correcting RAG — citation, metric, and geography checks. evidence_fixtures are synthetic snippets used by offline eval (not live retrieval).",
+  "cases": [
+    {
+      "id": "mh-gsdp-services-share",
+      "query": "What share of Maharashtra GSDP comes from the services sector in the latest available year?",
+      "tags": ["gsdp", "maharashtra", "services", "document+web"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "a1b2c3d4",
+          "source_type": "document",
+          "source_name": "rag_test.pdf",
+          "text": "In 2017-18, Maharashtra's service sector contributed 54.5% of GSDP and was described as the largest sector."
+        },
+        {
+          "evidence_id": "e5f6a7b8",
+          "source_type": "web",
+          "source_name": "des.maharashtra.gov.in",
+          "source_url": "https://des.maharashtra.gov.in",
+          "text": "According to DES Maharashtra, services contributed 64.27% to GSDP in 2024-25 (advance estimates)."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "forbid_metrics": ["gdp"],
+        "geography": "Maharashtra",
+        "must_contain": ["services", "GSDP"],
+        "must_not_contain": ["India GDP"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0,
+        "years": ["2024"]
+      },
+      "good_answer_example": "Maharashtra services contributed 64.27% of GSDP in 2024-25 [e5f6a7b8], up from 54.5% in 2017-18 [a1b2c3d4]."
+    },
+    {
+      "id": "mh-gsdp-vs-gdp-trap",
+      "query": "What is Maharashtra's GDP growth rate?",
+      "tags": ["metric-trap", "gsdp"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "b2c3d4e5",
+          "source_type": "document",
+          "source_name": "state_accounts.pdf",
+          "text": "Maharashtra GSDP grew 7.6% in 2023-24 at constant prices. National GDP growth was 8.2%."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "forbid_metrics": [],
+        "geography": "Maharashtra",
+        "must_contain": ["GSDP"],
+        "must_not_contain": ["Maharashtra's GDP"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra does not publish 'GDP'; state output is GSDP, which grew 7.6% in 2023-24 [b2c3d4e5]."
+    },
+    {
+      "id": "mh-sector-composition-compare",
+      "query": "Compare Maharashtra's 2017-18 GSDP sector composition (54.5% services) with the latest available data for agriculture, industry, and services.",
+      "tags": ["comparative", "gsdp", "sectors"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "c3d4e5f6",
+          "source_type": "document",
+          "source_name": "textbook.pdf",
+          "text": "2017-18: agriculture 11%, industry 34.5%, services 54.5% of Maharashtra GSDP."
+        },
+        {
+          "evidence_id": "d4e5f6a7",
+          "source_type": "web",
+          "source_name": "DES",
+          "text": "2024-25: agriculture 9.8%, industry 25.9%, services 64.27% of Maharashtra GSDP."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["services", "agriculture", "industry"],
+        "require_citations": true,
+        "min_citations": 2,
+        "max_uncited_assertions": 0,
+        "years": ["2017", "2024"]
+      },
+      "good_answer_example": "In 2017-18 Maharashtra services were 54.5% of GSDP [c3d4e5f6]; by 2024-25 services rose to 64.27% while industry fell to 25.9% and agriculture to 9.8% [d4e5f6a7]."
+    },
+    {
+      "id": "india-gdp-not-state",
+      "query": "What was India's GDP growth in FY2023-24?",
+      "tags": ["gdp", "national"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "f6a7b8c9",
+          "source_type": "web",
+          "source_name": "mospi.gov.in",
+          "text": "India's real GDP grew 8.2% in FY 2023-24 according to MoSPI provisional estimates."
+        }
+      ],
+      "expect": {
+        "metric": "gdp",
+        "forbid_metrics": ["gsdp"],
+        "geography": "India",
+        "must_contain": ["GDP", "8.2"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "India's real GDP grew 8.2% in FY 2023-24 [f6a7b8c9]."
+    },
+    {
+      "id": "gva-vs-gsdp",
+      "query": "What is Maharashtra's GVA in manufacturing?",
+      "tags": ["gva", "metric-separation"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "a7b8c9d0",
+          "source_type": "document",
+          "source_name": "accounts.pdf",
+          "text": "Maharashtra manufacturing GVA was ₹4.2 lakh crore in 2022-23 at current prices. State GSDP was higher because it includes net taxes."
+        }
+      ],
+      "expect": {
+        "metric": "gva",
+        "forbid_metrics": ["gsdp"],
+        "geography": "Maharashtra",
+        "must_contain": ["GVA"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra manufacturing GVA was ₹4.2 lakh crore in 2022-23 [a7b8c9d0]."
+    },
+    {
+      "id": "advance-vs-actual",
+      "query": "Is the latest Maharashtra GSDP figure an advance estimate or actual?",
+      "tags": ["temporal", "gsdp"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "b8c9d0e1",
+          "source_type": "web",
+          "source_name": "DES",
+          "text": "Maharashtra GSDP 2024-25 figures are First Advance Estimates and subject to revision."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["advance"],
+        "must_not_contain": ["final actual for 2024-25"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "The 2024-25 Maharashtra GSDP figures are First Advance Estimates [b8c9d0e1]."
+    },
+    {
+      "id": "current-vs-constant",
+      "query": "Report Maharashtra GSDP growth at constant prices.",
+      "tags": ["price-basis", "gsdp"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "c9d0e1f2",
+          "source_type": "document",
+          "source_name": "des.pdf",
+          "text": "Maharashtra GSDP growth at constant (2011-12) prices was 7.6% in 2023-24; at current prices growth was 11.2%."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["constant", "7.6"],
+        "must_not_contain": ["11.2% at constant"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "At constant (2011-12) prices, Maharashtra GSDP grew 7.6% in 2023-24 [c9d0e1f2]."
+    },
+    {
+      "id": "uncited-should-fail",
+      "query": "What is Maharashtra services share of GSDP?",
+      "tags": ["negative", "citations"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "d0e1f2a3",
+          "source_type": "web",
+          "source_name": "DES",
+          "text": "Services were 64.27% of Maharashtra GSDP in 2024-25."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "bad_answer_example": "Maharashtra services are about 64% of GSDP in the latest year.",
+      "good_answer_example": "Services were 64.27% of Maharashtra GSDP in 2024-25 [d0e1f2a3]."
+    },
+    {
+      "id": "invalid-citation-should-fail",
+      "query": "Cite the services share of Maharashtra GSDP.",
+      "tags": ["negative", "citations"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "e1f2a3b4",
+          "source_type": "document",
+          "source_name": "doc.pdf",
+          "text": "Services 64.27% of GSDP (Maharashtra, 2024-25)."
+        }
+      ],
+      "expect": {
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "bad_answer_example": "Services were 64.27% of GSDP [deadbeef].",
+      "good_answer_example": "Services were 64.27% of GSDP [e1f2a3b4]."
+    },
+    {
+      "id": "karnataka-not-maharashtra",
+      "query": "What is Karnataka's services share of GSDP?",
+      "tags": ["geography", "gsdp"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "f2a3b4c5",
+          "source_type": "web",
+          "source_name": "des.karnataka.gov.in",
+          "text": "Karnataka services sector contributed 66.1% of GSDP in 2023-24."
+        },
+        {
+          "evidence_id": "a3b4c5d6",
+          "source_type": "web",
+          "source_name": "des.maharashtra.gov.in",
+          "text": "Maharashtra services contributed 64.27% of GSDP in 2024-25."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Karnataka",
+        "must_contain": ["Karnataka"],
+        "must_not_contain": ["Maharashtra services contributed 64.27% as Karnataka"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Karnataka services contributed 66.1% of GSDP in 2023-24 [f2a3b4c5]."
+    },
+    {
+      "id": "employment-not-gsdp",
+      "query": "What share of Maharashtra employment is in services?",
+      "tags": ["employment", "metric"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "b4c5d6e7",
+          "source_type": "document",
+          "source_name": "labour.pdf",
+          "text": "Services account for about 42% of Maharashtra employment (PLFS), while services GSDP share is higher."
+        }
+      ],
+      "expect": {
+        "metric": "employment",
+        "geography": "Maharashtra",
+        "must_contain": ["employment", "42"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "About 42% of Maharashtra employment is in services [b4c5d6e7]."
+    },
+    {
+      "id": "insufficient-evidence",
+      "query": "What was Goa's GSDP services share in 1995?",
+      "tags": ["insufficient"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "c5d6e7f8",
+          "source_type": "web",
+          "source_name": "example",
+          "text": "No archival 1995 Goa GSDP sector break-up was found in the retrieved sources."
+        }
+      ],
+      "expect": {
+        "must_contain": ["insufficient"],
+        "require_citations": false,
+        "max_uncited_assertions": 99
+      },
+      "good_answer_example": "Insufficient data in the retrieved sources for Goa's 1995 GSDP services share [c5d6e7f8]."
+    },
+    {
+      "id": "gva-share-distinct",
+      "query": "What is the GVA share of manufacturing in Maharashtra?",
+      "tags": ["gva_share"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "d6e7f8a9",
+          "source_type": "document",
+          "source_name": "industry.pdf",
+          "text": "Manufacturing GVA share in Maharashtra was 18.4% of total GVA in 2022-23."
+        }
+      ],
+      "expect": {
+        "metric": "gva_share",
+        "geography": "Maharashtra",
+        "must_contain": ["18.4", "GVA"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Manufacturing GVA share in Maharashtra was 18.4% of total GVA in 2022-23 [d6e7f8a9]."
+    },
+    {
+      "id": "fastest-growing-claim",
+      "query": "Is services still the fastest-growing sector in Maharashtra GSDP?",
+      "tags": ["growth_rate", "comparative"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "e7f8a9b0",
+          "source_type": "document",
+          "source_name": "growth.pdf",
+          "text": "In 2021-22 Maharashtra services grew 10.6%, industry 4.0%, agriculture 8.8%."
+        }
+      ],
+      "expect": {
+        "geography": "Maharashtra",
+        "must_contain": ["10.6"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0,
+        "years": ["2021"]
+      },
+      "good_answer_example": "In 2021-22 Maharashtra services grew 10.6%, outpacing industry (4.0%) and agriculture (8.8%) [e7f8a9b0]."
+    },
+    {
+      "id": "multi-cite-comparison",
+      "query": "How did Maharashtra services GSDP share change from 2017-18 to 2024-25?",
+      "tags": ["temporal", "gsdp"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "f8a9b0c1",
+          "source_type": "document",
+          "source_name": "old.pdf",
+          "text": "2017-18 Maharashtra services GSDP share: 54.5%."
+        },
+        {
+          "evidence_id": "a9b0c1d2",
+          "source_type": "web",
+          "source_name": "new",
+          "text": "2024-25 Maharashtra services GSDP share: 64.27%."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["54.5", "64.27"],
+        "require_citations": true,
+        "min_citations": 2,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra services GSDP share rose from 54.5% in 2017-18 [f8a9b0c1] to 64.27% in 2024-25 [a9b0c1d2]."
+    },
+    {
+      "id": "output-share",
+      "query": "What is manufacturing output share in Maharashtra?",
+      "tags": ["output_share"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "b0c1d2e3",
+          "source_type": "document",
+          "source_name": "asi.pdf",
+          "text": "Manufacturing output share in Maharashtra was 22.1% (ASI reference year 2022-23)."
+        }
+      ],
+      "expect": {
+        "metric": "output_share",
+        "geography": "Maharashtra",
+        "must_contain": ["22.1"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Manufacturing output share in Maharashtra was 22.1% [b0c1d2e3]."
+    },
+    {
+      "id": "doc-only-textbook",
+      "query": "According to the uploaded textbook, what was Maharashtra services share of GSDP in 2017-18?",
+      "tags": ["document-only"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "c1d2e3f4",
+          "source_type": "document",
+          "source_name": "rag_test.pdf",
+          "text": "The textbook states Maharashtra's service sector contributed 54.5% of GSDP in 2017–18."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["54.5"],
+        "years": ["2017"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "The textbook states services contributed 54.5% of Maharashtra GSDP in 2017–18 [c1d2e3f4]."
+    },
+    {
+      "id": "population-metric",
+      "query": "What is the population of Maharashtra per the latest census figure in evidence?",
+      "tags": ["population"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "d2e3f4a5",
+          "source_type": "web",
+          "source_name": "census",
+          "text": "Maharashtra population was 112.4 million in Census 2011."
+        }
+      ],
+      "expect": {
+        "metric": "population",
+        "geography": "Maharashtra",
+        "must_contain": ["112.4"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra population was 112.4 million in Census 2011 [d2e3f4a5]."
+    },
+    {
+      "id": "inflation-metric",
+      "query": "What was Maharashtra inflation (CPI) in the evidence?",
+      "tags": ["inflation"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "e3f4a5b6",
+          "source_type": "web",
+          "source_name": "rbi",
+          "text": "Maharashtra CPI inflation averaged 5.1% in FY2023-24."
+        }
+      ],
+      "expect": {
+        "metric": "inflation",
+        "geography": "Maharashtra",
+        "must_contain": ["5.1"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra CPI inflation averaged 5.1% in FY2023-24 [e3f4a5b6]."
+    },
+    {
+      "id": "mixed-geo-trap",
+      "query": "Report only Maharashtra industry GSDP share, not India.",
+      "tags": ["geography-trap"],
+      "evidence_fixtures": [
+        {
+          "evidence_id": "f4a5b6c7",
+          "source_type": "web",
+          "source_name": "DES-MH",
+          "text": "Maharashtra industry share of GSDP was 25.9% in 2024-25."
+        },
+        {
+          "evidence_id": "a5b6c7d8",
+          "source_type": "web",
+          "source_name": "MoSPI",
+          "text": "India industry share of GDP was about 25% in recent years."
+        }
+      ],
+      "expect": {
+        "metric": "gsdp",
+        "geography": "Maharashtra",
+        "must_contain": ["25.9", "Maharashtra"],
+        "must_not_contain": ["India industry share of GDP was about 25% of Maharashtra"],
+        "require_citations": true,
+        "min_citations": 1,
+        "max_uncited_assertions": 0
+      },
+      "good_answer_example": "Maharashtra industry share of GSDP was 25.9% in 2024-25 [f4a5b6c7]."
+    }
+  ]
+}

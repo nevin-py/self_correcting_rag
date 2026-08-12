@@ -1,4 +1,5 @@
 import logging
+from typing import Any, NamedTuple
 
 from groq import Groq
 from langchain_groq import ChatGroq
@@ -9,79 +10,394 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── LLM + search clients (fail fast — these are required) ────────────────────
+# ── LLM + search clients (server env defaults; user keys override at resolve) ─
 
-# Main LLM — answer generation (higher quality, higher token cost)
-chat_llm = ChatGroq(
-    api_key=settings.GROQ_KEY,
-    model="openai/gpt-oss-120b",
-    temperature=0,
-)
+chat_llm = None
+routing_llm = None
+groq_client = None
+if settings.GROQ_KEY:
+    chat_llm = ChatGroq(
+        api_key=settings.GROQ_KEY,
+        model="openai/gpt-oss-120b",
+        temperature=0,
+    )
+    routing_llm = ChatGroq(
+        api_key=settings.GROQ_KEY,
+        model="llama-3.3-70b-versatile",
+        temperature=0,
+    )
+    groq_client = Groq(api_key=settings.GROQ_KEY)
 
-# Routing LLM — planner + hallucination checker
-# 70B is smart enough to follow instructions and not loop wastefully
-# 8K TPM on free tier — sufficient with our truncation limits
-routing_llm = ChatGroq(
-    api_key=settings.GROQ_KEY,
-    model="llama-3.3-70b-versatile",
-    temperature=0,
-)
-
-groq_client = Groq(api_key=settings.GROQ_KEY)
 tavily_client = TavilyClient(api_key=settings.TAVILY_API_KEY)
 
-# ── OpenRouter fallback (used when Groq hits rate limits) ────────────────────
-# Model assignments:
-#   Planner:            GPT-4o-mini (strict JSON/tool calling, cheap)
-#   Generator:          DeepSeek V4 Flash 0731 (1M context, 20+ providers)
-#   Hallucination:      DeepSeek V4 Flash 0731 (fast fact verification)
-#   Fallback array:     DeepSeek → MiMo → Gemini Flash
+# ── OpenRouter (Xiaomi MiMo-V2.5 — all roles) ────────────────────────────────
+#   Planner / Generator / Hallucination: xiaomi/mimo-v2.5
 
 openrouter_planner_llm = None
 openrouter_generator_llm = None
 openrouter_hallucination_llm = None
+_openrouter_alt_llms: list[Any] = []
+
+_OPENROUTER_ALTS = (
+    "xiaomi/mimo-v2.5-pro",
+)
+
+
+def _make_openrouter_llm(
+    model: str,
+    api_key: str,
+    max_tokens: int = 4096,
+    reasoning_effort: str | None = None,
+):
+    kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": model,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "max_retries": 1,
+        "default_headers": {
+            "HTTP-Referer": "https://self-correcting-rag.local",
+            "X-Title": "Self-Correcting RAG",
+        },
+    }
+    if reasoning_effort:
+        # OpenRouter reasoning controls (MiMo / DeepSeek-style models)
+        kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
+    return ChatOpenAI(**kwargs)
+
 
 if settings.OPENROUTER_API_KEY:
-    # Planner: GPT-4o-mini — strict structured output, near-zero rate limits
-    openrouter_planner_llm = ChatOpenAI(
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        model=settings.OPENROUTER_PLANNER_MODEL,
-        temperature=0,
-        default_headers={
-            "HTTP-Referer": "https://self-correcting-rag.local",
-            "X-Title": "Self-Correcting RAG",
-        },
+    # No forced reasoning effort — medium/high on MiMo blew classify/plan past 60s.
+    # No HTTP timeout: slow networks / OpenRouter queues must be allowed to finish.
+    openrouter_planner_llm = _make_openrouter_llm(
+        settings.OPENROUTER_PLANNER_MODEL,
+        settings.OPENROUTER_API_KEY,
+        max_tokens=1024,
+    )
+    openrouter_generator_llm = _make_openrouter_llm(
+        settings.OPENROUTER_GENERATOR_MODEL,
+        settings.OPENROUTER_API_KEY,
+        max_tokens=4096,
+    )
+    openrouter_hallucination_llm = _make_openrouter_llm(
+        settings.OPENROUTER_HALLUCINATION_MODEL,
+        settings.OPENROUTER_API_KEY,
+        max_tokens=2048,
     )
 
-    # Generator: DeepSeek V4 Flash — 1M context, ultra-cheap, 20+ provider failover
-    openrouter_generator_llm = ChatOpenAI(
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        model=settings.OPENROUTER_GENERATOR_MODEL,
-        temperature=0,
-        default_headers={
-            "HTTP-Referer": "https://self-correcting-rag.local",
-            "X-Title": "Self-Correcting RAG",
-        },
+    configured = {
+        settings.OPENROUTER_PLANNER_MODEL,
+        settings.OPENROUTER_GENERATOR_MODEL,
+        settings.OPENROUTER_HALLUCINATION_MODEL,
+    }
+    for model_id in _OPENROUTER_ALTS:
+        if model_id in configured:
+            continue
+        try:
+            _openrouter_alt_llms.append(
+                _make_openrouter_llm(model_id, settings.OPENROUTER_API_KEY, max_tokens=2048)
+            )
+        except Exception:
+            logger.warning("Skipping OpenRouter alt model %s", model_id)
+
+    logger.info(
+        "OpenRouter MiMo configured: planner=%s, generator=%s, hallucination=%s",
+        settings.OPENROUTER_PLANNER_MODEL,
+        settings.OPENROUTER_GENERATOR_MODEL,
+        settings.OPENROUTER_HALLUCINATION_MODEL,
     )
 
-    # Hallucination checker: DeepSeek V4 Flash — fast fact verification
-    openrouter_hallucination_llm = ChatOpenAI(
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        model=settings.OPENROUTER_HALLUCINATION_MODEL,
+# ── Google AI Studio (Gemini) ────────────────────────────────────────────────
+
+google_planner_llm = None
+google_generator_llm = None
+google_hallucination_llm = None
+# Extra Gemini clients for in-family fallback when a model ID is retired / gated
+_google_alt_llms: list[Any] = []
+
+# Newer-first candidates for new AI Studio keys (2.x is blocked for new users)
+_GOOGLE_MODEL_CANDIDATES = (
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+)
+
+
+def _make_google_llm(model: str, api_key: str):
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=api_key,
         temperature=0,
-        default_headers={
-            "HTTP-Referer": "https://self-correcting-rag.local",
-            "X-Title": "Self-Correcting RAG",
-        },
     )
 
-    logger.info("OpenRouter configured: planner=%s, generator=%s, hallucination=%s",
-                settings.OPENROUTER_PLANNER_MODEL,
-                settings.OPENROUTER_GENERATOR_MODEL,
-                settings.OPENROUTER_HALLUCINATION_MODEL)
+
+if settings.GOOGLE_AI_API_KEY:
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: F401
+
+        primary = settings.GOOGLE_AI_GENERATOR_MODEL
+        google_planner_llm = _make_google_llm(settings.GOOGLE_AI_PLANNER_MODEL, settings.GOOGLE_AI_API_KEY)
+        google_generator_llm = _make_google_llm(primary, settings.GOOGLE_AI_API_KEY)
+        google_hallucination_llm = _make_google_llm(
+            settings.GOOGLE_AI_HALLUCINATION_MODEL, settings.GOOGLE_AI_API_KEY
+        )
+
+        configured = {
+            settings.GOOGLE_AI_PLANNER_MODEL,
+            settings.GOOGLE_AI_GENERATOR_MODEL,
+            settings.GOOGLE_AI_HALLUCINATION_MODEL,
+        }
+        for model_id in _GOOGLE_MODEL_CANDIDATES:
+            if model_id in configured:
+                continue
+            try:
+                _google_alt_llms.append(_make_google_llm(model_id, settings.GOOGLE_AI_API_KEY))
+            except Exception:
+                logger.warning("Skipping Google alt model %s", model_id)
+
+        logger.info(
+            "Google AI Studio configured: planner=%s, generator=%s, hallucination=%s, alts=%s",
+            settings.GOOGLE_AI_PLANNER_MODEL,
+            settings.GOOGLE_AI_GENERATOR_MODEL,
+            settings.GOOGLE_AI_HALLUCINATION_MODEL,
+            [getattr(m, "model", "?") for m in _google_alt_llms],
+        )
+    except Exception:
+        logger.exception("Failed to initialize Google AI Studio clients")
+
+
+class ProviderLLMs(NamedTuple):
+    planner: Any
+    planner_fallbacks: tuple[Any, ...]
+    generator: Any
+    generator_fallbacks: tuple[Any, ...]
+    verifier: Any
+    verifier_fallbacks: tuple[Any, ...]
+    label: str
+
+
+def _uniq_llms(*models: Any) -> tuple[Any, ...]:
+    """Preserve order while dropping Nones and duplicate client objects."""
+    seen: set[int] = set()
+    out: list[Any] = []
+    for m in models:
+        if m is None:
+            continue
+        key = id(m)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return tuple(out)
+
+
+def _pick_key(user_entry: dict | None, server_key: str) -> str | None:
+    """Prefer user primary key, then user fallback, then server env key."""
+    if user_entry:
+        if user_entry.get("api_key"):
+            return user_entry["api_key"]
+        if user_entry.get("fallback_api_key"):
+            return user_entry["fallback_api_key"]
+    return server_key or None
+
+
+def _user_models(user_entry: dict | None) -> tuple[str | None, str | None, str | None]:
+    if not user_entry:
+        return None, None, None
+    return (
+        user_entry.get("planner_model"),
+        user_entry.get("generator_model"),
+        user_entry.get("verifier_model"),
+    )
+
+
+def _build_openrouter_bundle(api_key: str, planner: str, generator: str, verifier: str) -> tuple[Any, Any, Any, tuple[Any, ...]]:
+    p = _make_openrouter_llm(planner, api_key, max_tokens=1024)
+    g = _make_openrouter_llm(generator, api_key, max_tokens=4096)
+    v = _make_openrouter_llm(verifier, api_key, max_tokens=2048)
+    alts: list[Any] = []
+    configured = {planner, generator, verifier}
+    for model_id in _OPENROUTER_ALTS:
+        if model_id in configured:
+            continue
+        try:
+            alts.append(_make_openrouter_llm(model_id, api_key, max_tokens=2048))
+        except Exception:
+            pass
+    return p, g, v, tuple(alts)
+
+
+def _build_google_bundle(api_key: str, planner: str, generator: str, verifier: str) -> tuple[Any, Any, Any, tuple[Any, ...]]:
+    p = _make_google_llm(planner, api_key)
+    g = _make_google_llm(generator, api_key)
+    v = _make_google_llm(verifier, api_key)
+    alts: list[Any] = []
+    configured = {planner, generator, verifier}
+    for model_id in _GOOGLE_MODEL_CANDIDATES:
+        if model_id in configured:
+            continue
+        try:
+            alts.append(_make_google_llm(model_id, api_key))
+        except Exception:
+            pass
+    return p, g, v, tuple(alts)
+
+
+def _build_groq_bundle(api_key: str, planner: str, generator: str, verifier: str) -> tuple[Any, Any, Any]:
+    p = ChatGroq(api_key=api_key, model=planner, temperature=0)
+    g = ChatGroq(api_key=api_key, model=generator, temperature=0)
+    v = ChatGroq(api_key=api_key, model=verifier, temperature=0)
+    return p, g, v
+
+
+def resolve_llms(
+    provider: str = "auto",
+    user_credentials: dict[str, dict] | None = None,
+) -> ProviderLLMs:
+    """Select planner/generator/verifier clients for the requested provider.
+
+    Prefer per-user keys (primary → fallback), then server env keys.
+    Models: user override → env defaults.
+    """
+    pref = (provider or "auto").lower().strip()
+    creds = user_credentials or {}
+
+    # Resolve effective clients for each provider family
+    or_key = _pick_key(creds.get("openrouter"), settings.OPENROUTER_API_KEY)
+    go_key = _pick_key(creds.get("google"), settings.GOOGLE_AI_API_KEY)
+    gq_key = _pick_key(creds.get("groq"), settings.GROQ_KEY)
+
+    or_pm, or_gm, or_vm = _user_models(creds.get("openrouter"))
+    go_pm, go_gm, go_vm = _user_models(creds.get("google"))
+    gq_pm, gq_gm, gq_vm = _user_models(creds.get("groq"))
+
+    # OpenRouter bundle
+    or_planner = openrouter_planner_llm
+    or_generator = openrouter_generator_llm
+    or_verifier = openrouter_hallucination_llm
+    or_alts: tuple[Any, ...] = tuple(_openrouter_alt_llms)
+    if or_key and (
+        or_key != settings.OPENROUTER_API_KEY
+        or or_pm
+        or or_gm
+        or or_vm
+    ):
+        or_planner, or_generator, or_verifier, or_alts = _build_openrouter_bundle(
+            or_key,
+            or_pm or settings.OPENROUTER_PLANNER_MODEL,
+            or_gm or settings.OPENROUTER_GENERATOR_MODEL,
+            or_vm or settings.OPENROUTER_HALLUCINATION_MODEL,
+        )
+    elif not or_key:
+        or_planner = or_generator = or_verifier = None
+        or_alts = ()
+
+    # Google bundle
+    go_planner = google_planner_llm
+    go_generator = google_generator_llm
+    go_verifier = google_hallucination_llm
+    go_alts: tuple[Any, ...] = tuple(_google_alt_llms)
+    if go_key and (
+        go_key != settings.GOOGLE_AI_API_KEY
+        or go_pm
+        or go_gm
+        or go_vm
+    ):
+        try:
+            go_planner, go_generator, go_verifier, go_alts = _build_google_bundle(
+                go_key,
+                go_pm or settings.GOOGLE_AI_PLANNER_MODEL,
+                go_gm or settings.GOOGLE_AI_GENERATOR_MODEL,
+                go_vm or settings.GOOGLE_AI_HALLUCINATION_MODEL,
+            )
+        except Exception:
+            logger.exception("Failed to build user Google LLM bundle")
+    elif not go_key:
+        go_planner = go_generator = go_verifier = None
+        go_alts = ()
+
+    # Groq bundle
+    gq_planner = routing_llm
+    gq_generator = chat_llm
+    gq_verifier = routing_llm
+    if gq_key and (
+        gq_key != settings.GROQ_KEY
+        or gq_pm
+        or gq_gm
+        or gq_vm
+    ):
+        gq_planner, gq_generator, gq_verifier = _build_groq_bundle(
+            gq_key,
+            gq_pm or "llama-3.3-70b-versatile",
+            gq_gm or "openai/gpt-oss-120b",
+            gq_vm or "llama-3.3-70b-versatile",
+        )
+    elif not gq_key:
+        gq_planner = gq_generator = gq_verifier = None
+
+    if pref == "google":
+        if not go_generator:
+            logger.warning("Google AI requested but no key available; falling back to auto")
+            return resolve_llms("auto", user_credentials=creds)
+        return ProviderLLMs(
+            planner=go_planner or go_generator,
+            planner_fallbacks=_uniq_llms(*go_alts, gq_planner, or_planner, *or_alts),
+            generator=go_generator,
+            generator_fallbacks=_uniq_llms(*go_alts, gq_generator, or_generator, *or_alts),
+            verifier=go_verifier or go_generator,
+            verifier_fallbacks=_uniq_llms(*go_alts, gq_verifier, or_verifier, *or_alts),
+            label="google",
+        )
+
+    if pref == "openrouter":
+        if not or_generator:
+            logger.warning("OpenRouter requested but no key available; falling back to auto")
+            return resolve_llms("auto", user_credentials=creds)
+        return ProviderLLMs(
+            planner=or_planner or or_generator,
+            planner_fallbacks=(),
+            generator=or_generator,
+            generator_fallbacks=(),
+            verifier=or_verifier or or_generator,
+            verifier_fallbacks=(),
+            label="openrouter",
+        )
+
+    if pref == "groq":
+        if not gq_generator:
+            logger.warning("Groq requested but no key available; falling back to auto")
+            return resolve_llms("auto", user_credentials=creds)
+        return ProviderLLMs(
+            planner=gq_planner or gq_generator,
+            planner_fallbacks=_uniq_llms(go_planner, *go_alts, or_planner, *or_alts),
+            generator=gq_generator,
+            generator_fallbacks=_uniq_llms(go_generator, *go_alts, or_generator, *or_alts),
+            verifier=gq_verifier or gq_planner or gq_generator,
+            verifier_fallbacks=_uniq_llms(go_verifier, *go_alts, or_verifier, *or_alts),
+            label="groq",
+        )
+
+    # auto — prefer whichever keys exist: Groq → Google → OpenRouter
+    primary_planner = gq_planner or go_planner or or_planner
+    primary_generator = gq_generator or go_generator or or_generator
+    primary_verifier = gq_verifier or go_verifier or or_verifier
+    if not primary_generator:
+        raise RuntimeError(
+            "No LLM API keys configured. Add keys in Settings or set server env keys."
+        )
+    return ProviderLLMs(
+        planner=primary_planner or primary_generator,
+        planner_fallbacks=_uniq_llms(go_planner, *go_alts, or_planner, *or_alts, gq_planner),
+        generator=primary_generator,
+        generator_fallbacks=_uniq_llms(go_generator, *go_alts, or_generator, *or_alts, gq_generator),
+        verifier=primary_verifier or primary_generator,
+        verifier_fallbacks=_uniq_llms(go_verifier, *go_alts, or_verifier, *or_alts, gq_verifier),
+        label="auto",
+    )
+
 
 # ── ChromaDB + Nomic (lazy init — app starts even if these fail) ─────────────
 
@@ -123,9 +439,6 @@ def get_chroma_client():
     return _chroma_client
 
 
-# Backward-compatible module-level name — resolves lazily on first access.
-# Usage: from app.documents.clients import chroma_client
-# The name is NOT in __dict__ initially, so __getattr__ fires on first import.
 def __getattr__(name: str):
     if name == "chroma_client":
         return get_chroma_client()

@@ -31,10 +31,10 @@ const SAMPLE_NODES: MemoryNode[] = [
 ];
 
 const GROUP_COLORS: Record<string, string> = {
-  core: "#8FD6DE",
-  people: "#B3B7BA",
-  events: "#6C6D74",
-  docs: "#D3D1CE",
+  core: "#c45c2c",
+  people: "#9a9590",
+  events: "#5c5854",
+  docs: "#e8e4dc",
 };
 
 export default function MemoryGraph({ compact = false }: { compact?: boolean }) {

@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing_extensions import TypedDict
 
 
@@ -226,6 +226,12 @@ class QueryClassification(BaseModel):
     rewrite: str = ""                       # Disambiguated / expanded query
     metric_hint: MetricType = MetricType.UNKNOWN  # If query is about a specific metric
 
+    @field_validator("geography", "rewrite", "ambiguity", mode="before")
+    @classmethod
+    def _none_to_empty_str(cls, v: Any) -> Any:
+        """OpenRouter models often emit null instead of \"\" for optional strings."""
+        return "" if v is None else v
+
 
 class PlanStep(BaseModel):
     """One step in a retrieval/verification plan."""
@@ -317,6 +323,7 @@ class RAGState(TypedDict, total=False):
     chat_id: uuid.UUID
     query: str
     provider: str
+    user_credentials: dict  # provider → {api_key, fallback, models}; never log
     messages: Annotated[list[dict], _add_to_list]
 
     # ── control / guard counters ──
@@ -324,6 +331,7 @@ class RAGState(TypedDict, total=False):
     search_count: int
     retrieval_count: int
     regeneration_count: int
+    repair_pass_count: int
     max_graph_steps: int
     max_searches: int
     max_retrievals: int
@@ -337,6 +345,9 @@ class RAGState(TypedDict, total=False):
     conflicts: Annotated[list[dict], _add_to_list]
     citation_usage: Annotated[list[CitationUsage], _add_to_list]
     assembled_context: Annotated[str, _keep_latest]
+    cite_map: Annotated[dict[str, str], _keep_latest]  # E1 → evidence_id
+    coverage_gaps: Annotated[list[str], _keep_latest]
+    repair_mode: Annotated[str, _keep_latest]  # "" | "surgical"
     evidence_state: Annotated[EvidenceState | None, _keep_latest]  # persistent cross-turn state
     prior_evidence_state: Annotated[EvidenceState | None, _keep_latest]  # loaded from DB at entry
     verification_errors: Annotated[list[dict], _keep_latest]  # structured verifier errors

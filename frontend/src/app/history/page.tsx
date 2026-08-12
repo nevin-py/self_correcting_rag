@@ -1,58 +1,79 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
-import Sidebar from "@/components/layout/Sidebar";
-import { Clock, MessageSquare, Search } from "lucide-react";
+import AppShell from "@/components/layout/AppShell";
+import { Input } from "@/components/ui/Input";
 
 export default function HistoryPage() {
   const router = useRouter();
   const { token, loadUser } = useAuthStore();
-  const { chats, sidebarOpen, fetchChats, selectChat } = useChatStore();
+  const { chats, fetchChats, selectChat } = useChatStore();
+  const [filter, setFilter] = useState("");
 
-  useEffect(() => { loadUser(); fetchChats(); }, [loadUser, fetchChats]);
-  useEffect(() => { if (!token) router.replace("/login"); }, [token, router]);
+  useEffect(() => {
+    loadUser();
+    fetchChats();
+  }, [loadUser, fetchChats]);
+
+  useEffect(() => {
+    if (!token) router.replace("/login");
+  }, [token, router]);
+
+  const filtered = chats.filter((c) => c.title.toLowerCase().includes(filter.toLowerCase()));
+
+  const header = (
+    <header className="flex h-[var(--header-height)] items-center gap-4 border-b border-border px-4">
+      <div>
+        <p className="label-caps">Archive</p>
+        <h1 className="font-display text-sm font-semibold text-text-primary">Session History</h1>
+      </div>
+      <div className="ml-auto w-48">
+        <Input
+          placeholder="Filter sessions..."
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="font-mono text-xs"
+        />
+      </div>
+    </header>
+  );
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar />
-      <div className={`flex-1 flex flex-col transition-all duration-[var(--duration-standard)] ${sidebarOpen ? "ml-[220px]" : "ml-[72px]"}`}>
-        <header className="h-14 border-b border-[var(--apres-ski)]/10 flex items-center px-6 gap-3 shrink-0">
-          <Clock size={18} className="text-[var(--apres-ski)]" />
-          <h1 className="font-display text-[var(--arctic)] text-base">History</h1>
-          <div className="flex-1" />
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-[var(--radius-pill)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-            <Search size={14} className="text-[var(--apres-ski)]" />
-            <input placeholder="Search..." className="bg-transparent text-sm text-[var(--slopes)] placeholder-[var(--apres-ski)] focus:outline-none w-40" />
+    <AppShell header={header} showRightPanel={false}>
+      <div className="flex-1 overflow-y-auto">
+        {filtered.length === 0 ? (
+          <div className="flex h-full items-center justify-center">
+            <p className="font-mono text-xs text-text-muted">No sessions in archive</p>
           </div>
-        </header>
-        <div className="flex-1 overflow-y-auto">
-          {chats.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <Clock size={32} className="text-[var(--apres-ski)] mb-3" />
-              <p className="text-[var(--arctic)] font-display mb-1">No conversations yet</p>
-              <button onClick={() => router.push("/chat")} className="text-[var(--glacier)] text-sm hover:underline mt-1">Start one →</button>
+        ) : (
+          <div>
+            <div className="grid grid-cols-[1fr_120px_80px] border-b border-border bg-surface-raised px-4 py-2">
+              <span className="label-caps">Title</span>
+              <span className="label-caps">Date</span>
+              <span className="label-caps">ID</span>
             </div>
-          ) : (
-            <div className="divide-y divide-[var(--apres-ski)]/10">
-              {chats.map((chat, i) => (
-                <motion.div key={chat.chat_id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.03 }}
-                  onClick={() => { selectChat(chat.chat_id); router.push(`/chat/${chat.chat_id}`); }}
-                  className="flex items-center gap-4 px-6 py-4 hover:bg-[var(--mountainside)] cursor-pointer transition-colors duration-[var(--duration-micro)]">
-                  <MessageSquare size={16} className="text-[var(--apres-ski)] shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-[var(--arctic)] truncate">{chat.title}</p>
-                    <p className="text-xs text-[var(--apres-ski)]">{new Date(chat.created_at).toLocaleDateString()}</p>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          )}
-        </div>
+            {filtered.map((chat) => (
+              <button
+                key={chat.chat_id}
+                onClick={() => {
+                  selectChat(chat.chat_id);
+                  router.push(`/chat/${chat.chat_id}`);
+                }}
+                className="grid w-full grid-cols-[1fr_120px_80px] border-b border-border px-4 py-3 text-left transition-colors hover:bg-surface-raised"
+              >
+                <span className="truncate text-sm text-text-primary">{chat.title}</span>
+                <span className="font-mono text-[10px] text-text-muted">
+                  {new Date(chat.created_at).toLocaleDateString()}
+                </span>
+                <span className="font-mono text-[10px] text-text-muted">{chat.chat_id.slice(0, 6)}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-    </div>
+    </AppShell>
   );
 }

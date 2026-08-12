@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { chatApi, Citation, Claim, Conflict } from "@/lib/api";
+import { PipelinePhase, nodeToPhase } from "@/lib/pipeline";
 
 export interface Message {
   id: string;
@@ -7,7 +8,6 @@ export interface Message {
   content: string;
   timestamp: Date;
   meta?: { filename?: string; status?: string };
-  // Structured provenance data returned by the agent
   citations?: Citation[];
   claims?: Claim[];
   conflicts?: Conflict[];
@@ -23,6 +23,16 @@ export interface GraphStatus {
   status: "running" | "done" | "error";
 }
 
+export interface PipelineEvent {
+  id: string;
+  node: string;
+  label: string;
+  detail?: string;
+  phase: PipelinePhase;
+  status: "running" | "done" | "error";
+  timestamp: Date;
+}
+
 export interface Chat {
   chat_id: string;
   title: string;
@@ -35,7 +45,11 @@ interface ChatState {
   messages: Message[];
   isStreaming: boolean;
   graphStatus: GraphStatus | null;
+  pipelineEvents: PipelineEvent[];
+  selectedMessageId: string | null;
+  sidebarCollapsed: boolean;
   sidebarOpen: boolean;
+  rightPanelOpen: boolean;
 
   fetchChats: () => Promise<void>;
   createChat: (title: string) => Promise<Chat>;
@@ -43,6 +57,8 @@ interface ChatState {
   deleteChat: (chatId: string) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   toggleSidebar: () => void;
+  toggleRightPanel: () => void;
+  setSelectedMessage: (id: string | null) => void;
   addSystemMessage: (content: string, meta?: { filename?: string; status?: string }) => void;
 }
 
@@ -52,7 +68,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isStreaming: false,
   graphStatus: null,
+  pipelineEvents: [],
+  selectedMessageId: null,
+  sidebarCollapsed: false,
   sidebarOpen: true,
+  rightPanelOpen: true,
 
   fetchChats: async () => {
     if (typeof window !== "undefined" && !localStorage.getItem("token")) return;
@@ -60,28 +80,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const res = await chatApi.list({ limit: 50 });
       set({ chats: res.data.chats });
     } catch {
-      // Silently ignore — token may not be set yet
+      // token may not be set yet
     }
   },
 
   createChat: async (title: string) => {
     const res = await chatApi.create(title);
     const chat = res.data;
-    set((s) => ({ chats: [chat, ...s.chats], activeChatId: chat.chat_id, messages: [] }));
+    set((s) => ({
+      chats: [chat, ...s.chats],
+      activeChatId: chat.chat_id,
+      messages: [],
+      pipelineEvents: [],
+      selectedMessageId: null,
+    }));
     return chat;
   },
 
   selectChat: async (chatId: string) => {
-    set({ activeChatId: chatId, messages: [] });
+    set({ activeChatId: chatId, messages: [], pipelineEvents: [], selectedMessageId: null });
     if (typeof window !== "undefined" && !localStorage.getItem("token")) return;
     try {
       const res = await chatApi.messages(chatId, { limit: 50 });
-      const messages: Message[] = (res.data.messages as Array<{
-        sequence: number;
-        role: "user" | "assistant" | "system";
-        content: string;
-        created_at: string;
-      }>).map((m) => ({
+      const messages: Message[] = (
+        res.data.messages as Array<{
+          sequence: number;
+          role: "user" | "assistant" | "system";
+          content: string;
+          created_at: string;
+        }>
+      ).map((m) => ({
         id: `${m.sequence}`,
         role: m.role,
         content: m.content,
@@ -106,17 +134,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeChatId, messages } = get();
     if (!activeChatId) return;
 
-    const userMsg: Message = { id: `user-${Date.now()}`, role: "user", content, timestamp: new Date() };
-    set({ messages: [...messages, userMsg], isStreaming: true, graphStatus: null });
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content,
+      timestamp: new Date(),
+    };
+    set({
+      messages: [...messages, userMsg],
+      isStreaming: true,
+      graphStatus: null,
+      pipelineEvents: [],
+      selectedMessageId: null,
+    });
 
     try {
-      // Use streaming endpoint for real-time node status
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : "";
-      const provider = typeof window !== "undefined" ? localStorage.getItem("llm_provider") || "auto" : "auto";
+      const provider =
+        typeof window !== "undefined" ? localStorage.getItem("llm_provider") || "auto" : "auto";
       const resp = await fetch(`${API_BASE}/api/v1/agent/chats/${activeChatId}/query_stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ message: content, provider }),
       });
 
@@ -126,6 +165,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const decoder = new TextDecoder();
       let buffer = "";
       let fullAnswer = "";
+      let pendingCitations: Citation[] = [];
+      let pendingConflicts: Conflict[] = [];
       let provenance: {
         citations?: Citation[];
         claims?: Claim[];
@@ -140,7 +181,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE events
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
@@ -153,34 +193,83 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 
               if (currentEvent === "status") {
-                set({ graphStatus: { node: String(data.node), label: String(data.label), detail: data.detail ? String(data.detail) : undefined, status: "running" } });
+                const node = String(data.node);
+                const event: PipelineEvent = {
+                  id: `evt-${Date.now()}-${node}`,
+                  node,
+                  label: String(data.label),
+                  detail: data.detail ? String(data.detail) : undefined,
+                  phase: nodeToPhase(node),
+                  status: "running",
+                  timestamp: new Date(),
+                };
+                set((s) => ({
+                  graphStatus: {
+                    node,
+                    label: event.label,
+                    detail: event.detail,
+                    status: "running",
+                  },
+                  pipelineEvents: [...s.pipelineEvents, event],
+                }));
               } else if (currentEvent === "token") {
                 fullAnswer += String(data.content);
-                // Update the last assistant message with streaming content
                 set((s) => {
                   const msgs = [...s.messages];
                   const lastMsg = msgs[msgs.length - 1];
                   if (lastMsg && lastMsg.role === "assistant" && lastMsg.id.startsWith("stream-")) {
                     lastMsg.content = fullAnswer;
+                    if (pendingCitations.length && !lastMsg.citations?.length) {
+                      lastMsg.citations = pendingCitations;
+                      lastMsg.conflicts = pendingConflicts;
+                    }
                   } else {
-                    msgs.push({ id: `stream-${Date.now()}`, role: "assistant", content: fullAnswer, timestamp: new Date() });
+                    const id = `stream-${Date.now()}`;
+                    msgs.push({
+                      id,
+                      role: "assistant",
+                      content: fullAnswer,
+                      timestamp: new Date(),
+                      citations: pendingCitations.length ? pendingCitations : undefined,
+                      conflicts: pendingConflicts.length ? pendingConflicts : undefined,
+                    });
+                    return { messages: msgs, selectedMessageId: id };
                   }
                   return { messages: msgs };
                 });
+              } else if (currentEvent === "provenance") {
+                const citations = (data.citations as Citation[]) || [];
+                const conflicts = (data.conflicts as Conflict[]) || [];
+                if (citations.length) pendingCitations = citations;
+                if (conflicts.length) pendingConflicts = conflicts;
+                set((s) => {
+                  const msgs = [...s.messages];
+                  const lastMsg = msgs[msgs.length - 1];
+                  if (lastMsg && lastMsg.role === "assistant") {
+                    lastMsg.citations = citations.length ? citations : lastMsg.citations;
+                    lastMsg.conflicts = conflicts.length ? conflicts : lastMsg.conflicts;
+                    return { messages: msgs, selectedMessageId: lastMsg.id };
+                  }
+                  return s;
+                });
               } else if (currentEvent === "done") {
                 provenance = {
-                  citations: (data.citations as Citation[]) || [],
+                  citations: ((data.citations as Citation[]) || []).length
+                    ? (data.citations as Citation[])
+                    : pendingCitations,
                   claims: (data.claims as Claim[]) || [],
-                  conflicts: (data.conflicts as Conflict[]) || [],
+                  conflicts: ((data.conflicts as Conflict[]) || []).length
+                    ? (data.conflicts as Conflict[])
+                    : pendingConflicts,
                   final_status: data.final_status ? String(data.final_status) : undefined,
                   latency_ms: typeof data.latency_ms === "number" ? data.latency_ms : undefined,
                   trajectory: data.trajectory ? String(data.trajectory) : undefined,
                 };
-                // Replace streaming message with final answer + provenance
+                const msgId = `ai-${Date.now()}`;
                 set((s) => {
                   const msgs = s.messages.filter((m) => !m.id.startsWith("stream-"));
                   msgs.push({
-                    id: `ai-${Date.now()}`,
+                    id: msgId,
                     role: "assistant",
                     content: String(data.answer),
                     timestamp: new Date(),
@@ -191,56 +280,132 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     latencyMs: provenance?.latency_ms,
                     trajectory: provenance?.trajectory,
                   });
-                  return { messages: msgs, isStreaming: false, graphStatus: null };
+                  return {
+                    messages: msgs,
+                    isStreaming: false,
+                    graphStatus: null,
+                    selectedMessageId: msgId,
+                    pipelineEvents: s.pipelineEvents.map((e) => ({ ...e, status: "done" as const })),
+                  };
                 });
               } else if (currentEvent === "error") {
-                set((s) => ({
-                  messages: [...s.messages, { id: `err-${Date.now()}`, role: "assistant", content: String(data.detail || "Something went wrong."), timestamp: new Date() }],
-                  isStreaming: false, graphStatus: null,
-                }));
+                set((s) => {
+                  // Keep streamed answer + evidence; don't replace with a bare error bubble.
+                  const msgs = [...s.messages];
+                  const last = msgs[msgs.length - 1];
+                  if (last && last.role === "assistant" && (last.content || last.citations?.length)) {
+                    last.finalStatus = "error";
+                    if (!last.content) {
+                      last.content = String(data.detail || "Operation failed.");
+                    }
+                    return {
+                      messages: msgs,
+                      isStreaming: false,
+                      graphStatus: null,
+                      selectedMessageId: last.id,
+                    };
+                  }
+                  return {
+                    messages: [
+                      ...msgs,
+                      {
+                        id: `err-${Date.now()}`,
+                        role: "assistant",
+                        content: String(data.detail || "Operation failed."),
+                        timestamp: new Date(),
+                      },
+                    ],
+                    isStreaming: false,
+                    graphStatus: null,
+                  };
+                });
               }
-            } catch {}
+            } catch {
+              // malformed SSE chunk
+            }
           }
         }
       }
 
-      // If the stream ended without a done event (e.g. connection dropped), commit whatever we have
       if (!provenance && fullAnswer) {
+        const msgId = `ai-${Date.now()}`;
         set((s) => ({
-          messages: s.messages.filter((m) => !m.id.startsWith("stream-")).concat([
-            { id: `ai-${Date.now()}`, role: "assistant", content: fullAnswer, timestamp: new Date() }
-          ]),
+          messages: s.messages
+            .filter((m) => !m.id.startsWith("stream-"))
+            .concat([
+              {
+                id: msgId,
+                role: "assistant",
+                content: fullAnswer,
+                timestamp: new Date(),
+                citations: pendingCitations.length ? pendingCitations : undefined,
+                conflicts: pendingConflicts.length ? pendingConflicts : undefined,
+                finalStatus: "partial",
+              },
+            ]),
           isStreaming: false,
           graphStatus: null,
+          selectedMessageId: msgId,
         }));
       }
     } catch {
-      // Fallback to non-streaming if SSE fails
       try {
         const res = await chatApi.query(activeChatId, content);
         const data = res.data;
+        const msgId = `ai-${Date.now()}`;
         const aiMsg: Message = {
-          id: `ai-${Date.now()}`, role: "assistant", content: data.answer, timestamp: new Date(),
+          id: msgId,
+          role: "assistant",
+          content: data.answer,
+          timestamp: new Date(),
           citations: data.citations,
           claims: data.claims,
           conflicts: data.conflicts,
           finalStatus: data.final_status,
           latencyMs: data.latency_ms,
         };
-        set((s) => ({ messages: [...s.messages, aiMsg], isStreaming: false, graphStatus: null }));
+        set((s) => ({
+          messages: [...s.messages, aiMsg],
+          isStreaming: false,
+          graphStatus: null,
+          selectedMessageId: msgId,
+        }));
       } catch {
         set((s) => ({
-          messages: [...s.messages, { id: `err-${Date.now()}`, role: "assistant", content: "Something went wrong. Please try again.", timestamp: new Date() }],
-          isStreaming: false, graphStatus: null,
+          messages: [
+            ...s.messages,
+            {
+              id: `err-${Date.now()}`,
+              role: "assistant",
+              content: "Operation failed. Retry query.",
+              timestamp: new Date(),
+            },
+          ],
+          isStreaming: false,
+          graphStatus: null,
         }));
       }
     }
   },
 
-  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  toggleSidebar: () =>
+    set((s) => ({
+      sidebarCollapsed: !s.sidebarCollapsed,
+      sidebarOpen: s.sidebarCollapsed,
+    })),
+
+  toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
+
+  setSelectedMessage: (id) => set({ selectedMessageId: id }),
 
   addSystemMessage: (content, meta) => {
-    const msg: Message = { id: `sys-${Date.now()}`, role: "system", content, timestamp: new Date(), meta };
+    const msg: Message = {
+      id: `sys-${Date.now()}`,
+      role: "system",
+      content,
+      timestamp: new Date(),
+      meta,
+    };
     set((s) => ({ messages: [...s.messages, msg] }));
   },
 }));

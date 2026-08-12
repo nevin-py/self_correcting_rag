@@ -102,6 +102,23 @@ def authority_score(url: str | None, source_type: SourceType) -> float:
     return authority_tier(url, source_type)[1]
 
 
+def official_search_variants(query: str) -> list[str]:
+    """Extra search strings using TLD / org-type patterns already in this module.
+
+    Not a per-country agency list: ``site:.gov`` plus at most one primary-org
+    ``site:`` from ``_PRIMARY_ORG_DOMAINS``.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    variants = [f"{q} site:.gov"]
+    # One org-type domain is enough; pick a stable first item for determinism.
+    org = next(iter(sorted(_PRIMARY_ORG_DOMAINS)), None)
+    if org:
+        variants.append(f"{q} site:{org}")
+    return variants
+
+
 def classify_source_quality(
     source_name: str,
     source_url: str | None,

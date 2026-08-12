@@ -2,67 +2,48 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
-import { ArrowRight, Brain, MessageSquare, Shield, Zap } from "lucide-react";
+import { Button } from "@/components/ui/Button";
 
-const DEMO_EXCHANGE = [
-  { role: "user", text: "What's our company's leave policy?" },
-  { role: "assistant", text: "According to the HR handbook, employees are entitled to 20 days of paid leave per year...", delay: 800 },
-  { role: "system", text: "Checking 3 sources — one disagrees", delay: 200 },
-  { role: "assistant", text: "Let me revise — the updated 2024 policy grants 25 days, not 20. The handbook was revised in Q3.", delay: 600 },
+const DEMO_STAGES = [
+  { label: "RETRIEVE", text: "Query indexed HR handbook..." },
+  { label: "VERIFY", text: "20 days paid leave — claim extracted" },
+  { label: "CONFLICT", text: "Policy v2023 contradicts v2024 revision" },
+  { label: "SEARCH", text: "Web fallback: official policy portal" },
+  { label: "CORRECT", text: "Answer revised to 25 days" },
+  { label: "ANSWER", text: "Verified response delivered" },
 ];
 
-function AnimatedDemo() {
-  const [visible, setVisible] = useState(0);
-
-  const [resetKey, setResetKey] = useState(0);
+function PipelineDemo() {
+  const [step, setStep] = useState(0);
 
   useEffect(() => {
-    let i = 0;
     const timer = setInterval(() => {
-      i++;
-      if (i <= DEMO_EXCHANGE.length) setVisible(i);
-      if (i >= DEMO_EXCHANGE.length + 2) {
-        clearInterval(timer);
-        setTimeout(() => {
-          setVisible(0);
-          setResetKey((k) => k + 1);
-        }, 2000);
-      }
-    }, 1200);
+      setStep((s) => (s >= DEMO_STAGES.length ? 0 : s + 1));
+    }, 1400);
     return () => clearInterval(timer);
-  }, [resetKey]);
+  }, []);
 
   return (
-    <div className="w-full max-w-lg mx-auto bg-[var(--mountainside)] rounded-[var(--radius-md)] border border-[var(--apres-ski)]/20 p-6 space-y-4 h-[280px] overflow-hidden">
-      <AnimatePresence>
-        {DEMO_EXCHANGE.slice(0, visible).map((msg, i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+    <div className="border border-border bg-surface">
+      <div className="border-b border-border px-4 py-2">
+        <p className="label-caps">Live Correction Sequence</p>
+      </div>
+      <div className="p-4 space-y-1">
+        {DEMO_STAGES.slice(0, step).map((stage, i) => (
+          <div
+            key={stage.label}
+            className={`flex items-start gap-3 border-l-2 px-3 py-2 ${
+              i === step - 1 ? "border-accent-bright bg-accent-glow" : "border-border bg-surface-inset"
+            }`}
           >
-            {msg.role === "system" ? (
-              <div className="text-xs text-[var(--apres-ski)] italic px-3 py-1">
-                {msg.text}
-              </div>
-            ) : (
-              <div
-                className={`max-w-[80%] px-4 py-2.5 rounded-[var(--radius-md)] text-sm ${
-                  msg.role === "user"
-                    ? "bg-[var(--arctic)] text-[var(--midnight)] rounded-br-[var(--radius-sm)]"
-                    : "bg-transparent border border-[var(--apres-ski)]/30 text-[var(--slopes)] rounded-bl-[var(--radius-sm)]"
-                }`}
-              >
-                {msg.text}
-              </div>
-            )}
-          </motion.div>
+            <span className="font-mono text-[9px] uppercase tracking-wider text-accent-bright w-16 shrink-0">
+              {stage.label}
+            </span>
+            <span className="font-mono text-[10px] text-text-secondary">{stage.text}</span>
+          </div>
         ))}
-      </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -71,56 +52,89 @@ export default function HomePage() {
   const router = useRouter();
   const { token, loadUser } = useAuthStore();
 
-  useEffect(() => { loadUser(); }, [loadUser]);
-  useEffect(() => { if (token) router.replace("/chat"); }, [token, router]);
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
 
-  const features = [
-    { icon: Brain, title: "Self-Correcting", desc: "Automatically detects and fixes hallucinations" },
-    { icon: MessageSquare, title: "Multi-Turn Memory", desc: "Remembers context across messages" },
-    { icon: Shield, title: "Verified Answers", desc: "Every claim checked against sources" },
-    { icon: Zap, title: "Web Fallback", desc: "Searches Wikipedia and the web live" },
-  ];
+  useEffect(() => {
+    if (token) router.replace("/chat");
+  }, [token, router]);
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <header className="flex-1 flex flex-col items-center justify-center px-6 pt-20">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}>
-          <h1 className="font-display text-5xl md:text-7xl text-[var(--arctic)] mb-4">
-            Ask questions.<br />
-            <span className="text-[var(--glacier)] italic">Get verified answers.</span>
-          </h1>
-          <p className="text-[var(--slopes)] text-lg max-w-xl mb-10">
-            Grounded in your documents. Automatically self-corrects when it gets something wrong.
+    <div className="min-h-screen bg-void">
+      {/* Top bar */}
+      <header className="flex items-center justify-between border-b border-border px-6 py-3">
+        <div>
+          <p className="font-display text-sm font-semibold tracking-tight text-text-primary">SCRAG</p>
+          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-text-muted">
+            Self-Correcting Knowledge Workspace
           </p>
-          <div className="flex gap-4 justify-center">
-            <button onClick={() => router.push("/register")} className="px-8 py-3 rounded-[var(--radius-pill)] bg-[var(--glacier)] text-[var(--midnight)] font-semibold text-sm hover:opacity-90 transition-opacity duration-[var(--duration-micro)] flex items-center gap-2">
-              Get Started <ArrowRight size={16} />
-            </button>
-            <button onClick={() => router.push("/login")} className="px-8 py-3 rounded-[var(--radius-pill)] border border-[var(--apres-ski)] text-[var(--slopes)] font-semibold text-sm hover:border-[var(--arctic)] transition-colors duration-[var(--duration-micro)]">
-              Sign In
-            </button>
-          </div>
-        </motion.div>
-
-        <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3, duration: 0.8 }} className="mt-16 mb-20">
-          <AnimatedDemo />
-        </motion.div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={() => router.push("/login")}>
+            Sign In
+          </Button>
+          <Button variant="accent" size="sm" onClick={() => router.push("/register")}>
+            Initialize Access
+          </Button>
+        </div>
       </header>
 
-      <section className="py-16 px-6 border-t border-[var(--apres-ski)]/10">
-        <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {features.map((f, i) => (
-            <motion.div key={f.title} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 + i * 0.1, duration: 0.5 }} className="p-5 rounded-[var(--radius-md)] bg-[var(--mountainside)] border border-[var(--apres-ski)]/10">
-              <f.icon className="w-8 h-8 text-[var(--glacier)] mb-3" />
-              <h3 className="font-display text-[var(--arctic)] text-base mb-1">{f.title}</h3>
-              <p className="text-[var(--apres-ski)] text-sm">{f.desc}</p>
-            </motion.div>
+      {/* Hero */}
+      <main className="mx-auto max-w-6xl px-6 py-16">
+        <div className="grid gap-12 lg:grid-cols-2 lg:items-start">
+          <div>
+            <p className="label-caps mb-4">Enterprise Knowledge Terminal</p>
+            <h1 className="font-display text-4xl font-semibold leading-tight tracking-tight text-text-primary md:text-5xl">
+              Retrieve.
+              <br />
+              Verify.
+              <br />
+              <span className="text-accent-bright">Correct.</span>
+            </h1>
+            <p className="mt-6 max-w-md text-sm leading-relaxed text-text-secondary">
+              Not a chatbot. An information-analysis instrument that retrieves from your knowledge base,
+              verifies every claim, detects contradictions, searches when local knowledge fails, and
+              delivers corrected answers with full evidence provenance.
+            </p>
+
+            <div className="mt-8 border border-border bg-surface-inset p-4">
+              <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-text-muted">
+                Operational Pipeline
+              </p>
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-accent-bright">
+                RETRIEVE → VERIFY → DETECT CONFLICT → SEARCH → CORRECT → ANSWER
+              </p>
+            </div>
+
+            <Button variant="accent" size="lg" onClick={() => router.push("/register")} className="mt-8">
+              Enter Workspace
+            </Button>
+          </div>
+
+          <PipelineDemo />
+        </div>
+
+        {/* Feature grid */}
+        <div className="mt-20 grid gap-px border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { title: "Evidence Retrieval", desc: "Multi-source document indexing with authority scoring" },
+            { title: "Claim Verification", desc: "Every assertion checked against indexed evidence" },
+            { title: "Conflict Detection", desc: "Contradictions surfaced and resolved transparently" },
+            { title: "Web Fallback", desc: "Automatic external search when local knowledge is stale" },
+          ].map((f) => (
+            <div key={f.title} className="bg-surface p-5">
+              <p className="font-mono text-[10px] uppercase tracking-wider text-accent-bright">{f.title}</p>
+              <p className="mt-2 text-xs leading-relaxed text-text-secondary">{f.desc}</p>
+            </div>
           ))}
         </div>
-      </section>
+      </main>
 
-      <footer className="py-6 text-center text-[var(--apres-ski)] text-xs border-t border-[var(--apres-ski)]/10">
-        Built with Next.js, FastAPI, and LangGraph
+      <footer className="border-t border-border px-6 py-4">
+        <p className="font-mono text-[9px] text-text-muted">
+          SCRAG · Self-Correcting RAG · FastAPI · LangGraph · Next.js
+        </p>
       </footer>
     </div>
   );

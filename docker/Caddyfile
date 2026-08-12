@@ -1,0 +1,21 @@
+# {$DOMAIN} comes from compose environment.
+# Examples:
+#   DOMAIN=api.example.com          → HTTPS via Let's Encrypt
+#   DOMAIN=:80                      → HTTP only (local/prod behind another LB)
+#
+# When DOMAIN has no host (starts with :), Caddy serves plain HTTP on that port.
+
+{$DOMAIN} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	reverse_proxy api:8000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+}

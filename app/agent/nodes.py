@@ -3,14 +3,13 @@ Agent nodes for the business-ready self-correcting RAG pipeline.
 
 Architecture (each node has a single, observable responsibility):
 
-    classify_query       -> structured query intent & source needs
-    build_plan           -> typed plan with metric/geo-disambiguated queries
+    classify_and_plan    -> intent + retrieval plan (single LLM call)
     retrieve_documents   -> vector + BM25 retrieval over the knowledge base
     search_web           -> web search (Tavily / SearXNG / Wikipedia)
     assemble_evidence    -> SOURCE RANKING + conflict classification + context assembly
     extract_verify_claims -> claim extraction (disabled for cost; post-gen verify covers it)
-    generate_answer      -> cited answer generation (consults cross-turn evidence state)
-    verify_answer_claims -> claim-level verification + deterministic structured errors
+    generate_answer      -> cited answer generation + hard citation flagging
+    verify_answer_claims -> hard citation check + claim-level verification
     repair_claims        -> targeted repair or termination
 
 Evidence normalization, source authority, ranking, conflict classification,
@@ -25,15 +24,32 @@ import asyncio
 import json
 import logging
 import re
+import time
+import concurrent.futures
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, get_args, get_origin
 from urllib.parse import urlparse
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticUndefined
 
 from app.agent.conflicts import detect_conflicts, is_genuine_contradiction
+from app.agent.citation_validator import (
+    extract_citation_tokens,
+    flag_uncited_in_answer,
+    resolve_citation_token,
+    validate_answer_citations,
+)
 from app.agent.evidence_state import to_context_block
+from app.agent.verify_cascade import (
+    dedupe_search_queries,
+    grade_coverage,
+    normalize_query,
+    patch_flagged_sentences,
+    run_verify_cascade,
+)
+from app.agent.debug_session import agent_debug_log
 from app.agent.normalization import (
     compose_search_query,
     detect_metric_type,
@@ -47,10 +63,19 @@ from app.agent.normalization import (
     get_retrieval_queries_for_subqueries,
     SubQuery,
 )
-from app.agent.ranking import combined_score, rank_evidence
+from app.agent.ranking import (
+    combined_score,
+    evidence_fits_classification,
+    filter_evidence_by_classification,
+    rank_evidence,
+)
 from app.agent.reranker import rerank
 from app.agent.search_tool import search_structured
-from app.agent.source_authority import authority_score, classify_source_quality
+from app.agent.source_authority import (
+    authority_score,
+    classify_source_quality,
+    official_search_variants,
+)
 from app.agent.state import (
     Claim,
     ClaimStatus,
@@ -72,8 +97,7 @@ from app.agent.state import (
     utc_now,
 )
 from app.agent.verification import audit_claims
-from app.documents.clients import chat_llm, routing_llm
-from app.documents.clients import openrouter_planner_llm, openrouter_generator_llm, openrouter_hallucination_llm
+from app.documents.clients import resolve_llms
 from app.documents.clients import get_chroma_client
 from app.documents.service import retrieve_chunks
 from app.core.config import settings
@@ -84,17 +108,44 @@ logger = logging.getLogger(__name__)
 # ── LLM helpers ──────────────────────────────────────────────────────────────
 
 
-def _llm_with_fallback(primary: Any, fallback: Any | None, messages: list, output_schema: Any):
-    """Call primary LLM; on failure invoke fallback with structured output."""
-    try:
-        bound = primary.with_structured_output(output_schema)
-        return bound.invoke(messages)
-    except Exception as exc:
-        logger.warning("Primary LLM failed (%s), trying fallback", exc)
-        if fallback is None:
-            raise
-        bound = fallback.with_structured_output(output_schema)
-        return bound.invoke(messages)
+def _normalize_messages_for_gemini(messages: list) -> list:
+    """Gemini rejects system-only payloads ('contents are required').
+
+    Convert a lone SystemMessage into a HumanMessage, and ensure there is at
+    least one user turn when a SystemMessage is followed by nothing else.
+    """
+    if not messages:
+        return [HumanMessage(content="Continue.")]
+
+    out: list[BaseMessage] = []
+    has_human = False
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            # Keep system if other providers; for Gemini path we fold into human
+            out.append(msg)
+        elif isinstance(msg, HumanMessage):
+            has_human = True
+            out.append(msg)
+        else:
+            out.append(msg)
+
+    if not has_human:
+        # Fold system instructions into a user turn Gemini will accept
+        system_parts = [m.content for m in out if isinstance(m, SystemMessage)]
+        other = [m for m in out if not isinstance(m, SystemMessage)]
+        merged = "\n\n".join(str(p) for p in system_parts if p)
+        return other + [HumanMessage(content=merged or "Follow the instructions.")]
+    return out
+
+
+def _is_google_llm(llm: Any) -> bool:
+    return llm is not None and llm.__class__.__name__ == "ChatGoogleGenerativeAI"
+
+
+def _prepare_messages(llm: Any, messages: list) -> list:
+    if _is_google_llm(llm):
+        return _normalize_messages_for_gemini(messages)
+    return messages
 
 
 def _strip_json_markers(text: str) -> str:
@@ -105,11 +156,228 @@ def _strip_json_markers(text: str) -> str:
     return text.strip()
 
 
-def _safe_json_loads(text: str) -> dict:
-    try:
-        return json.loads(_strip_json_markers(text))
-    except json.JSONDecodeError:
+def _extract_json_object(text: str) -> dict:
+    """Best-effort JSON object extraction from model prose / markdown fences."""
+    if not text:
         return {}
+    cleaned = _strip_json_markers(text)
+    try:
+        data = json.loads(cleaned)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        pass
+
+    start = cleaned.find("{")
+    if start < 0:
+        return {}
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(cleaned)):
+        ch = cleaned[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(cleaned[start : i + 1])
+                    return data if isinstance(data, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+    return {}
+
+
+def _safe_json_loads(text: str) -> dict:
+    return _extract_json_object(text)
+
+
+def _is_openai_compatible(llm: Any) -> bool:
+    name = llm.__class__.__name__ if llm is not None else ""
+    return name in {"ChatOpenAI", "AzureChatOpenAI"}
+
+
+def _base_model_type(annotation: Any) -> type[BaseModel] | None:
+    """Resolve a field annotation to a nested BaseModel type, if any."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    origin = get_origin(annotation)
+    if origin is None:
+        return None
+    for arg in get_args(annotation):
+        if isinstance(arg, type) and issubclass(arg, BaseModel):
+            return arg
+    return None
+
+
+def _coerce_null_strings(data: Any, model: type[BaseModel]) -> Any:
+    """Coerce JSON nulls to schema defaults before Pydantic validation."""
+    if not isinstance(data, dict):
+        return data
+    fixed = dict(data)
+    for key, finfo in model.model_fields.items():
+        if key not in fixed:
+            continue
+        val = fixed[key]
+        if val is None and finfo.annotation is str:
+            fixed[key] = finfo.default if finfo.default is not PydanticUndefined else ""
+        elif isinstance(val, dict):
+            nested = _base_model_type(finfo.annotation)
+            if nested is not None:
+                fixed[key] = _coerce_null_strings(val, nested)
+    return fixed
+
+
+def _validate_structured(data: dict, output_schema: type[BaseModel]) -> BaseModel:
+    try:
+        return output_schema.model_validate(data)
+    except ValidationError:
+        coerced = _coerce_null_strings(data, output_schema)
+        return output_schema.model_validate(coerced)
+
+
+def _response_text(response: Any) -> str:
+    """Extract visible text from an LLM response (handles list / reasoning-only)."""
+    content = getattr(response, "content", None)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("content") or ""))
+            else:
+                parts.append(str(getattr(block, "text", None) or block))
+        content = "".join(parts)
+    text = str(content or "").strip()
+    if text:
+        return text
+
+    extra = getattr(response, "additional_kwargs", None) or {}
+    for key in ("reasoning_content", "reasoning", "text", "output"):
+        val = extra.get(key)
+        if isinstance(val, dict):
+            val = val.get("text") or val.get("content") or ""
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    # Some OpenRouter wrappers stash the message on response.response_metadata
+    meta = getattr(response, "response_metadata", None) or {}
+    for key in ("reasoning", "content"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _structured_invoke(llm: Any, messages: list, output_schema: Any):
+    """Invoke with structured output; one raw JSON retry only if needed.
+
+    Avoids burning a second full LLM round-trip when the first response is empty.
+    """
+    prepared = _prepare_messages(llm, messages)
+
+    # 1) Native structured output (json_schema when available)
+    try:
+        try:
+            bound = llm.with_structured_output(output_schema, method="json_schema")
+        except TypeError:
+            bound = llm.with_structured_output(output_schema)
+        result = bound.invoke(prepared)
+        if result is not None:
+            return result
+    except Exception as structured_exc:
+        logger.debug("Structured output failed (%s); trying raw JSON parse", structured_exc)
+
+    # 2) Single raw completion + parse (no further retries here)
+    parse_hint = HumanMessage(
+        content=(
+            "Respond with ONLY a single valid JSON object matching the required schema. "
+            "No markdown, no commentary, no code fences. Never return an empty response."
+        )
+    )
+    response = llm.invoke([*prepared, parse_hint])
+    text = _response_text(response)
+    if not text:
+        # #region agent log
+        agent_debug_log(
+            "D",
+            "nodes.py:_structured_invoke",
+            "empty_structured_response",
+            {
+                "schema": getattr(output_schema, "__name__", str(output_schema)),
+                "content_type": type(getattr(response, "content", None)).__name__,
+                "raw_preview": str(getattr(response, "content", ""))[:120],
+            },
+        )
+        # #endregion
+        raise ValueError("Could not parse JSON from model output: (empty response)")
+    data = _extract_json_object(text)
+    if not data:
+        raise ValueError(f"Could not parse JSON from model output: {text[:200]}")
+    return _validate_structured(data, output_schema)
+
+
+def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_schema: Any):
+    """Call primary LLM; on failure walk fallbacks with structured output."""
+    chain = [primary]
+    if fallbacks is None:
+        pass
+    elif isinstance(fallbacks, (list, tuple)):
+        chain.extend(fallbacks)
+    else:
+        chain.append(fallbacks)
+
+    last_exc: Exception | None = None
+    for idx, llm in enumerate(chain):
+        if llm is None:
+            continue
+        try:
+            return _structured_invoke(llm, messages, output_schema)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "LLM call failed (%s)%s",
+                exc,
+                ", trying next" if idx < len(chain) - 1 else "",
+            )
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No LLM clients available")
+
+
+def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages: list) -> tuple[str, str]:
+    """Invoke chat models with multi-fallback. Returns (answer, used_label_suffix)."""
+    chain = [primary, *list(fallbacks or ())]
+    last_exc: Exception | None = None
+    for idx, llm in enumerate(chain):
+        if llm is None:
+            continue
+        try:
+            response = llm.invoke(_prepare_messages(llm, messages))
+            text = _response_text(response)
+            if not text:
+                raise ValueError("Generator returned empty response")
+            label = "primary" if idx == 0 else f"fallback-{idx}"
+            return text, label
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Generator failed (%s)%s",
+                exc,
+                ", trying next" if idx < len(chain) - 1 else "",
+            )
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No generator clients available")
 
 
 # ── Backward-compatible extraction wrappers (delegate to normalization) ───────
@@ -290,106 +558,214 @@ def _detect_evidence_conflicts(evidence: list[Evidence]) -> list[dict]:
     return detect_conflicts(evidence)
 
 
-# ── Nodes: classification & planning ─────────────────────────────────────────
+# ── Nodes: classification & planning (single LLM call) ───────────────────────
 
 
-_CLASSIFICATION_PROMPT = """You are a query classifier for a business-ready RAG system.
-Analyze the user's question and emit a structured classification.
+_CLASSIFY_AND_PLAN_PROMPT = """You are the classifier+planner for a business-ready self-correcting RAG agent.
+In ONE response, classify the user query AND produce a retrieval/verification plan.
 
-Guidelines:
+## Classification fields
 - primary_need: factual, procedural, comparative, temporal, exploratory
 - needs_documents: true if internal docs likely contain the answer
-- needs_web: true if public/web info is needed (latest news, external facts)
+- needs_web: true if public/web info is needed (latest news, external facts, updates beyond a textbook)
 - needs_calculation: true if arithmetic, dates, or aggregation required
-- temporal_focus: ISO date if the question is about a specific date / "latest"
+- temporal_focus: ISO date if about a specific date / "latest"
 - temporal_qualifier: actual / estimate / preliminary / revised / projected / advance / unknown
 - geographic_scope: global / national / state / district / city / region / unknown
-- geography: the specific place name if mentioned (e.g. "Karnataka", "India", "Maharashtra", "USA")
+- geography: specific place name if mentioned; use "" if none
 - metric_hint: gdp / gsdp / gva / gva_share / output_share / employment / revenue / population / growth_rate / inflation / other / unknown
   → CRITICAL: GSDP, GVA, GVA_SHARE, OUTPUT_SHARE, and GDP are DIFFERENT metrics. Never conflate them.
 - domain_hints: list of relevant domains
 - ambiguity: low / medium / high
-- rewrite: a clearer, disambiguated version of the query
+- rewrite: clearer, disambiguated version of the query
 
-User query: {query}
-"""
-
-
-def classify_query(state: dict) -> dict:
-    """Classify user intent and source requirements."""
-    query = state["query"]
-    try:
-        classification = _llm_with_fallback(
-            openrouter_planner_llm or routing_llm,
-            routing_llm,
-            [SystemMessage(content=_CLASSIFICATION_PROMPT.format(query=query))],
-            QueryClassification,
-        )
-    except Exception as exc:
-        logger.exception("Query classification failed: %s", exc)
-        classification = QueryClassification(
-            primary_need=QueryNeed.FACTUAL,
-            needs_documents=True,
-            needs_web=False,
-            rewrite=query,
-        )
-
-    if classification.primary_need in (QueryNeed.TEMPORAL, QueryNeed.EXPLORATORY):
-        classification.needs_web = True
-
-    return {"classification": classification}
-
-
-_PLANNER_PROMPT = """You are a planner for a self-correcting RAG agent.
-Given the user query and its classification, produce a structured plan with explicit steps.
-
+## Plan steps
 Each step must have:
 - action: one of retrieve_documents, search_web, calculate, synthesize
-- queries: concrete search/retrieval queries to run (include the EXACT metric acronym
-  and geography from the classification, e.g. "Maharashtra GSDP advance estimate")
-- expected_claims: what factual claims you expect evidence to support
+- queries: concrete search/retrieval queries (include EXACT metric acronym + geography)
+- expected_claims: factual claims evidence should support
 - rationale: why this step is needed
 
-CRITICAL classification handling:
-- metric_hint: if set (not "unknown"), queries MUST reference that exact metric
-  (gsdp, gva, gva_share, output_share, gdp). NEVER substitute one for another.
-- geographic_scope + geography: include the specific geography in every query.
-- temporal_qualifier: include it in queries (e.g. "advance estimate", "actual").
-- price basis: if the query distinguishes current vs constant prices, include it.
+Rules:
+- If metric_hint is set, every query MUST use that exact metric (never substitute GDP for GSDP, etc.).
+- Include geography and temporal qualifier in queries when known.
+- Prefer retrieve_documents first when needs_documents is true; add search_web when needs_web is true.
 
-Classification: {classification}
 User query: {query}
 """
 
 
-def build_plan(state: dict) -> dict:
-    """Build a structured retrieval and verification plan."""
+def _query_implies_web(query: str) -> bool:
+    """Heuristic: recency / compare-to-textbook questions need public web evidence."""
+    q = (query or "").lower()
+    keys = (
+        "latest",
+        "most recent",
+        "recent",
+        "current",
+        "today",
+        "this year",
+        "updated",
+        "still hold",
+        "still holds",
+        "compare",
+        "how does that picture compare",
+    )
+    return any(k in q for k in keys)
+
+
+def _heuristic_classification(query: str) -> QueryClassification:
+    """Build a classification from the query text when the planner LLM fails.
+
+    Metric/geo agnostic: uses existing detectors only — no named places or agencies.
+    Produces a short rewrite suitable for search (not the full user paragraph).
+    """
+    places = detect_place_mentions(query)
+    geography = places[0] if places else ""
+    metric = detect_metric_type(query)
+    want_web = _query_implies_web(query)
+    rewrite = compose_search_query(
+        geography=geography,
+        metric=metric,
+        temporal=TemporalQualifier.UNKNOWN,
+        base="",
+    )
+    # Keep rewrite short; append a compact topic cue from the first clause if needed
+    if not rewrite:
+        rewrite = re.split(r"[.?!\n]", query.strip())[0].strip()[:120]
+    else:
+        # Optional short topic from query without dumping the whole paragraph
+        first = re.split(r"[.?!\n]", query.strip())[0].strip()
+        if first and len(rewrite) < 40:
+            rewrite = f"{rewrite} {first[:80]}".strip()
+    rewrite = rewrite[:160]
+    return QueryClassification(
+        primary_need=QueryNeed.TEMPORAL if want_web else QueryNeed.FACTUAL,
+        needs_documents=True,
+        needs_web=want_web,
+        geography=geography,
+        metric_hint=metric,
+        rewrite=rewrite or query[:120],
+    )
+
+
+def classify_and_plan(state: dict) -> dict:
+    """Classify intent and build a retrieval plan in a single structured LLM call."""
+    t0 = time.perf_counter()
     query = state["query"]
-    classification = state.get("classification") or QueryClassification(rewrite=query)
+    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
+    used_fallback = False
 
     try:
         plan = _llm_with_fallback(
-            openrouter_planner_llm or routing_llm,
-            routing_llm,
-            [SystemMessage(content=_PLANNER_PROMPT.format(
-                query=query,
-                classification=classification.model_dump_json(),
-            ))],
+            llms.planner,
+            llms.planner_fallbacks,
+            [SystemMessage(content=_CLASSIFY_AND_PLAN_PROMPT.format(query=query))],
             PlannerOutput,
         )
+        classification = plan.classification or QueryClassification(rewrite=query)
     except Exception as exc:
-        logger.exception("Planner failed: %s", exc)
-        plan = PlannerOutput(
-            classification=classification,
-            steps=[PlanStep(
+        used_fallback = True
+        logger.exception("classify_and_plan failed: %s", exc)
+        classification = _heuristic_classification(query)
+        short_q = classification.rewrite or query[:120]
+        steps = [PlanStep(
+            action="retrieve_documents",
+            queries=[short_q],
+            expected_claims=[],
+            rationale="Fallback retrieve due to classify_and_plan failure",
+        )]
+        if classification.needs_web:
+            steps.append(PlanStep(
+                action="search_web",
+                queries=[short_q],
+                expected_claims=[],
+                rationale="Fallback web search from heuristic rewrite",
+            ))
+        plan = PlannerOutput(classification=classification, steps=steps)
+
+    if classification.primary_need in (QueryNeed.TEMPORAL, QueryNeed.EXPLORATORY):
+        classification.needs_web = True
+    # Recency / compare cues must force web even when the model (or fallback) missed it
+    if _query_implies_web(query):
+        classification.needs_web = True
+    # Keep plan.classification in sync after mutation
+    plan.classification = classification
+    if not plan.steps:
+        steps = []
+        if classification.needs_documents:
+            steps.append(PlanStep(
                 action="retrieve_documents",
                 queries=[classification.rewrite or query],
                 expected_claims=[],
-                rationale="Fallback retrieve due to planner failure",
-            )],
-        )
+                rationale="Default document retrieval",
+            ))
+        if classification.needs_web:
+            steps.append(PlanStep(
+                action="search_web",
+                queries=[classification.rewrite or query],
+                expected_claims=[],
+                rationale="Default web search",
+            ))
+        plan.steps = steps or [PlanStep(
+            action="retrieve_documents",
+            queries=[classification.rewrite or query],
+            expected_claims=[],
+            rationale="Fallback retrieve",
+        )]
+    elif classification.needs_web and not any(s.action == "search_web" for s in plan.steps):
+        plan.steps = list(plan.steps) + [PlanStep(
+            action="search_web",
+            queries=[classification.rewrite or query],
+            expected_claims=[],
+            rationale="Added web search for recency/comparison query",
+        )]
 
-    return {"plan": plan, "planner_state": PlannerDecision.NOT_ENOUGH.value}
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    # #region agent log
+    qlow = (query or "").lower()
+    agent_debug_log(
+        "A",
+        "nodes.py:classify_and_plan",
+        "classify_plan_result",
+        {
+            "elapsed_ms": round(elapsed_ms),
+            "used_fallback": used_fallback,
+            "needs_web": bool(classification.needs_web),
+            "needs_documents": bool(classification.needs_documents),
+            "primary_need": getattr(classification.primary_need, "value", classification.primary_need),
+            "plan_actions": [s.action for s in (plan.steps or [])],
+            "rewrite": (classification.rewrite or "")[:120],
+            "query_has_recent": any(k in qlow for k in ("recent", "latest", "most recent", "current")),
+            "query_has_compare": "compare" in qlow or "textbook" in qlow,
+        },
+    )
+    # #endregion
+    logger.info("Node classify_and_plan completed in %.0fms", elapsed_ms)
+    return {
+        "classification": classification,
+        "plan": plan,
+        "planner_state": PlannerDecision.NOT_ENOUGH.value,
+        "provider_used": llms.label,
+    }
+
+
+def classify_query(state: dict) -> dict:
+    """Backward-compatible wrapper — prefer classify_and_plan in the live graph."""
+    return classify_and_plan(state)
+
+
+def build_plan(state: dict) -> dict:
+    """No-op if classify_and_plan already produced a plan; otherwise run combined call."""
+    if state.get("plan") and state.get("classification"):
+        logger.info("Node build_plan skipped (already planned)")
+        return {
+            "plan": state["plan"],
+            "classification": state["classification"],
+            "planner_state": state.get("planner_state") or PlannerDecision.NOT_ENOUGH.value,
+            "provider_used": state.get("provider_used"),
+        }
+    return classify_and_plan(state)
 
 
 # ── Precise query composition (LLM-driven explicit searches) ─────────────────
@@ -420,7 +796,16 @@ def _chunks_to_evidence(chunks: list[dict], source_type: SourceType, classificat
         if ch.get("parent_context"):
             meta["parent_context"] = ch["parent_context"]
         date = _parse_date(meta.get("date") or meta.get("source_date"))
-        source_name = meta.get("source_name") or meta.get("filename") or meta.get("title") or "unknown"
+        raw_name = (
+            meta.get("source_name")
+            or meta.get("filename")
+            or meta.get("title")
+            or meta.get("source")
+            or ""
+        )
+        source_name = str(raw_name).strip()
+        if not source_name or source_name.lower() == "unknown":
+            source_name = "document"
         ev = Evidence(
             text=text,
             source_type=source_type,
@@ -441,6 +826,7 @@ def _chunks_to_evidence(chunks: list[dict], source_type: SourceType, classificat
 
 async def retrieve_documents(state: dict) -> dict:
     """Retrieve chunks from the knowledge base and wrap them as Evidence."""
+    t0 = time.perf_counter()
     if state.get("retrieval_count", 0) >= state.get("max_retrievals", settings.MAX_RETRIEVALS):
         logger.warning("Max retrievals reached; skipping document retrieval")
         return {
@@ -518,13 +904,15 @@ async def retrieve_documents(state: dict) -> dict:
             text_to_score = {r.text: r.score for r in ranked}
             for ch in chunks:
                 ev = _chunks_to_evidence([ch], SourceType.DOCUMENT, classification)[0]
-                ev.rerank_score = text_to_score.get(ch["text"])
+                rs = text_to_score.get(ch["text"])
+                ev.rerank_score = float(rs) if rs is not None else None
                 ev = _enrich_evidence_metadata(ev, classification)
                 ev.combined_score = combined_score(ev, classification)
                 all_evidence.append(ev)
     except Exception as exc:
         logger.exception("Document retrieval failed: %s", exc)
 
+    logger.info("Node retrieve_documents completed in %.0fms", (time.perf_counter() - t0) * 1000)
     return {
         "evidence": all_evidence,
         "chunks": [ev.text for ev in all_evidence if ev.source_type == SourceType.DOCUMENT],
@@ -534,6 +922,7 @@ async def retrieve_documents(state: dict) -> dict:
 
 async def search_web(state: dict) -> dict:
     """Run web search and wrap results as Evidence."""
+    t0 = time.perf_counter()
     if state.get("search_count", 0) >= state.get("max_searches", settings.MAX_SEARCHES):
         logger.warning("Max searches reached; skipping web search")
         return {
@@ -552,40 +941,85 @@ async def search_web(state: dict) -> dict:
             if step.action == "search_web":
                 search_queries.extend(step.queries)
 
+    # Prefer one primary query; allow a second official-TLD variant (or gap-fill).
+    max_keep = 2 if state.get("repair_mode") == "surgical" else 1
+    queries = dedupe_search_queries(search_queries, max_keep=max_keep)
+    if classification and (classification.needs_web or (classification.geography or "").strip()):
+        extras: list[str] = []
+        for q in queries:
+            extras.extend(official_search_variants(q))
+        queries = dedupe_search_queries(queries + extras, max_keep=2)
+    prior_norms = {normalize_query(q) for q in (state.get("searxng_queries") or [])}
+    if prior_norms:
+        filtered = [q for q in queries if normalize_query(q) not in prior_norms]
+        queries = filtered or queries[:1]
+
     all_evidence: list[Evidence] = list(state.get("evidence", []))
     search_strings: list[str] = []
 
-    for q in search_queries[:3]:
+    allow_tavily = True
+    user_id = state.get("user_id")
+    if user_id is not None:
         try:
-            results = await search_structured(q, max_results=10)
-            for r in results:
-                text = r.get("content", "").strip()
-                if not text:
-                    continue
-                url = r.get("url")
-                date = _parse_date(r.get("published_date") or r.get("date"))
-                ev = Evidence(
-                    text=text,
-                    source_type=SourceType.WEB,
-                    source_name=r.get("title") or r.get("source") or urlparse(url or "").netloc,
-                    source_url=url,
-                    source_date=date,
-                    retrieval_score=float(r.get("score", 0.5)),
-                    metadata=r,
-                )
-                ev.authority_score = authority_score(url, SourceType.WEB)
-                ev.recency_score = _recency_score(date, classification.temporal_focus if classification else None)
-                ev = _enrich_evidence_metadata(ev, classification)
-                ev.combined_score = combined_score(ev, classification)
-                all_evidence.append(ev)
-                search_strings.append(text)
+            from app.core.database import AsyncLocalSession
+            from app.core.usage import enforce_tavily_budget
+
+            async with AsyncLocalSession() as session:
+                await enforce_tavily_budget(session, user_id)
+        except Exception as exc:
+            from fastapi import HTTPException
+
+            if isinstance(exc, HTTPException) and exc.status_code == 429:
+                logger.warning("Tavily daily budget exhausted for user=%s; SearXNG only", user_id)
+                allow_tavily = False
+            else:
+                logger.exception("Tavily budget check failed")
+
+    async def _one_search(q: str) -> list[dict]:
+        try:
+            return await search_structured(
+                q, max_results=6, user_id=user_id, allow_tavily=allow_tavily
+            )
         except Exception as exc:
             logger.warning("Web search failed for query %r: %s", q, exc)
+            return []
 
+    results_lists = await asyncio.gather(*[_one_search(q) for q in queries])
+    for results in results_lists:
+        for r in results:
+            text = r.get("content", "").strip()
+            if not text:
+                continue
+            url = r.get("url")
+            date = _parse_date(r.get("published_date") or r.get("date"))
+            ev = Evidence(
+                text=text,
+                source_type=SourceType.WEB,
+                source_name=r.get("title") or r.get("source") or urlparse(url or "").netloc,
+                source_url=url,
+                source_date=date,
+                retrieval_score=float(r.get("score", 0.5)),
+                metadata=r,
+            )
+            ev.authority_score = authority_score(url, SourceType.WEB)
+            ev.recency_score = _recency_score(date, classification.temporal_focus if classification else None)
+            ev = _enrich_evidence_metadata(ev, classification)
+            ev.combined_score = combined_score(ev, classification)
+            if not evidence_fits_classification(ev, classification):
+                continue
+            all_evidence.append(ev)
+            search_strings.append(text)
+
+    logger.info(
+        "Node search_web completed in %.0fms (queries=%s)",
+        (time.perf_counter() - t0) * 1000,
+        queries,
+    )
     return {
         "evidence": all_evidence,
         "search": search_strings,
         "search_count": state.get("search_count", 0) + 1,
+        "searxng_queries": list(state.get("searxng_queries") or []) + list(queries),
     }
 
 
@@ -630,6 +1064,7 @@ def assemble_evidence(state: dict) -> dict:
         unique.append(ev)
 
     unique = rank_evidence(unique, classification)
+    unique = filter_evidence_by_classification(unique, classification)
 
     # Classify conflicts (not all disagreements are contradictions).
     conflicts = detect_conflicts(unique)
@@ -643,16 +1078,20 @@ def assemble_evidence(state: dict) -> dict:
                 loser.combined_score = combined_score(loser, classification)
     unique = rank_evidence(unique, classification)
 
-    # Build token-budgeted context with full structured metadata.
-    CONTEXT_TOKEN_BUDGET = 12000
+    # Build token-budgeted context with full structured metadata + E1..En cite keys.
+    # Cap hard — large contexts dominate generate_answer latency on OpenRouter.
+    CONTEXT_TOKEN_BUDGET = 8000
     context_parts: list[str] = []
     token_count = 0
+    cite_map: dict[str, str] = {}
+    kept: list[Evidence] = []
 
     cross_turn = to_context_block(prior)
     if cross_turn:
         context_parts.append(cross_turn)
         token_count += _count_tokens(cross_turn)
 
+    cite_idx = 0
     for ev in unique:
         header = f"SOURCE: {ev.source_type.value} | {ev.source_name}"
         if ev.source_url:
@@ -678,26 +1117,54 @@ def assemble_evidence(state: dict) -> dict:
             meta_parts.append(f"quality={ev.source_quality.value}")
         if meta_parts:
             header += f" | {' '.join(meta_parts)}"
-        entry = f"{header}\n[{ev.evidence_id}] {ev.text}"
-        
-        # Include parent context if available for better understanding
+
+        # Tentative cite key for budget check
+        tentative_key = f"E{cite_idx + 1}"
+        entry = f"[{tentative_key}] {header}\n{ev.text}"
+
         parent_ctx = ev.metadata.get("parent_context")
         if parent_ctx:
-            entry += f"\n\n[CONTEXT] {parent_ctx[:500]}"  # Limit to prevent overflow
-        
+            entry += f"\n\n[CONTEXT] {parent_ctx[:500]}"
+
         entry_tokens = _count_tokens(entry)
         if token_count + entry_tokens > CONTEXT_TOKEN_BUDGET and context_parts:
             break
+
+        cite_idx += 1
+        cite_key = f"E{cite_idx}"
+        ev.metadata = {**(ev.metadata or {}), "cite_key": cite_key}
+        cite_map[cite_key] = ev.evidence_id
+        entry = f"[{cite_key}] {header}\n{ev.text}"
+        if parent_ctx:
+            entry += f"\n\n[CONTEXT] {parent_ctx[:500]}"
         context_parts.append(entry)
         token_count += entry_tokens
+        kept.append(ev)
 
-    assembled = "\n\n---\n\n".join(context_parts)
-    logger.info("Assembled context: %d items, ~%d tokens", len(context_parts), token_count)
+    key_legend = "Cite keys: " + ", ".join(
+        f"[{k}]→{v}" for k, v in cite_map.items()
+    ) if cite_map else ""
+    assembled = (key_legend + "\n\n" if key_legend else "") + "\n\n---\n\n".join(context_parts)
+
+    gaps = grade_coverage(
+        state.get("query", ""),
+        kept or unique,
+        classification,
+    )
+    logger.info(
+        "Assembled context: %d items, ~%d tokens, cite_keys=%d, coverage_gaps=%d",
+        len(kept),
+        token_count,
+        len(cite_map),
+        len(gaps),
+    )
 
     return {
         "evidence": unique,
         "conflicts": conflicts,
         "assembled_context": assembled,
+        "cite_map": cite_map,
+        "coverage_gaps": gaps,
     }
 
 
@@ -748,18 +1215,18 @@ _ANSWER_PROMPT = """You are a precise research assistant with structured reasoni
 
 ## YOUR THINKING PROCESS (internal - don't show to user):
 1. UNDERSTAND: What specific metric, geography, and time period is the user asking about?
-2. GATHER: Which evidence items are most relevant? List their evidence IDs.
+2. GATHER: Which evidence items are most relevant? List their cite keys (E1, E2, ...).
 3. VERIFY: Do sources agree? Any conflicts? Which source is more authoritative?
 4. SYNTHESIZE: What's the direct answer? What caveats apply?
 
 ## ANSWER FORMAT (must follow this structure):
 
 ### Direct Answer
-[One sentence answering the exact question asked, with inline citations]
+[One sentence answering the exact question asked, ending with an inline [E#] citation]
 
 ### Supporting Evidence
-- **Fact 1** [citation]: [specific evidence from source]
-- **Fact 2** [citation]: [specific evidence from source]
+- **Fact 1** [E#]: [specific evidence from source]
+- **Fact 2** [E#]: [specific evidence from source]
 - ...
 
 ### Analysis & Caveats
@@ -772,9 +1239,13 @@ _ANSWER_PROMPT = """You are a precise research assistant with structured reasoni
 - State ≠ National (Maharashtra GSDP ≠ India GDP)
 - Current prices ≠ Constant prices (nominal vs real)
 - Advance estimate ≠ Revised estimate ≠ Actual (different accuracy)
-- ALWAYS cite EVERY fact with evidence ID: [a1b2c3d4]
+- EVERY factual sentence MUST end with a cite key from the evidence list, e.g. [E3]
+- Use ONLY keys listed in the Cite keys legend / evidence headers — never invent IDs
+- Do NOT put a bibliography-only list of citations; cite inline on the claim sentence
 - If sources conflict, explain WHY (different years? different statuses?)
 - If evidence is insufficient, say "Insufficient data" — NEVER guess
+- Do not introduce numbers, totals, or percentages that do not appear in the cited evidence snippets
+- If cited items use different metric types, name each metric; do not treat them as interchangeable
 
 ## CROSS-TURN EVIDENCE
 If a [CROSS-TURN EVIDENCE STATE] block is present:
@@ -794,6 +1265,7 @@ User query: {query}
 
 def generate_answer(state: dict) -> dict:
     """Generate a cited answer from assembled evidence."""
+    t0 = time.perf_counter()
     query = state["query"]
     context = state.get("assembled_context", "")
     conflicts = json.dumps(state.get("conflicts", []), indent=2, default=str)
@@ -809,20 +1281,43 @@ def generate_answer(state: dict) -> dict:
         HumanMessage(content=query),
     ]
 
+    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
     try:
-        response = chat_llm.invoke(messages)
-        answer = response.content
+        answer, used_suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages)
     except Exception as exc:
-        logger.warning("Primary generator failed: %s", exc)
-        if openrouter_generator_llm:
-            response = openrouter_generator_llm.invoke(messages)
-            answer = response.content
-        else:
-            raise
+        logger.warning("generate_answer LLM failed: %s", exc)
+        answer, used_suffix = "", "failed"
+    used = llms.label if used_suffix == "primary" else f"{llms.label}+{used_suffix}"
 
+    if not (answer or "").strip():
+        logger.warning("generate_answer produced empty text; returning fallback")
+        return {
+            "answer": (
+                "I retrieved evidence but could not generate a readable answer "
+                "(empty model response). Please try again."
+            ),
+            "regeneration_count": state.get("regeneration_count", 0) + 1,
+            "provider_used": used,
+            "verification_errors": [],
+        }
+
+    evidence: list[Evidence] = state.get("evidence", [])
+    cite_map: dict[str, str] = state.get("cite_map") or {}
+    citation_check = validate_answer_citations(answer, evidence, cite_map=cite_map)
+    answer = flag_uncited_in_answer(answer, citation_check)
+
+    logger.info(
+        "Node generate_answer completed in %.0fms (uncited=%d invalid_cites=%d answer_chars=%d)",
+        (time.perf_counter() - t0) * 1000,
+        len(citation_check.uncited_sentences),
+        len(citation_check.invalid_citation_ids),
+        len(answer),
+    )
     return {
         "answer": answer,
         "regeneration_count": state.get("regeneration_count", 0) + 1,
+        "provider_used": used,
+        "verification_errors": [e.to_dict() for e in citation_check.errors],
     }
 
 
@@ -864,26 +1359,158 @@ Existing claims:
 """
 
 
+_ANSWER_CITATION_RE = re.compile(r"\[([Ee]\d{1,3}|[a-fA-F0-9]{6,12})\]")
+
+
+def _claims_from_answer_citations(
+    answer: str,
+    evidence: list[Evidence],
+    cite_map: dict[str, str] | None = None,
+) -> list[Claim]:
+    """Heuristic claim extraction when the verifier LLM fails or times out."""
+    if not answer or not evidence:
+        return []
+    known = {ev.evidence_id: ev for ev in evidence}
+    claims: list[Claim] = []
+    parts = re.split(r"(?<=[.!?])\s+", answer)
+    for part in parts:
+        text = part.strip()
+        if len(text) < 20:
+            continue
+        ids = []
+        for tok in _ANSWER_CITATION_RE.findall(text):
+            eid = resolve_citation_token(tok, evidence, cite_map)
+            if eid and eid in known:
+                ids.append(eid)
+        if not ids:
+            continue
+        claims.append(
+            Claim(
+                text=text[:500],
+                status=ClaimStatus.PARTIALLY_VERIFIED,
+                claim_type=ClaimType.FACT,
+                evidence_ids=list(dict.fromkeys(ids)),
+                reasoning="Extracted from answer citations (verifier skipped/failed)",
+            )
+        )
+        if len(claims) >= 8:
+            break
+    return claims
+
+
+def _verify_context_budget(context: str, max_chars: int = 6000) -> str:
+    """Keep verify prompts small — large contexts dominate verifier latency."""
+    if len(context) <= max_chars:
+        return context
+    return context[:max_chars] + "\n\n[... context truncated for verification ...]"
+
+
+def _cascade_llm_residual(
+    sentences: list[str],
+    evidence: list[Evidence],
+    state: dict,
+) -> list[Claim]:
+    """Batched structured verify for escalated sentences only."""
+    if not sentences:
+        return []
+    cite_map = state.get("cite_map") or {}
+    known = {ev.evidence_id: ev for ev in evidence}
+    snippets = []
+    for s in sentences:
+        for tok in extract_citation_tokens(s):
+            eid = resolve_citation_token(tok, evidence, cite_map)
+            if eid and eid in known:
+                snippets.append(f"[{eid}] {known[eid].text[:350]}")
+    snippets = list(dict.fromkeys(snippets))[:12]
+    prompt = (
+        "Verify each claim against its cited evidence. Return JSON claims list.\n"
+        "For each claim: status (verified/partial/contradicted/unverified/uncertain), "
+        "evidence_ids, reasoning, repair_action (none/rephrase/search_web).\n\n"
+        f"Evidence snippets:\n{chr(10).join(snippets)}\n\n"
+        f"Claims to verify:\n" + "\n".join(f"- {s}" for s in sentences)
+    )
+    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
+    result = _llm_with_fallback(
+        llms.verifier,
+        llms.verifier_fallbacks,
+        [SystemMessage(content=prompt)],
+        _ClaimList,
+    )
+    claims = list(result.claims) if result and result.claims else []
+    if not claims:
+        raise ValueError("Cascade LLM residual returned empty claims")
+    return claims
+
+
 def verify_answer_claims(state: dict) -> dict:
-    """Verify every claim in the generated answer + run deterministic structured checks."""
-    query = state["query"]
+    """Hard citation check + cascade (or legacy LLM) claim verification."""
+    t0 = time.perf_counter()
     answer = state.get("answer", "")
-    context = state.get("assembled_context", "")
+    context = _verify_context_budget(state.get("assembled_context", ""))
     evidence: list[Evidence] = state.get("evidence", [])
+    cite_map: dict[str, str] = state.get("cite_map") or {}
     prior: Any = state.get("prior_evidence_state") or state.get("evidence_state")
     prior_claims: list[Claim] = state.get("claims", [])
 
-    try:
-        bound = (openrouter_hallucination_llm or routing_llm).with_structured_output(_ClaimList)
-        result = bound.invoke([
-            SystemMessage(content=_VERIFY_PROMPT.format(context=context, answer=answer, claims=json.dumps([c.model_dump() for c in prior_claims], default=str)))
-        ])
-        claims = result.claims
-    except Exception as exc:
-        logger.exception("Claim verification failed: %s", exc)
-        claims = []
+    citation_check = validate_answer_citations(answer, evidence, cite_map=cite_map)
+    citation_errors = list(citation_check.errors)
 
-    # Merge deterministic contradiction checks.
+    claims: list[Claim] = []
+
+    if settings.USE_VERIFY_CASCADE:
+        try:
+            cascade = run_verify_cascade(
+                answer,
+                evidence,
+                cite_map=cite_map,
+                llm_invoke=lambda sents, ev: _cascade_llm_residual(sents, ev, state),
+            )
+            claims = cascade.claims
+        except Exception as exc:
+            logger.warning("Verify cascade failed (%s); using citation heuristics", exc)
+            claims = _claims_from_answer_citations(answer, evidence, cite_map)
+    else:
+        try:
+            llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
+            result = _llm_with_fallback(
+                llms.verifier,
+                llms.verifier_fallbacks,
+                [SystemMessage(content=_VERIFY_PROMPT.format(
+                    context=context,
+                    answer=answer[:4000],
+                    claims=json.dumps([c.model_dump() for c in prior_claims], default=str)[:2000],
+                ))],
+                _ClaimList,
+            )
+            claims = result.claims
+        except Exception as exc:
+            logger.warning("Claim verification failed (%s); using citation heuristics", exc)
+            claims = _claims_from_answer_citations(answer, evidence, cite_map)
+
+    if not claims:
+        claims = list(citation_check.claims) or _claims_from_answer_citations(answer, evidence, cite_map)
+    else:
+        existing_texts = {c.text.strip().lower() for c in claims}
+        for c in citation_check.claims:
+            if c.status == ClaimStatus.UNVERIFIED and c.text.strip().lower() not in existing_texts:
+                claims.append(c)
+
+    known_ids = {ev.evidence_id for ev in evidence}
+    for claim in claims:
+        bad = [i for i in claim.evidence_ids if i not in known_ids]
+        if bad:
+            claim.status = ClaimStatus.UNVERIFIED
+            claim.reasoning = (claim.reasoning + " " if claim.reasoning else "") + (
+                f"Invalid citation ids: {bad}"
+            )
+            claim.repair_action = claim.repair_action or "rephrase"
+        elif not claim.evidence_ids and claim.status not in (
+            ClaimStatus.VERIFIED,
+            ClaimStatus.PARTIALLY_VERIFIED,
+        ):
+            claim.status = ClaimStatus.UNVERIFIED
+            claim.repair_action = claim.repair_action or "rephrase"
+
     for claim in claims:
         for ev in evidence:
             is_contra, reason = is_genuine_contradiction(claim.text, ev.text)
@@ -891,20 +1518,46 @@ def verify_answer_claims(state: dict) -> dict:
                 claim.status = ClaimStatus.CONTRADICTED
                 claim.contradicting_evidence_ids = list(set(claim.contradicting_evidence_ids + [ev.evidence_id]))
                 claim.reasoning = f"Deterministic contradiction: {reason}"
-                claim.repair_action = claim.repair_action or "search_web"
+                claim.repair_action = claim.repair_action or "rephrase"
 
-    # Deterministic structured verification (metric/geo/date/status/authority/inference/causation).
     errors = audit_claims(claims, evidence, prior)
+    all_errors = [e.to_dict() for e in citation_errors] + [e.to_dict() for e in errors]
 
     citation_usage = [
         CitationUsage(claim_id=claim.claim_id, evidence_ids=claim.evidence_ids)
         for claim in claims
     ]
 
+    logger.info(
+        "Node verify_answer_claims completed in %.0fms (claims=%d citation_errors=%d cascade=%s)",
+        (time.perf_counter() - t0) * 1000,
+        len(claims),
+        len(citation_errors),
+        settings.USE_VERIFY_CASCADE,
+    )
+    # #region agent log
+    agent_debug_log(
+        "E",
+        "nodes.py:verify_answer_claims",
+        "verify_complete",
+        {
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+            "claims": len(claims),
+            "citation_errors": len(citation_errors),
+            "uncited": len(citation_check.uncited_sentences),
+            "failed": sum(
+                1
+                for c in claims
+                if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
+            ),
+            "cascade": settings.USE_VERIFY_CASCADE,
+        },
+    )
+    # #endregion
     return {
         "claims": claims,
         "citation_usage": citation_usage,
-        "verification_errors": errors,
+        "verification_errors": all_errors,
     }
 
 
@@ -912,13 +1565,20 @@ def verify_answer_claims(state: dict) -> dict:
 
 
 def repair_claims(state: dict) -> dict:
-    """Decide whether to repair, give up, or accept the current answer."""
+    """Surgical patch (cascade) or legacy re-search/regenerate repair."""
     claims: list[Claim] = state.get("claims", [])
-    failed = [c for c in claims if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)]
+    failed = [
+        c for c in claims
+        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
+    ]
 
     if not failed:
         return {"repair_state": RepairDecision.SATISFACTORY.value, "final_status": "answered"}
 
+    if settings.USE_VERIFY_CASCADE:
+        return _repair_claims_surgical(state, failed)
+
+    # Legacy path
     if state.get("regeneration_count", 0) >= state.get("max_regenerations", settings.MAX_REGENERATIONS):
         return {
             "repair_state": RepairDecision.MAX_ATTEMPTS.value,
@@ -951,21 +1611,190 @@ def repair_claims(state: dict) -> dict:
             seen.add(key)
             deduped.append(step)
 
+    retrieval_available = state.get("retrieval_count", 0) < state.get("max_retrievals", settings.MAX_RETRIEVALS)
+    search_available = state.get("search_count", 0) < state.get("max_searches", settings.MAX_SEARCHES)
+    actionable = [
+        s for s in deduped
+        if (s.action == "retrieve_documents" and retrieval_available)
+        or (s.action == "search_web" and search_available)
+    ]
+    if not actionable:
+        logger.warning(
+            "Repair needed but no actionable steps (retrieval=%s search=%s failed=%d)",
+            retrieval_available,
+            search_available,
+            len(failed),
+        )
+        return {
+            "repair_state": RepairDecision.MAX_ATTEMPTS.value,
+            "final_status": "max_attempts",
+            "answer": _add_caveats(state.get("answer", ""), failed),
+        }
+
+    if state.get("regeneration_count", 0) >= 1 and (
+        state.get("search_count", 0) >= 1 or state.get("retrieval_count", 0) >= 1
+    ):
+        if state.get("final_status") == "repairing":
+            return {
+                "repair_state": RepairDecision.MAX_ATTEMPTS.value,
+                "final_status": "max_attempts",
+                "answer": _add_caveats(state.get("answer", ""), failed),
+            }
+
     return {
         "repair_state": RepairDecision.REPAIR.value,
         "plan": PlannerOutput(
             classification=state.get("classification") or QueryClassification(),
-            steps=deduped,
+            steps=actionable,
         ),
         "final_status": "repairing",
     }
 
 
+def _repair_claims_surgical(state: dict, failed: list[Claim]) -> dict:
+    """One-pass surgical sentence patch; optional single coverage-gap search."""
+    repair_pass = int(state.get("repair_pass_count") or 0)
+    max_passes = int(getattr(settings, "MAX_REPAIR_PASSES", 1) or 1)
+    # #region agent log
+    agent_debug_log(
+        "E",
+        "nodes.py:_repair_claims_surgical",
+        "surgical_repair_entry",
+        {
+            "failed_count": len(failed),
+            "repair_pass": repair_pass,
+            "coverage_gaps": list(state.get("coverage_gaps") or [])[:3],
+            "repair_mode": state.get("repair_mode"),
+            "final_status": state.get("final_status"),
+        },
+    )
+    # #endregion
+
+    # After gap search: patch with refreshed evidence and end
+    if state.get("repair_mode") == "surgical" and state.get("final_status") == "repairing":
+        return _do_surgical_patch(state, failed, repair_pass)
+
+    if repair_pass >= max_passes:
+        return {
+            "repair_state": RepairDecision.MAX_ATTEMPTS.value,
+            "final_status": "max_attempts",
+            "answer": _add_caveats(state.get("answer", ""), failed),
+            "repair_mode": "surgical",
+        }
+
+    gaps = list(state.get("coverage_gaps") or [])
+    search_available = state.get("search_count", 0) < state.get("max_searches", settings.MAX_SEARCHES)
+    prior_norms = {normalize_query(q) for q in (state.get("searxng_queries") or [])}
+
+    if gaps and search_available:
+        # One targeted gap query only
+        gap_q = gaps[0]
+        # Prefer a short search query derived from the gap + original query
+        query = state.get("query", "")
+        targeted = gap_q if len(gap_q) < 160 else f"{query} {gap_q[:80]}"
+        if normalize_query(targeted) in prior_norms:
+            # Already searched this — patch with existing evidence
+            return _do_surgical_patch(state, failed, repair_pass)
+        return {
+            "repair_state": RepairDecision.REPAIR.value,
+            "repair_mode": "surgical",
+            "final_status": "repairing",
+            "plan": PlannerOutput(
+                classification=state.get("classification") or QueryClassification(),
+                steps=[PlanStep(
+                    action="search_web",
+                    queries=[targeted],
+                    expected_claims=[c.text for c in failed[:3]],
+                    rationale=f"Coverage gap fill: {gap_q[:120]}",
+                )],
+            ),
+        }
+
+    return _do_surgical_patch(state, failed, repair_pass)
+
+
+def _do_surgical_patch(state: dict, failed: list[Claim], repair_pass: int) -> dict:
+    """Patch flagged sentences inline and force end via max_attempts."""
+    evidence: list[Evidence] = state.get("evidence", [])
+    cite_map: dict[str, str] = state.get("cite_map") or {}
+    answer = state.get("answer", "")
+
+    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
+
+    def _rewrite(prompt: str) -> str:
+        text, _ = _invoke_chat(
+            llms.generator,
+            llms.generator_fallbacks,
+            [SystemMessage(content=prompt), HumanMessage(content="Rewrite the target sentence only.")],
+        )
+        return text
+
+    try:
+        patched = patch_flagged_sentences(answer, failed, evidence, cite_map, _rewrite)
+    except Exception as exc:
+        logger.warning("Surgical patch failed: %s", exc)
+        patched = answer
+
+    failed_ids = {c.claim_id for c in failed}
+    updated = []
+    for c in state.get("claims", []):
+        if c.claim_id in failed_ids:
+            nc = c.model_copy(deep=True)
+            if nc.status == ClaimStatus.CONTRADICTED:
+                updated.append(nc)
+            elif nc.status != ClaimStatus.VERIFIED:
+                nc.status = ClaimStatus.UNCERTAIN
+                nc.reasoning = (nc.reasoning or "") + " | surgical patch attempted"
+                updated.append(nc)
+            else:
+                updated.append(nc)
+        else:
+            updated.append(c)
+
+    still_hard = [
+        c for c in updated
+        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED)
+    ]
+    uncertain = [c for c in updated if c.status == ClaimStatus.UNCERTAIN]
+
+    if still_hard:
+        final_status = "max_attempts"
+        repair_state = RepairDecision.MAX_ATTEMPTS.value
+        patched = _add_caveats(patched, still_hard)
+    elif uncertain:
+        final_status = "partial"
+        repair_state = RepairDecision.SATISFACTORY.value
+        patched = _add_caveats(patched, uncertain)
+    else:
+        final_status = "answered"
+        repair_state = RepairDecision.SATISFACTORY.value
+
+    logger.info(
+        "Surgical repair pass %d patched %d failed claims status=%s",
+        repair_pass + 1,
+        len(failed),
+        final_status,
+    )
+    return {
+        "answer": patched,
+        "claims": updated,
+        "repair_pass_count": repair_pass + 1,
+        "repair_state": repair_state,
+        "final_status": final_status,
+        "repair_mode": "surgical",
+        "coverage_gaps": [],
+    }
+
+
 def _add_caveats(answer: str, failed: list[Claim]) -> str:
+    if not failed:
+        return answer
     caveat = "\n\nNote: The following claims could not be fully verified: " + "; ".join(
         f'"{c.text}"' for c in failed
     )
-    return answer + caveat
+    if "could not be fully verified" in (answer or ""):
+        return answer
+    return (answer or "") + caveat
 
 
 # ── Legacy compatibility wrappers (deprecated) ───────────────────────────────
@@ -996,19 +1825,67 @@ def should_retrieve_documents(state: dict) -> str:
 
 def should_search_web(state: dict) -> str:
     classification = state.get("classification")
-    if classification and classification.needs_web:
-        return "search_web"
-    return "assemble"
+    decision = "search_web" if (classification and classification.needs_web) else "assemble"
+    # #region agent log
+    agent_debug_log(
+        "C",
+        "nodes.py:should_search_web",
+        "search_routing",
+        {
+            "decision": decision,
+            "needs_web": bool(classification.needs_web) if classification else None,
+            "search_count": state.get("search_count", 0),
+        },
+    )
+    # #endregion
+    return decision
+
+
+def should_post_assemble(state: dict) -> str:
+    """After assemble: surgical repair loop skips generate; first pass continues."""
+    if (
+        settings.USE_VERIFY_CASCADE
+        and state.get("repair_mode") == "surgical"
+        and state.get("final_status") == "repairing"
+        and int(state.get("repair_pass_count") or 0) == 0
+    ):
+        return "repair_claims"
+    return "extract_verify_claims"
 
 
 def hallucination_router(state: dict) -> str:
     claims = state.get("claims", [])
-    failed = [c for c in claims if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)]
+    failed = [
+        c for c in claims
+        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
+    ]
     if not failed:
-        return "satisfactory"
-    if state.get("regeneration_count", 0) >= state.get("max_regenerations", settings.MAX_REGENERATIONS):
-        return "max_attempts"
-    return "repair"
+        decision = "satisfactory"
+    elif settings.USE_VERIFY_CASCADE:
+        if int(state.get("repair_pass_count") or 0) >= int(settings.MAX_REPAIR_PASSES or 1):
+            decision = "max_attempts"
+        else:
+            decision = "repair"
+    elif state.get("regeneration_count", 0) >= state.get("max_regenerations", settings.MAX_REGENERATIONS):
+        decision = "max_attempts"
+    else:
+        decision = "repair"
+    # #region agent log
+    agent_debug_log(
+        "E",
+        "nodes.py:hallucination_router",
+        "verify_route",
+        {
+            "decision": decision,
+            "failed_count": len(failed),
+            "failed_statuses": [getattr(c.status, "value", c.status) for c in failed[:8]],
+            "failed_previews": [c.text[:80] for c in failed[:4]],
+            "repair_pass_count": state.get("repair_pass_count", 0),
+            "citation_error_count": len(state.get("verification_errors") or []),
+        },
+    )
+    # #endregion
+    return decision
 
 
 def planner_router(state: dict) -> str:

@@ -6,11 +6,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db, AsyncLocalSession
+from app.core.config import settings
+from app.core.usage import enforce_ingest_budget, record_usage
 from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats
 from app.documents.models import IngestionLog
-from app.documents.service import full_pipeline, compute_file_hash
+from app.documents.service import (
+    full_pipeline,
+    compute_file_hash,
+    estimate_tokens,
+    ingestion_pipeline,
+    chunking,
+)
 from app.documents.schemas import IngestionLogResponse, IngestionStatusResponse
 
 logger = logging.getLogger(__name__)
@@ -18,11 +26,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 
-# ── Background worker ────────────────────────────────────────────────────────
-
-async def _run_ingestion(ingestion_id: uuid.UUID, file_contents: bytes, filename: str, uid: uuid.UUID, chat_id: uuid.UUID):
+async def _run_ingestion(
+    ingestion_id: uuid.UUID,
+    file_contents: bytes,
+    filename: str,
+    uid: uuid.UUID,
+    chat_id: uuid.UUID,
+    token_estimate: int,
+):
     """Run the full ingestion pipeline (async) with status tracking."""
-    # Mark as processing
     async with AsyncLocalSession() as session:
         log = await session.get(IngestionLog, ingestion_id)
         if log:
@@ -37,16 +49,17 @@ async def _run_ingestion(ingestion_id: uuid.UUID, file_contents: bytes, filename
             uid=uid,
             chat_id=chat_id,
         )
-        # Mark as completed
         async with AsyncLocalSession() as session:
             log = await session.get(IngestionLog, ingestion_id)
             if log:
                 log.status = "completed"
+                log.ingest_token_count = token_estimate
                 await session.commit()
-        logger.info("Ingestion completed: id=%s file=%s", ingestion_id, filename)
+        async with AsyncLocalSession() as session:
+            await record_usage(session, uid, "ingest_tokens", amount=token_estimate)
+        logger.info("Ingestion completed: id=%s file=%s tokens=%s", ingestion_id, filename, token_estimate)
     except Exception as exc:
         logger.exception("Ingestion failed: id=%s file=%s user=%s chat=%s", ingestion_id, filename, uid, chat_id)
-        # Mark as failed with error detail
         async with AsyncLocalSession() as session:
             log = await session.get(IngestionLog, ingestion_id)
             if log:
@@ -54,8 +67,6 @@ async def _run_ingestion(ingestion_id: uuid.UUID, file_contents: bytes, filename
                 log.error_message = str(exc)[:1000]
                 await session.commit()
 
-
-# ── Upload endpoint ──────────────────────────────────────────────────────────
 
 @router.post("/upload_file", response_model=IngestionLogResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload(
@@ -66,7 +77,6 @@ async def upload(
     file: UploadFile = File(...),
 ):
     """Upload a document for ingestion. Returns an ingestion_id for status tracking."""
-    # ── Verify chat ownership ────────────────────────────────────────────
     result = await db.execute(
         select(Chats).where(
             Chats.chat_id == chat_id,
@@ -76,7 +86,6 @@ async def upload(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # ── Validate file ────────────────────────────────────────────────────
     file_content = await file.read()
     await file.close()
 
@@ -89,33 +98,61 @@ async def upload(
     if len(file_content) > max_size:
         raise HTTPException(status_code=413, detail="File too large (max 50MB)")
 
-    # ── Idempotent check — skip if same file already ingested ───────────
+    # Estimate tokens early (reuse extract for budget checks)
+    try:
+        text, metadata = ingestion_pipeline(file_content, file.filename)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read file: {exc}") from exc
+
+    token_estimate = estimate_tokens(text)
+    if token_estimate > settings.MAX_FILE_TOKENS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (~{token_estimate} tokens; max {settings.MAX_FILE_TOKENS}).",
+        )
+
+    chunked = chunking(text=text, metadata=metadata)
+    child_chunks = [c for c in chunked if c.get("metadata", {}).get("chunk_type") != "parent"]
+    if len(child_chunks) > settings.MAX_CHUNKS_PER_FILE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many chunks ({len(child_chunks)}; max {settings.MAX_CHUNKS_PER_FILE}).",
+        )
+
+    await enforce_ingest_budget(db, current_user.user_id, token_estimate)
+
     file_hash = compute_file_hash(file_content)
-    # Check by file content hash (content-based deduplication)
+    # Same-chat hash dedupe only (allowed across chats)
     existing = await db.execute(
         select(IngestionLog).where(
             IngestionLog.user_id == current_user.user_id,
+            IngestionLog.chat_id == chat_id,
             IngestionLog.file_hash == file_hash,
             IngestionLog.status == "completed",
         )
     )
-    if existing.scalar_one_or_none():
-        logger.info("Duplicate upload skipped: file=%s hash=%s", file.filename, file_hash[:12])
-        return {"message": "File already ingested", "status": "duplicate", "filename": file.filename}
+    existing_log = existing.scalar_one_or_none()
+    if existing_log:
+        logger.info(
+            "Duplicate upload skipped (same chat): file=%s hash=%s chat=%s",
+            file.filename,
+            file_hash[:12],
+            chat_id,
+        )
+        return existing_log
 
-    # ── Create ingestion log (pending) ───────────────────────────────────
     log = IngestionLog(
         chat_id=chat_id,
         user_id=current_user.user_id,
         filename=file.filename,
         file_hash=file_hash,
+        ingest_token_count=token_estimate,
         status="pending",
     )
     db.add(log)
     await db.commit()
     await db.refresh(log)
 
-    # ── Queue background ingestion ───────────────────────────────────────
     background_tasks.add_task(
         _run_ingestion,
         ingestion_id=log.id,
@@ -123,13 +160,19 @@ async def upload(
         filename=file.filename,
         uid=current_user.user_id,
         chat_id=chat_id,
+        token_estimate=token_estimate,
     )
 
-    logger.info("Upload accepted: ingestion_id=%s file=%s chat_id=%s user_id=%s", log.id, file.filename, chat_id, current_user.user_id)
+    logger.info(
+        "Upload accepted: ingestion_id=%s file=%s chat_id=%s user_id=%s tokens=%s",
+        log.id,
+        file.filename,
+        chat_id,
+        current_user.user_id,
+        token_estimate,
+    )
     return log
 
-
-# ── Status endpoint ──────────────────────────────────────────────────────────
 
 @router.get("/ingestions/{ingestion_id}", response_model=IngestionStatusResponse)
 async def get_ingestion_status(
@@ -146,13 +189,5 @@ async def get_ingestion_status(
     )
     log = result.scalar_one_or_none()
     if not log:
-        raise HTTPException(status_code=404, detail="Ingestion log not found")
-
-    logger.debug("Ingestion status: id=%s status=%s", ingestion_id, log.status)
-    return IngestionStatusResponse(
-        ingestion_id=log.id,
-        status=log.status,
-        error_message=log.error_message,
-        filename=log.filename,
-        chat_id=log.chat_id,
-    )
+        raise HTTPException(status_code=404, detail="Ingestion not found")
+    return log

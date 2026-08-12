@@ -21,13 +21,14 @@ class ChatListResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     message: str = Field(min_length=1, max_length=5000)
-    provider: Literal["groq", "openrouter", "auto"] = Field(
+    provider: Literal["groq", "openrouter", "google", "auto"] = Field(
         default="auto",
         description=(
             "LLM provider to use. "
             "'groq' = Groq only (fast, free tier). "
-            "'openrouter' = OpenRouter only (paid, higher quality). "
-            "'auto' = Try Groq first, fall back to OpenRouter on rate limit."
+            "'openrouter' = OpenRouter Xiaomi MiMo-V2.5 (all roles). "
+            "'google' = Google AI Studio / Gemini. "
+            "'auto' = Try Groq first, then OpenRouter, then Google on failure."
         ),
     )
 
