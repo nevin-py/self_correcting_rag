@@ -1,8 +1,11 @@
 import asyncio
+import html as html_lib
 import json
 import logging
+import re
+import time
 import urllib.parse
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Any
 import httpx
 from bs4 import BeautifulSoup
 
@@ -10,6 +13,43 @@ from app.core.config import settings
 from app.documents.clients import tavily_client
 
 logger = logging.getLogger(__name__)
+
+
+# ── Text cleaning for LLM consumption ────────────────────────────────────────
+
+def _clean_search_text(text: str) -> str:
+    """Clean search output for LLM consumption.
+
+    Removes: HTML, entities, refs, citation markers, markdown tables,
+    tracking params, and normalizes whitespace.
+    """
+    if not text:
+        return ""
+
+    # 1. Strip HTML tags and decode entities
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html_lib.unescape(text)
+
+    # 2. Remove Wikipedia refs [1], citation markers [citation needed], [edit], etc.
+    text = re.sub(r'\[\d+\]', '', text)
+    text = re.sub(r'\[(?:citation needed|edit|clarification needed|when\?|who\?)\]',
+                  '', text, flags=re.IGNORECASE)
+
+    # 3. Clean markdown tables: pipes → spaces, remove separator lines
+    text = re.sub(r'\|\s*', ' ', text)
+    text = re.sub(r'[+][-]+[+]', '', text)
+
+    # 4. Remove tracking params and short garbage lines
+    text = re.sub(r'utm_[a-z]+=[^&\s]+&?', '', text)
+    lines = [l for l in text.split('\n') if len(l.strip()) > 2 or not l.strip()]
+    text = '\n'.join(lines)
+
+    # 5. Normalize whitespace: collapse spaces, limit newlines, trim
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'^\s+$', '', text, flags=re.MULTILINE)
+
+    return text.strip()
 
 
 def _extract_wiki_text(soup: BeautifulSoup) -> Optional[str]:
@@ -22,7 +62,7 @@ def _extract_wiki_text(soup: BeautifulSoup) -> Optional[str]:
 
     body_content = soup.find(id="bodyContent")
     if not body_content:
-        return title
+        return _clean_search_text(title) if title else None
 
     paragraphs = body_content.find_all("p")
     cleaned = []
@@ -32,13 +72,15 @@ def _extract_wiki_text(soup: BeautifulSoup) -> Optional[str]:
             cleaned.append(text)
 
     if not cleaned:
-        return title if title else None
+        return _clean_search_text(title) if title else None
 
     body = "\n\n".join(cleaned)
-    return f"{title}\n\n{body}" if title else body
+    result = f"{title}\n\n{body}" if title else body
+    return _clean_search_text(result)
 
 
 async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
+    start = time.perf_counter()
     clean_query = query.strip().replace(" ", "_")
     encoded_query = urllib.parse.quote(clean_query)
     
@@ -100,21 +142,25 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
                 logger.error("Failed to fetch article from search result link: %s", str(e))
                 return None
 
-        return _extract_wiki_text(soup)
+        result = _extract_wiki_text(soup)
+        elapsed = time.perf_counter() - start
+        logger.info("[wiki] '%s' — %.1fs", query[:40], elapsed)
+        return result
 
 
 async def search_tavily(query: str) -> Optional[str]:
     """
     Search the web via Tavily AI and return formatted snippets.
     Runs in a thread-pool to prevent blocking FastAPI's async event loop.
+    Uses advanced search depth for better quality results.
     """
+    start = time.perf_counter()
     try:
-        # FIX: Non-blocking thread execution for synchronous Tavily SDK
         response = await asyncio.to_thread(
             tavily_client.search,
             query=query,
-            search_depth="basic",
-            max_results=3,
+            search_depth="advanced",
+            max_results=10,
             include_answer=True,
         )
     except Exception as e:
@@ -128,17 +174,74 @@ async def search_tavily(query: str) -> Optional[str]:
 
     snippets = []
     for idx, res in enumerate(results):
-        title = res.get("title", "Untitled")
-        content = res.get("content", "")
-        snippets.append(f"Source={idx}: {title}\nContent: {content}")
+        title = _clean_search_text(res.get("title", "Untitled"))
+        content = _clean_search_text(res.get("content", ""))
+        url = res.get("url", "")
+        if content:  # only include results with actual content
+            snippets.append(f"Source={idx} [{url}]: {title}\nContent: {content}")
+
+    # Include Tavily's synthesized answer if available
+    answer = _clean_search_text(response.get("answer", ""))
+    if answer:
+        snippets.insert(0, f"Tavily Summary: {answer}")
 
     combined = "\n\n".join(snippets)
-    logger.info("Tavily search returned %d results for query: %s", len(results), query)
+    elapsed = time.perf_counter() - start
+    logger.info("[tavily] '%s' %d results — %.1fs", query[:40], len(results), elapsed)
     return combined
 
 
-async def search_web_fallback(query: str) -> str:
-    """Fallback strategy: Try Wikipedia first, then Tavily."""
+async def search_searxng(query: str) -> Optional[str]:
+    """
+    Search via local SearXNG instance (meta-search engine).
+    Aggregates results from Google, Bing, DuckDuckGo, Wikipedia, and more.
+    """
+    start = time.perf_counter()
+    searxng_url = settings.SEARXNG_URL.rstrip("/")
+    url = f"{searxng_url}/search"
+    params = {
+        "q": query,
+        "format": "json",
+        "pageno": 1,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("SearXNG search failed for query '%s': %s", query, str(e))
+        return None
+
+    data = response.json()
+    results = data.get("results", [])
+    if not results:
+        logger.info("No SearXNG results found for query: %s", query)
+        return None
+
+    # Take top 15 results (SearXNG returns 30-46, let reranker decide the best)
+    snippets = []
+    for idx, res in enumerate(results[:15]):
+        title = _clean_search_text(res.get("title", "Untitled"))
+        content = _clean_search_text(res.get("content", ""))
+        result_url = res.get("url", "")
+        engine = res.get("engine", "")
+        score = res.get("score", 0)
+        if content:  # only include results with actual content
+            snippets.append(f"Source={idx} [{result_url}] (via {engine}, score={score:.1f}): {title}\nContent: {content}")
+
+    combined = "\n\n".join(snippets)
+    elapsed = time.perf_counter() - start
+    logger.info("[searxng] '%s' %d results — %.1fs", query[:40], len(results), elapsed)
+    return combined
+
+
+async def search_web_fallback(query: str) -> Optional[str]:
+    """Fallback strategy: Try SearXNG first (broadest coverage), then Wikipedia, then Tavily."""
+    searxng_result = await search_searxng(query)
+    if searxng_result:
+        return searxng_result
+
     wiki_result = await search_wiki(query)
     if wiki_result:
         return wiki_result
@@ -147,8 +250,8 @@ async def search_web_fallback(query: str) -> str:
     if tavily_result:
         return tavily_result
 
-    logger.warning("Both Wikipedia and Tavily failed for query: %s", query)
-    return ""
+    logger.warning("All search sources failed for query: %s", query)
+    return None
 
 
 async def _execute_single_item(data: Dict[str, str]) -> str:
@@ -189,3 +292,77 @@ async def smart_search(req: Union[str, List[Dict[str, str]]]) -> str:
     # Filter out empty responses and join with visual separators
     valid_results = [r for r in results if r]
     return "\n\n--- SEARCH RESULT ---\n\n".join(valid_results)
+
+
+async def search_structured(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    """
+    Structured web search returning provenance-preserving result dicts.
+
+    Tries Tavily first (rich metadata), then SearXNG, then Wikipedia.
+    Each result contains: content, title, url, source, published_date, score.
+    """
+    results: List[Dict[str, Any]] = []
+
+    # 1. Tavily (has the best structured metadata)
+    try:
+        response = await asyncio.to_thread(
+            tavily_client.search,
+            query=query,
+            search_depth="advanced",
+            max_results=max_results,
+            include_answer=False,
+        )
+        for res in response.get("results", []):
+            results.append({
+                "content": _clean_search_text(res.get("content", "")),
+                "title": _clean_search_text(res.get("title", "Untitled")),
+                "url": res.get("url", ""),
+                "source": urllib.parse.urlparse(res.get("url", "")).netloc or "tavily",
+                "published_date": res.get("published_date"),
+                "score": float(res.get("score", 0.5)),
+            })
+        if results:
+            return results
+    except Exception as e:
+        logger.warning("Structured Tavily search failed for '%s': %s", query, e)
+
+    # 2. SearXNG
+    try:
+        searxng_url = settings.SEARXNG_URL.rstrip("/")
+        url = f"{searxng_url}/search"
+        params = {"q": query, "format": "json", "pageno": 1}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+        data = response.json()
+        for res in data.get("results", [])[:max_results]:
+            result_url = res.get("url", "")
+            results.append({
+                "content": _clean_search_text(res.get("content", "")),
+                "title": _clean_search_text(res.get("title", "Untitled")),
+                "url": result_url,
+                "source": urllib.parse.urlparse(result_url).netloc or res.get("engine", "searxng"),
+                "published_date": res.get("publishedDate") or res.get("published_date"),
+                "score": float(res.get("score", 0.5)),
+            })
+        if results:
+            return results
+    except Exception as e:
+        logger.warning("Structured SearXNG search failed for '%s': %s", query, e)
+
+    # 3. Wikipedia fallback (single article)
+    try:
+        wiki_text = await search_wiki(query)
+        if wiki_text:
+            results.append({
+                "content": wiki_text,
+                "title": f"Wikipedia: {query}",
+                "url": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
+                "source": "wikipedia.org",
+                "published_date": None,
+                "score": 0.5,
+            })
+    except Exception as e:
+        logger.warning("Structured Wikipedia search failed for '%s': %s", query, e)
+
+    return results

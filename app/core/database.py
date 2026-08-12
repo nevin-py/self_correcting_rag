@@ -7,6 +7,13 @@ class Base(DeclarativeBase):
     pass
 
 
+# Import all models so Base.metadata.create_all() sees them.
+import app.auth.models  # noqa: E402, F401
+import app.agent.models  # noqa: E402, F401
+import app.agent.message_models  # noqa: E402, F401
+import app.documents.models  # noqa: E402, F401
+
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=(settings.ENVIRONMENT == "development"),
@@ -19,6 +26,23 @@ AsyncLocalSession = async_sessionmaker(
 )
 
 
+def _default_session_factory():
+    """Production session factory — bound to the module-level engine."""
+    return AsyncLocalSession
+
+
+def get_session_factory():
+    """
+    Dependency that returns a session factory.
+
+    Overridable in tests via `app.dependency_overrides[get_session_factory]`.
+    Endpoints should call the returned factory to create short-lived sessions
+    rather than importing AsyncLocalSession directly.
+    """
+    return AsyncLocalSession
+
+
 async def get_db():
+    """Legacy dependency — yields a session for simple CRUD endpoints."""
     async with AsyncLocalSession() as db:
         yield db

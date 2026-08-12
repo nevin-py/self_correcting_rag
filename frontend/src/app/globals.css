@@ -1,0 +1,70 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --midnight: #090F15;
+  --mountainside: #262E36;
+  --apres-ski: #6C6D74;
+  --slopes: #B3B7BA;
+  --arctic: #D3D1CE;
+  --glacier: #8FD6DE;
+
+  --error: #E85D5D;
+  --error-bg: #3D1A1A;
+
+  --font-display: "Fraunces", serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+
+  --duration-micro: 120ms;
+  --duration-standard: 240ms;
+  --duration-slow: 600ms;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@theme inline {
+  --color-midnight: var(--midnight);
+  --color-mountainside: var(--mountainside);
+  --color-apres-ski: var(--apres-ski);
+  --color-slopes: var(--slopes);
+  --color-arctic: var(--arctic);
+  --color-glacier: var(--glacier);
+  --color-error: var(--error);
+  --color-error-bg: var(--error-bg);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--midnight);
+  color: var(--slopes);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Focus rings ───────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--glacier);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--apres-ski); border-radius: 3px; }
+
+/* ── Reduced motion ────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

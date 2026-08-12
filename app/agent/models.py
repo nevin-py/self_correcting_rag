@@ -1,8 +1,8 @@
 #agents/models.py
-from sqlalchemy import ForeignKey,String,DateTime,func
+from sqlalchemy import ForeignKey,String,DateTime,func,Text
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 import uuid
-from typing import Literal,TYPE_CHECKING
+from typing import TYPE_CHECKING
 from datetime import datetime
 from app.core.database import Base
 if TYPE_CHECKING:
@@ -14,7 +14,7 @@ class Agent_interact(Base):
     chat_id:Mapped[uuid.UUID]=mapped_column(ForeignKey('chats.chat_id'))
     user_input:Mapped[str]=mapped_column(nullable=False)
     agent_output:Mapped[str]=mapped_column(nullable=False)
-    routing_path:Mapped[str]=mapped_column(String(500))
+    routing_path:Mapped[str]=mapped_column(Text)
     token_metric:Mapped[int]=mapped_column(nullable=False)
     latency:Mapped[float]=mapped_column(nullable=False)
     created_at:Mapped[datetime]=mapped_column(DateTime,server_default=func.now())

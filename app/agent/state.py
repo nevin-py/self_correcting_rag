@@ -1,216 +1,387 @@
-from typing import Annotated, Literal, Optional, TypedDict
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
-from typing import Annotated
-import operator
+"""
+Typed state and structured schemas for the business-ready self-correcting RAG agent.
+
+Design principles
+-----------------
+1. Provenance first: every piece of evidence knows where it came from.
+2. Document vs. web separation: first-class source types with different scoring heuristics.
+3. Claim-level verification: answers are decomposed into claims that are individually
+   checked against evidence.
+4. Deterministic conflict detection: evidence contradictions are surfaced with explicit
+   reasoning, not hidden inside an LLM call.
+5. Structured planning: the planner emits a typed plan (query class, sub-queries,
+   expected claims, source strategy) rather than a single enum.
+"""
+
+from __future__ import annotations
+
+import enum
 import uuid
+from datetime import datetime, timezone
+from typing import Annotated, Any
 
-class RAGState(TypedDict):
-    # User
-    user_id: uuid.UUID
-    query: str
-    messages: Annotated[list[BaseMessage], add_messages]
-
-    # Evidence
-    chunks: Annotated[list[str],operator.add]
-    search: Annotated[list[str],operator.add]
-
-
-    # Planner outputs
-    planner_state: Literal["evident", "not_enough"]
-    retrieval_queries: list[str]
-    wiki_queries: list[str]
-    tavily_queries: list[str]
-
-    # Search bookkeeping
-    executed_retrieval_queries: Annotated[list[str],operator.add]
-    executed_wiki_queries: Annotated[list[str],operator.add]
-    executed_tavily_queries: Annotated[list[str],operator.add]
-
-    # Generation
-    answer: str
-
-    # Hallucination checker
-    need_repair: Literal["factual", "repair"]
-    hallucination_reason: list[str]
-
-    # Loop protection
-    max_tries_planner: int
-    max_tries_hallucinator:int
-
-
-
-
-from typing import Literal, Optional
 from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
+
+
+# ── Enums ────────────────────────────────────────────────────────────────────
+
+
+class SourceType(str, enum.Enum):
+    DOCUMENT = "document"      # User-uploaded / internal knowledge base
+    WEB = "web"                # Search results / public web
+    LLM_KNOWLEDGE = "llm"      # Unverifiable world knowledge fallback
+    UNKNOWN = "unknown"
+
+
+class ClaimStatus(str, enum.Enum):
+    VERIFIED = "verified"              # Supported by evidence
+    PARTIALLY_VERIFIED = "partial"     # Supported but with caveats / low authority
+    CONTRADICTED = "contradicted"      # Directly contradicted by evidence
+    UNVERIFIED = "unverified"          # No evidence found
+    UNCERTAIN = "uncertain"            # Conflicting or insufficient evidence
+
+
+class PlannerDecision(str, enum.Enum):
+    """Backward-compatible high-level routing decision."""
+    EVIDENT = "evident"
+    NOT_ENOUGH = "not_enough"
+
+
+class RepairDecision(str, enum.Enum):
+    """Backward-compatible repair routing decision."""
+    SATISFACTORY = "satisfactory"
+    REPAIR = "repair"
+    MAX_ATTEMPTS = "max_attempts"
+
+
+class QueryNeed(str, enum.Enum):
+    """Why does the user need an answer? Informs source strategy."""
+    FACTUAL = "factual"          # Seeking a verifiable fact
+    PROCEDURAL = "procedural"    # How-to / step-by-step
+    COMPARATIVE = "comparative"  # Compare options
+    TEMPORAL = "temporal"        # Time-sensitive / latest info
+    EXPLORATORY = "exploratory"  # Open-ended brainstorming
+    UNKNOWN = "unknown"
+
+
+class MetricType(str, enum.Enum):
+    """Economic / statistical metric category to prevent cross-metric confusion."""
+    GDP = "gdp"
+    GSDP = "gsdp"                      # Gross State Domestic Product
+    GVA = "gva"                        # Gross Value Added
+    GVA_SHARE = "gva_share"            # Sector share of GVA (NOT the same as share of output)
+    OUTPUT_SHARE = "output_share"      # Sector share of output (NOT the same as GVA share)
+    EMPLOYMENT = "employment"
+    REVENUE = "revenue"
+    POPULATION = "population"
+    GROWTH_RATE = "growth_rate"
+    INFLATION = "inflation"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
+class PriceBasis(str, enum.Enum):
+    """Nominal vs real prices — conflating these is a classic error.
+
+    CURRENT  = nominal / current-price figures (absolute rupee/dollar values)
+    CONSTANT = real / constant-price figures (inflation-adjusted, e.g. 2011-12 prices)
+    """
+    CURRENT = "current"
+    CONSTANT = "constant"
+    UNKNOWN = "unknown"
+
+
+class ConflictType(str, enum.Enum):
+    """Classification of an apparent evidence conflict (not all are contradictions)."""
+    NONE = "none"
+    GENUINE_CONTRADICTION = "genuine_contradiction"          # same metric/geo/period, opposite facts
+    SOURCE_DISAGREEMENT = "source_disagreement"              # same facts, different sources disagree
+    DIFFERENT_YEARS = "different_years"                      # different periods, not a contradiction
+    DIFFERENT_ESTIMATE_STATUS = "different_estimate_status"  # advance vs revised vs actual (an update)
+    DIFFERENT_METRICS = "different_metrics"                  # e.g. GSDP vs GVA
+    DIFFERENT_GEOGRAPHIC_SCOPES = "different_geographic_scopes"  # national vs state
+    REVISED_VS_UNREVISED = "revised_vs_unrevised"            # updated figure replaces older one
+    INSUFFICIENT_OVERLAP = "insufficient_overlap"            # unrelated, not a conflict
+
+
+class GeographicScope(str, enum.Enum):
+    """Geographic level to prevent scope confusion (national vs state vs city)."""
+    GLOBAL = "global"
+    NATIONAL = "national"
+    STATE = "state"
+    DISTRICT = "district"
+    CITY = "city"
+    REGION = "region"            # Multi-state / sub-continent
+    UNKNOWN = "unknown"
+
+
+class TemporalQualifier(str, enum.Enum):
+    """Distinguishes actuals from estimates/projections to prevent temporal confusion."""
+    ACTUAL = "actual"
+    ESTIMATE = "estimate"
+    PRELIMINARY = "preliminary"
+    REVISED = "revised"
+    PROJECTED = "projected"
+    ADVANCE = "advance"          # Advance estimate (before full data)
+    UNKNOWN = "unknown"
+
+
+class SourceQuality(str, enum.Enum):
+    """Is the source primary (original data) or secondary (citing primary)?"""
+    PRIMARY = "primary"          # Original report / data release (e.g. RBI report, Census)
+    SECONDARY = "secondary"      # News article or analysis citing primary source
+    TERTIARY = "tertiary"        # Wikipedia, aggregators, blogs
+    UNKNOWN = "unknown"
+
+
+class ClaimType(str, enum.Enum):
+    """Distinguishes verbatim facts from inferences drawn by the LLM."""
+    FACT = "fact"                # Directly stated in evidence
+    INFERENCE = "inference"      # Deduced from combining multiple evidence items
+    SPECULATION = "speculation"  # Extrapolation or opinion not grounded in evidence
+
+
+# ── Evidence / Claim / Plan models ───────────────────────────────────────────
+
+
+class Evidence(BaseModel):
+    """A single piece of retrieved or searched evidence."""
+
+    evidence_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    text: str
+    source_type: SourceType
+    source_name: str = ""                    # Document name or site name
+    source_url: str | None = None
+    source_date: datetime | None = None      # Publication / retrieval date
+    source_quality: SourceQuality = SourceQuality.UNKNOWN   # Primary / secondary / tertiary
+    retrieval_score: float = 0.0             # Vector/BM25 score (0-1)
+    rerank_score: float | None = None        # Cross-encoder rerank score
+    authority_score: float = 0.0             # Domain/doc authority (0-1)
+    recency_score: float = 0.0               # Temporal relevance (0-1)
+    combined_score: float = 0.0              # Aggregated ranking score
+    chunk_index: int | None = None           # Position in source document
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # ── Structured metric / geographic / temporal fields ──
+    metric_type: MetricType = MetricType.UNKNOWN     # GDP, GSDP, GVA, etc.
+    metric_value: str = ""                           # Extracted numeric value as string
+    geographic_scope: GeographicScope = GeographicScope.UNKNOWN  # National / state / district
+    geography: str = ""                              # Specific place name (e.g. "Karnataka")
+    year_period: str = ""                            # e.g. "2022-23", "FY2023"
+    temporal_qualifier: TemporalQualifier = TemporalQualifier.UNKNOWN  # Actual / estimate / projected
+    price_basis: PriceBasis = PriceBasis.UNKNOWN          # Current (nominal) vs Constant (real)
+
+    model_config = {"extra": "ignore"}
+
+    def to_citation(self) -> str:
+        """Short citation string for inclusion in generated answers."""
+        parts = []
+        if self.source_type == SourceType.WEB and self.source_url:
+            parts.append(f"[{self.source_name or self.source_url}]")
+        elif self.source_name:
+            parts.append(f"[{self.source_name}]")
+        else:
+            parts.append(f"[{self.evidence_id}]")
+        # Append metric and geographic scope for disambiguation
+        if self.metric_type != MetricType.UNKNOWN:
+            parts.append(self.metric_type.value.upper())
+        if self.price_basis != PriceBasis.UNKNOWN:
+            parts.append(f"{self.price_basis.value}-price")
+        if self.geography:
+            parts.append(self.geography)
+        if self.year_period:
+            parts.append(self.year_period)
+        if self.temporal_qualifier != TemporalQualifier.UNKNOWN:
+            parts.append(f"({self.temporal_qualifier.value})")
+        return " ".join(parts)
+
+
+class Claim(BaseModel):
+    """An atomic factual statement extracted from the answer."""
+
+    claim_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    text: str
+    status: ClaimStatus = ClaimStatus.UNVERIFIED
+    claim_type: ClaimType = ClaimType.FACT          # fact / inference / speculation
+    evidence_ids: list[str] = Field(default_factory=list)
+    contradicting_evidence_ids: list[str] = Field(default_factory=list)
+    reasoning: str = ""                     # Why this status was assigned
+    repair_action: str = ""                 # e.g. "search_web", "reject", "rephrase"
+
+
+class QueryClassification(BaseModel):
+    """Structured understanding of the user query."""
+
+    primary_need: QueryNeed = QueryNeed.UNKNOWN
+    needs_documents: bool = True            # Should we search the knowledge base?
+    needs_web: bool = False                 # Should we search the public web?
+    needs_calculation: bool = False
+    temporal_focus: str | None = None       # ISO date string or "latest"
+    temporal_qualifier: TemporalQualifier = TemporalQualifier.UNKNOWN  # estimate / actual / projected
+    geographic_scope: GeographicScope = GeographicScope.UNKNOWN        # national / state / city
+    geography: str = ""                      # Specific place name (e.g. "Karnataka")
+    domain_hints: list[str] = Field(default_factory=list)
+    ambiguity: str = "low"                  # low / medium / high
+    rewrite: str = ""                       # Disambiguated / expanded query
+    metric_hint: MetricType = MetricType.UNKNOWN  # If query is about a specific metric
+
+
+class PlanStep(BaseModel):
+    """One step in a retrieval/verification plan."""
+
+    step_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    action: str                             # retrieve_documents, search_web, calculate, synthesize
+    queries: list[str] = Field(default_factory=list)
+    expected_claims: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
 
 class PlannerOutput(BaseModel):
+    """Structured plan produced by the planner."""
 
-    planner_state: Literal["evident", "not_enough"] = Field(
-        description=(
-            "Return 'evident' if the supplied evidence is sufficient to answer "
-            "the user's question. Return 'not_enough' if additional retrieval "
-            "or web search is required."
-        )
-    )
-
-    retrieval_queries: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "Semantic search queries for the vector database. "
-            "Populate only when planner_state is 'not_enough'."
-        )
-    )
-
-    tavily_queries: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "Web search queries for recent or external information. "
-            "Populate only when planner_state is 'not_enough'."
-        )
-    )
-
-    wiki_queries: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "Wikipedia search queries for factual or encyclopedic information. "
-            "Populate only when planner_state is 'not_enough'."
-        )
-    )
+    classification: QueryClassification
+    steps: list[PlanStep]
+    fallback_strategy: str = "answer_with_caveats"
 
 
 class RepairOutput(BaseModel):
+    """Structured repair instructions for failed claims."""
 
-    need_repair: Literal["factual", "repair"] = Field(
-        description=(
-            "Return 'factual' if every important claim in the answer is fully "
-            "supported by the supplied evidence. Return 'repair' if any claim "
-            "is unsupported, contradicted, or hallucinated."
-        )
-    )
-    hallucination_reason: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "A list of concise reasons describing each unsupported or incorrect "
-            "claim. These reasons will be given back to the planner."
-        )
-    )
-
-planner_prompt=f"""You are the planning component of a self-correcting RAG system.
-
-Your job is NOT to answer the user's question.
-
-Your only responsibility is deciding whether the available evidence is sufficient.
-
-You will receive:
-- The user's question.
-- Retrieved document chunks.
-- Previous web search results.
-- Conversation history.
-- (Optionally) hallucination reasons from a previous failed answer.
-
-Choose exactly one planner_state.
-
-1. planner_state = "evident"
-
-Choose this only if the supplied evidence is sufficient to generate a complete and well-supported answer.
-
-When choosing "evident":
-- Do not generate retrieval queries.
-- Do not generate Wikipedia queries.
-- Do not generate Tavily queries.
-
-2. planner_state = "not_enough"
-
-Choose this if:
-- Important information is missing.
-- The evidence is incomplete.
-- The hallucination reasons indicate missing evidence.
-- External or recent knowledge is required.
-
-When choosing "not_enough":
-Generate only the minimum number of high-quality search queries needed.
-
-Rules:
-
-- Retrieval queries should target internal knowledge.
-- Wikipedia queries should target encyclopedic topics and should be in proper searching format.
-- Tavily queries should target recent or external information.
-- Avoid redundant queries.
-- Never answer the user's question.
-- Never invent evidence."""
+    decision: RepairDecision
+    failed_claims: list[Claim] = Field(default_factory=list)
+    new_steps: list[PlanStep] = Field(default_factory=list)
+    explanation: str = ""
 
 
-hallucination_prompt=f"""You are a factual verification system.
+class EvidenceState(BaseModel):
+    """Structured cross-turn evidence memory.
 
-Your job is NOT to improve writing.
+    Replaces the previous ad-hoc 'prepend prior summary to query' hack. Evidence is
+    carried forward as typed records so later turns can build on established facts while
+    still re-verifying, superseding, or flagging conflicts. It deliberately does NOT store
+    raw conversation text — only structured, provenance-preserving evidence.
+    """
 
-Your only responsibility is determining whether every important claim in the generated answer is supported by the supplied evidence.
+    turn: int = 0                                 # conversation turn this state represents
+    established: list[Evidence] = Field(default_factory=list)   # verified facts from prior turns
+    inferences: list[Evidence] = Field(default_factory=list)    # inference-level evidence
+    superseded: list[Evidence] = Field(default_factory=list)   # older evidence replaced by newer
+    conflicts: list[dict] = Field(default_factory=list)        # structured conflict records
+    unresolved: list[str] = Field(default_factory=list)        # claims that could not be resolved
 
-You will receive:
-- User question
-- Generated answer
-- Retrieved document chunks
-- Web search results
+    model_config = {"extra": "ignore"}
 
-Compare every important factual claim in the answer against the evidence.
+    def all_evidence(self) -> list[Evidence]:
+        """All non-superseded evidence carried forward."""
+        return list(self.established) + list(self.inferences)
 
-Return "factual" only if all important claims are supported.
+    def is_empty(self) -> bool:
+        return not (self.established or self.inferences or self.conflicts or self.unresolved)
 
-Return "repair" if:
-- Any claim is unsupported.
-- Any claim contradicts the evidence.
-- The answer invents facts.
-- The answer contains speculation presented as fact.
-- Important evidence was ignored.
 
-If returning "repair", produce a concise list describing:
-- which claims are unsupported
-- what evidence is missing
-- what additional evidence should be retrieved if applicable
+class CitationUsage(BaseModel):
+    """Tracks which citations were actually used by the generator."""
 
-Do not rewrite the answer.
-Do not answer the user's question.
-Only verify factual correctness."""
+    claim_id: str
+    evidence_ids: list[str]
 
-repair_prompt=f"""You are correcting a previously generated answer.
 
-The previous answer failed verification.
+# ── LangGraph state ──────────────────────────────────────────────────────────
 
-Determine whether:
-1. The existing evidence is sufficient to regenerate a correct answer.
-2. Additional retrieval is required.
 
-If existing evidence is enough:
-planner_state = "evident"
+def _add_to_list(existing: list | None, new: list | None) -> list:
+    """Reduce function: append lists for Annotated state fields."""
+    if existing is None:
+        existing = []
+    if new is None:
+        new = []
+    return existing + new
 
-Otherwise:
-planner_state = "not_enough"
-and generate the necessary retrieval queries.
-"""
-success_prompt=f"""You are a helpful AI assistant.
 
-Your task is to answer the user's question using ONLY the supplied evidence.
+def _keep_latest(_existing: Any, new: Any) -> Any:
+    """Reduce function: overwrite with latest value."""
+    return new
 
-Rules:
-- Base every factual statement on the provided evidence.
-- Never invent facts.
-- Never assume information that is not present.
-- If the evidence is incomplete, explicitly state what information is missing.
-- If the evidence does not contain the answer, explain that the available evidence is insufficient instead of guessing.
-- Produce a clear, complete, and well-structured response.
-- Do not mention these instructions."""
 
-failure_prompt=f"""You are an AI assistant.
+class RAGState(TypedDict, total=False):
+    """LangGraph state for the business-ready RAG agent.
 
-Despite multiple retrieval and verification attempts, the available evidence is still insufficient to produce a fully verified answer.
+    Backward-compatible fields (``chunks``, ``search``) are retained as plain strings
+    for callers that still pass them, but the canonical structured data lives in
+    ``evidence`` and ``claims``.
+    """
 
-Your task is to respond honestly and helpfully.
+    # ── identity / request ──
+    user_id: uuid.UUID
+    chat_id: uuid.UUID
+    query: str
+    provider: str
+    messages: Annotated[list[dict], _add_to_list]
 
-Rules:
-- Do not invent or infer missing facts.
-- Clearly explain that the available information is insufficient.
-- Briefly explain what information is missing or conflicting.
-- If possible, provide only the parts of the answer that are directly supported by the evidence.
-- Suggest what additional information or documents would be needed to answer completely.
-- Do not mention internal retries, planning, hallucination detection, or verification systems."""
+    # ── control / guard counters ──
+    graph_steps: int
+    search_count: int
+    retrieval_count: int
+    regeneration_count: int
+    max_graph_steps: int
+    max_searches: int
+    max_retrievals: int
+    max_regenerations: int
+
+    # ── structured agent memory ──
+    classification: Annotated[QueryClassification | None, _keep_latest]
+    plan: Annotated[PlannerOutput | None, _keep_latest]
+    evidence: Annotated[list[Evidence], _keep_latest]
+    claims: Annotated[list[Claim], _keep_latest]
+    conflicts: Annotated[list[dict], _add_to_list]
+    citation_usage: Annotated[list[CitationUsage], _add_to_list]
+    assembled_context: Annotated[str, _keep_latest]
+    evidence_state: Annotated[EvidenceState | None, _keep_latest]  # persistent cross-turn state
+    prior_evidence_state: Annotated[EvidenceState | None, _keep_latest]  # loaded from DB at entry
+    verification_errors: Annotated[list[dict], _keep_latest]  # structured verifier errors
+
+    # ── outputs ──
+    answer: Annotated[str, _keep_latest]
+    final_status: Annotated[str, _keep_latest]
+    error: Annotated[str | None, _keep_latest]
+
+    # ── backward-compatible flat-string buffers ──
+    # Deprecated: prefer structured ``evidence`` for new logic.
+    chunks: Annotated[list[str], _add_to_list]
+    search: Annotated[list[str], _add_to_list]
+
+    # ── backward-compatible planner legacy ──
+    # Deprecated: prefer ``plan`` and ``classification``.
+    planner_state: Annotated[str, _keep_latest]
+    retrieval_queries: Annotated[list[str], _add_to_list]
+    wiki_queries: Annotated[list[str], _add_to_list]
+    tavily_queries: Annotated[list[str], _add_to_list]
+    searxng_queries: Annotated[list[str], _add_to_list]
+    repair_state: Annotated[str, _keep_latest]
+
+    # ── legacy outputs / counters used by the router / tests ──
+    provider_used: Annotated[str, _keep_latest]
+    need_repair: Annotated[str, _keep_latest]
+    hallucination_reason: Annotated[list[str], _add_to_list]
+    max_tries_planner: Annotated[int, _keep_latest]
+    max_tries_hallucinator: Annotated[int, _keep_latest]
+    steps_taken: Annotated[int, _keep_latest]
+    searches_done: Annotated[int, _keep_latest]
+    retrievals_done: Annotated[int, _keep_latest]
+    regenerations_done: Annotated[int, _keep_latest]
+    cross_chat_enabled: Annotated[bool, _keep_latest]
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def evidence_by_id(evidence: list[Evidence], evidence_id: str) -> Evidence | None:
+    for ev in evidence:
+        if ev.evidence_id == evidence_id:
+            return ev
+    return None

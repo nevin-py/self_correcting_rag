@@ -12,6 +12,7 @@ class IngestionLog(Base):
     chat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chats.chat_id"))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.user_id"))
     filename: Mapped[str] = mapped_column(nullable=False)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)  # SHA-256 hash for deduplication
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
     )  # pending | processing | completed | failed

@@ -1,15 +1,19 @@
+import logging
+
 import jwt
 import uuid as _uuid
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password, create_token_access
 from app.auth.models import User
 from app.auth.schemas import UserCreate, UserResponse, Token
-from typing import Optional
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -78,6 +82,8 @@ async def get_current_user(
     res = result.scalar_one_or_none()
     if res is None:
         raise HTTPException(status_code=401, detail="User not found")
+    if not res.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
     return res
 
 
@@ -85,10 +91,14 @@ async def get_current_user(
 
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
+    logger.info("Registration attempt for email=%s", user.email)
     exists = await user_exist(user.email, db)
     if exists:
+        logger.warning("Registration rejected — email already exists: %s", user.email)
         raise HTTPException(status_code=400, detail="Email already exists")
-    return await create_user(user, db)
+    created = await create_user(user, db)
+    logger.info("Registration successful: user_id=%s email=%s", created.user_id, created.email)
+    return created
 
 
 @router.post("/login", response_model=Token)
@@ -96,5 +106,17 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Login attempt for email=%s", form_data.username)
     token = await passwrd_check(form_data.username, form_data.password, db)
+    logger.info("Login successful for email=%s", form_data.username)
     return {"access_token": token, "token_type": "bearer"}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    current_user: User = Depends(get_current_user),
+):
+    """Issue a fresh access token using the current valid token."""
+    new_token = create_token_access({"sub": str(current_user.user_id)})
+    logger.info("Token refreshed for user_id=%s", current_user.user_id)
+    return {"access_token": new_token, "token_type": "bearer"}
