@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Search, MessageSquare, Plus, Settings, Clock, Database } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/components/ui/Kbd";
 
@@ -51,7 +51,7 @@ export default function CommandPalette() {
       if (!item) return;
 
       if (item.action === "new-chat") {
-        const chat = await createChat(`Session ${String(chats.length + 1).padStart(3, "0")}`);
+        const chat = await createChat(nextSessionTitle(chats));
         router.push(`/chat/${chat.chat_id}`);
       } else if (item.href) {
         router.push(item.href);

@@ -45,6 +45,9 @@ class ResendOtpRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+    # Local-dev convenience: when SMTP is not configured (non-production),
+    # the OTP code is echoed here so registration is testable without mail.
+    debug_otp: str | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -66,3 +69,5 @@ class RegisterPendingResponse(BaseModel):
     detail: str
     email: EmailStr
     email_verified: bool = False
+    # Same local-dev echo as MessageResponse.debug_otp.
+    debug_otp: str | None = None

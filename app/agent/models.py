@@ -1,5 +1,5 @@
 #agents/models.py
-from sqlalchemy import ForeignKey,String,DateTime,func,Text
+from sqlalchemy import ForeignKey,String,DateTime,func,Text,Float
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 import uuid
 from typing import TYPE_CHECKING
@@ -17,6 +17,9 @@ class Agent_interact(Base):
     routing_path:Mapped[str]=mapped_column(Text)
     token_metric:Mapped[int]=mapped_column(nullable=False)
     latency:Mapped[float]=mapped_column(nullable=False)
+    provenance_json:Mapped[str | None]=mapped_column(Text, nullable=True)
+    estimated_cost_usd:Mapped[float | None]=mapped_column(nullable=True)
+    provider_used:Mapped[str | None]=mapped_column(String(32), nullable=True)
     created_at:Mapped[datetime]=mapped_column(DateTime,server_default=func.now())
     chat:Mapped["Chats"]=relationship(back_populates="interactions")
 class Chats(Base):

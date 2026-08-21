@@ -1,21 +1,16 @@
-"""
-Agent nodes for the business-ready self-correcting RAG pipeline.
+"""Agent nodes for the lean self-correcting RAG pipeline.
 
-Architecture (each node has a single, observable responsibility):
+Architecture — one LLM call per job, no heuristic stand-ins:
 
-    classify_and_plan    -> intent + retrieval plan (single LLM call)
-    retrieve_documents   -> vector + BM25 retrieval over the knowledge base
-    search_web           -> web search (Tavily / SearXNG / Wikipedia)
-    assemble_evidence    -> SOURCE RANKING + conflict classification + context assembly
-    extract_verify_claims -> claim extraction (disabled for cost; post-gen verify covers it)
-    generate_answer      -> cited answer generation + hard citation flagging
-    verify_answer_claims -> hard citation check + claim-level verification
-    repair_claims        -> targeted repair or termination
+    classify_and_plan   -> intent + retrieval plan (single structured LLM call)
+    gather_evidence     -> parallel document retrieval + web search, rerank, cite keys
+    generate_answer     -> cited answer generation from assembled evidence
+    verify_answer       -> mechanical citation check + single LLM judge call
+    conversational_response / ask_clarification -> short-circuit exits
 
-Evidence normalization, source authority, ranking, conflict classification,
-cross-turn state and verification now live in dedicated modules
-(normalization / source_authority / ranking / conflicts / evidence_state /
-verification) so the heuristics are small, pure, and unit-testable.
+Self-correction: when the judge finds unsupported claims that a targeted search
+could fix, the graph loops gather_evidence -> generate_answer -> verify_answer
+once (MAX_REPAIR_PASSES) with the judge's repair queries.
 """
 
 from __future__ import annotations
@@ -24,113 +19,60 @@ import asyncio
 import json
 import logging
 import re
+from langgraph.graph import END
 import time
-import concurrent.futures
 from datetime import datetime, timezone
 from typing import Any, get_args, get_origin
 from urllib.parse import urlparse
 
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 
-from app.agent.conflicts import detect_conflicts, is_genuine_contradiction
 from app.agent.citation_validator import (
-    extract_citation_tokens,
+    CitationValidationResult,
     flag_uncited_in_answer,
-    resolve_citation_token,
+    split_checkable_sentences,
     validate_answer_citations,
 )
-from app.agent.evidence_state import to_context_block
-from app.agent.verify_cascade import (
-    dedupe_search_queries,
-    grade_coverage,
-    normalize_query,
-    patch_flagged_sentences,
-    run_verify_cascade,
-)
-from app.agent.debug_session import agent_debug_log
-from app.agent.normalization import (
-    compose_search_query,
-    detect_metric_type,
-    detect_place_mentions,
-    detect_price_basis,
-    detect_scope_cues,
-    detect_temporal_qualifier,
-    extract_year_period,
-    expand_queries,
-    decompose_query_text,
-    get_retrieval_queries_for_subqueries,
-    SubQuery,
-)
-from app.agent.ranking import (
-    combined_score,
-    evidence_fits_classification,
-    filter_evidence_by_classification,
-    rank_evidence,
-)
+from app.agent.context_assembly import GENERATOR_BUDGET
+from app.agent.context_provider import get_current_context, format_context_for_llm
 from app.agent.reranker import rerank
-from app.agent.search_tool import search_structured
-from app.agent.source_authority import (
-    authority_score,
-    classify_source_quality,
-    official_search_variants,
-)
 from app.agent.state import (
     Claim,
     ClaimStatus,
-    ClaimType,
-    CitationUsage,
     Evidence,
-    GeographicScope,
-    MetricType,
-    PlannerDecision,
-    PlannerOutput,
-    PlanStep,
-    PriceBasis,
-    QueryClassification,
-    QueryNeed,
-    RepairDecision,
-    SourceQuality,
+    QueryMode,
+    QueryUnderstanding,
+    RAGState,
     SourceType,
-    TemporalQualifier,
+    Verdict,
     utc_now,
 )
-from app.agent.verification import audit_claims
-from app.documents.clients import resolve_llms
-from app.documents.clients import get_chroma_client
-from app.documents.service import retrieve_chunks
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+MAX_HISTORY_MESSAGES = 12          # conversation turns fed to LLM calls
+MAX_SEARCH_QUERIES = 3             # per gather pass
+MAX_EVIDENCE = 12                  # evidence blocks in the generator context
+EVIDENCE_SNIPPET_CHARS = 1200      # per evidence block in prompts
 
-# ── LLM helpers ──────────────────────────────────────────────────────────────
+
+# ── LLM plumbing ─────────────────────────────────────────────────────────────
 
 
 def _normalize_messages_for_gemini(messages: list) -> list:
-    """Gemini rejects system-only payloads ('contents are required').
-
-    Convert a lone SystemMessage into a HumanMessage, and ensure there is at
-    least one user turn when a SystemMessage is followed by nothing else.
-    """
+    """Gemini rejects system-only payloads ('contents are required')."""
     if not messages:
         return [HumanMessage(content="Continue.")]
-
     out: list[BaseMessage] = []
     has_human = False
     for msg in messages:
-        if isinstance(msg, SystemMessage):
-            # Keep system if other providers; for Gemini path we fold into human
-            out.append(msg)
-        elif isinstance(msg, HumanMessage):
+        if isinstance(msg, HumanMessage):
             has_human = True
-            out.append(msg)
-        else:
-            out.append(msg)
-
+        out.append(msg)
     if not has_human:
-        # Fold system instructions into a user turn Gemini will accept
         system_parts = [m.content for m in out if isinstance(m, SystemMessage)]
         other = [m for m in out if not isinstance(m, SystemMessage)]
         merged = "\n\n".join(str(p) for p in system_parts if p)
@@ -166,7 +108,6 @@ def _extract_json_object(text: str) -> dict:
         return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         pass
-
     start = cleaned.find("{")
     if start < 0:
         return {}
@@ -198,17 +139,7 @@ def _extract_json_object(text: str) -> dict:
     return {}
 
 
-def _safe_json_loads(text: str) -> dict:
-    return _extract_json_object(text)
-
-
-def _is_openai_compatible(llm: Any) -> bool:
-    name = llm.__class__.__name__ if llm is not None else ""
-    return name in {"ChatOpenAI", "AzureChatOpenAI"}
-
-
 def _base_model_type(annotation: Any) -> type[BaseModel] | None:
-    """Resolve a field annotation to a nested BaseModel type, if any."""
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation
     origin = get_origin(annotation)
@@ -242,8 +173,7 @@ def _validate_structured(data: dict, output_schema: type[BaseModel]) -> BaseMode
     try:
         return output_schema.model_validate(data)
     except ValidationError:
-        coerced = _coerce_null_strings(data, output_schema)
-        return output_schema.model_validate(coerced)
+        return output_schema.model_validate(_coerce_null_strings(data, output_schema))
 
 
 def _response_text(response: Any) -> str:
@@ -260,7 +190,6 @@ def _response_text(response: Any) -> str:
     text = str(content or "").strip()
     if text:
         return text
-
     extra = getattr(response, "additional_kwargs", None) or {}
     for key in ("reasoning_content", "reasoning", "text", "output"):
         val = extra.get(key)
@@ -268,8 +197,6 @@ def _response_text(response: Any) -> str:
             val = val.get("text") or val.get("content") or ""
         if isinstance(val, str) and val.strip():
             return val.strip()
-
-    # Some OpenRouter wrappers stash the message on response.response_metadata
     meta = getattr(response, "response_metadata", None) or {}
     for key in ("reasoning", "content"):
         val = meta.get(key)
@@ -278,64 +205,67 @@ def _response_text(response: Any) -> str:
     return ""
 
 
-def _structured_invoke(llm: Any, messages: list, output_schema: Any):
-    """Invoke with structured output; one raw JSON retry only if needed.
+def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: int = 45):
+    """Invoke with structured output; fall back to raw JSON parsing. Bounded by timeout."""
+    import concurrent.futures
 
-    Avoids burning a second full LLM round-trip when the first response is empty.
-    """
     prepared = _prepare_messages(llm, messages)
 
-    # 1) Native structured output (json_schema when available)
-    try:
+    def _do_structured():
         try:
-            bound = llm.with_structured_output(output_schema, method="json_schema")
-        except TypeError:
-            bound = llm.with_structured_output(output_schema)
-        result = bound.invoke(prepared)
-        if result is not None:
-            return result
-    except Exception as structured_exc:
-        logger.debug("Structured output failed (%s); trying raw JSON parse", structured_exc)
+            try:
+                bound = llm.with_structured_output(output_schema, method="json_schema")
+            except TypeError:
+                bound = llm.with_structured_output(output_schema)
+            return bound.invoke(prepared)
+        except Exception:
+            return None
 
-    # 2) Single raw completion + parse (no further retries here)
-    parse_hint = HumanMessage(
-        content=(
-            "Respond with ONLY a single valid JSON object matching the required schema. "
-            "No markdown, no commentary, no code fences. Never return an empty response."
+    def _do_raw():
+        parse_hint = HumanMessage(
+            content=(
+                "Respond with ONLY a single valid JSON object matching the required schema. "
+                "No markdown, no commentary, no code fences. Never return an empty response."
+            )
         )
-    )
-    response = llm.invoke([*prepared, parse_hint])
-    text = _response_text(response)
-    if not text:
-        # #region agent log
-        agent_debug_log(
-            "D",
-            "nodes.py:_structured_invoke",
-            "empty_structured_response",
-            {
-                "schema": getattr(output_schema, "__name__", str(output_schema)),
-                "content_type": type(getattr(response, "content", None)).__name__,
-                "raw_preview": str(getattr(response, "content", ""))[:120],
-            },
-        )
-        # #endregion
-        raise ValueError("Could not parse JSON from model output: (empty response)")
-    data = _extract_json_object(text)
-    if not data:
-        raise ValueError(f"Could not parse JSON from model output: {text[:200]}")
-    return _validate_structured(data, output_schema)
+        response = llm.invoke([*prepared, parse_hint])
+        text = _response_text(response)
+        if not text:
+            raise ValueError("Could not parse JSON from model output: (empty response)")
+        data = _extract_json_object(text)
+        if not data:
+            raise ValueError(f"Could not parse JSON from model output: {text[:200]}")
+        return _validate_structured(data, output_schema)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_structured)
+        try:
+            result = future.result(timeout=timeout)
+            if result is not None:
+                return result
+        except concurrent.futures.TimeoutError:
+            logger.warning("Structured output timed out after %ds; trying raw JSON", timeout)
+        except Exception as structured_exc:
+            logger.debug("Structured output failed (%s); trying raw JSON parse", structured_exc)
+
+        future = executor.submit(_do_raw)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise ValueError(f"LLM call timed out after {timeout}s (both structured and raw)")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"LLM call failed: {exc}")
 
 
 def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_schema: Any):
     """Call primary LLM; on failure walk fallbacks with structured output."""
     chain = [primary]
-    if fallbacks is None:
-        pass
-    elif isinstance(fallbacks, (list, tuple)):
+    if isinstance(fallbacks, (list, tuple)):
         chain.extend(fallbacks)
-    else:
+    elif fallbacks is not None:
         chain.append(fallbacks)
-
     last_exc: Exception | None = None
     for idx, llm in enumerate(chain):
         if llm is None:
@@ -345,17 +275,72 @@ def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_sche
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "LLM call failed (%s)%s",
-                exc,
+                "LLM call failed (%s)%s", exc,
                 ", trying next" if idx < len(chain) - 1 else "",
             )
     if last_exc:
         raise last_exc
-    raise RuntimeError("No LLM clients available")
+
+
+def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: int = 30):
+    """Invoke with structured output; fall back to raw JSON parsing. Bounded by timeout."""
+    import concurrent.futures
+
+    prepared = _prepare_messages(llm, messages)
+
+    def _do_structured():
+        try:
+            try:
+                bound = llm.with_structured_output(output_schema, method="json_schema")
+            except TypeError:
+                bound = llm.with_structured_output(output_schema)
+            return bound.invoke(prepared)
+        except Exception:
+            return None
+
+    def _do_raw():
+        parse_hint = HumanMessage(
+            content=(
+                "Respond with ONLY a single valid JSON object matching the required schema. "
+                "No markdown, no commentary, no code fences. Never return an empty response."
+            )
+        )
+        response = llm.invoke([*prepared, parse_hint])
+        text = _response_text(response)
+        if not text:
+            raise ValueError("Could not parse JSON from model output: (empty response)")
+        data = _extract_json_object(text)
+        if not data:
+            raise ValueError(f"Could not parse JSON from model output: {text[:200]}")
+        return _validate_structured(data, output_schema)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_structured)
+        try:
+            result = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # A timeout means the model is slow, not malformed — retrying the
+            # same model doubles the wait for the same likely outcome. Bail to
+            # the next model in the chain immediately.
+            raise ValueError(f"LLM call timed out after {timeout}s (structured attempt)")
+        if result is not None:
+            return result
+        logger.debug("Structured output empty; trying raw JSON parse")
+
+        future = executor.submit(_do_raw)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise ValueError(f"LLM call timed out after {timeout}s (raw attempt)")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"LLM call failed: {exc}")
+
 
 
 def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages: list) -> tuple[str, str]:
-    """Invoke chat models with multi-fallback. Returns (answer, used_label_suffix)."""
+    """Invoke chat models with multi-fallback. Returns (text, used_label_suffix)."""
     chain = [primary, *list(fallbacks or ())]
     last_exc: Exception | None = None
     for idx, llm in enumerate(chain):
@@ -365,600 +350,354 @@ def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages:
             response = llm.invoke(_prepare_messages(llm, messages))
             text = _response_text(response)
             if not text:
-                raise ValueError("Generator returned empty response")
-            label = "primary" if idx == 0 else f"fallback-{idx}"
-            return text, label
+                raise ValueError("Model returned empty response")
+            return text, ("primary" if idx == 0 else f"fallback-{idx}")
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "Generator failed (%s)%s",
-                exc,
+                "Chat call failed (%s)%s", exc,
                 ", trying next" if idx < len(chain) - 1 else "",
             )
     if last_exc:
         raise last_exc
-    raise RuntimeError("No generator clients available")
+    raise RuntimeError("No LLM clients available")
 
 
-# ── Backward-compatible extraction wrappers (delegate to normalization) ───────
-
-def _extract_metric_type(text: str) -> MetricType:
-    return detect_metric_type(text)
+# ── Shared helpers ───────────────────────────────────────────────────────────
 
 
-def _extract_temporal_qualifier(text: str) -> TemporalQualifier:
-    return detect_temporal_qualifier(text)
+def _resolve_llms(state: dict):
+    from app.documents.clients import resolve_llms
+
+    return resolve_llms(
+        state.get("provider", "auto"),
+        user_credentials=state.get("user_credentials") or {},
+    )
 
 
-def _extract_year_period(text: str) -> str:
-    return extract_year_period(text)
+def _format_history(state: dict, max_messages: int = MAX_HISTORY_MESSAGES) -> list:
+    """Conversation history as LangChain messages (oldest last, trimmed)."""
+    msgs = state.get("messages") or []
+    return list(msgs[-max_messages:])
 
 
-def _extract_metric_value(text: str) -> str:
-    """Extract the primary numeric value from text (for citation display)."""
-    m = re.search(r"[₹$]?[\d,.]+\s*(?:%|per\s*cent|lakh|crore|billion|million|trillion)", text, re.IGNORECASE)
-    if m:
-        return m.group(0).strip()
-    m = re.search(r"\b[\d,]+(?:\.\d+)?\b", text)
-    if m:
-        return m.group(0)
-    return ""
+def _temporal_context(state: dict) -> str:
+    """Current date/time (+ user locale when provided) for temporal awareness."""
+    ctx = get_current_context(
+        timezone_str=(state.get("request_context") or {}).get("timezone"),
+        user_location=(state.get("request_context") or {}).get("location"),
+        device_info=(state.get("request_context") or {}).get("device"),
+    )
+    return format_context_for_llm(ctx)
 
 
-def _classify_source_quality(source_name: str, source_url: str | None, source_type: SourceType) -> SourceQuality:
-    return classify_source_quality(source_name, source_url, source_type)
+def _prior_evidence_block(state: dict) -> str:
+    """Compact summary of verified facts carried from prior turns."""
+    prior = state.get("prior_evidence_state")
+    if not prior or prior.is_empty():
+        return ""
+    lines = []
+    for ev in prior.all_evidence()[:6]:
+        src = ev.source_name or ev.source_url or ev.evidence_id
+        lines.append(f"- {ev.text[:200]} [{src}]")
+    if prior.unresolved:
+        lines.append("- Unresolved from earlier: " + "; ".join(prior.unresolved[:3]))
+    return "\n".join(lines)
 
 
-def _score_domain_authority(url: str | None, source_type: SourceType) -> float:
-    return authority_score(url, source_type)
-
-
-def _extract_geographic_scope(geography: str, text: str) -> tuple[GeographicScope, str]:
-    """Generic geography extraction (NO hardcoded place lists).
-
-    - If a query-level `geography` (LLM-classified) is provided, its scope is
-      derived generically and returned (this is the query's intended scope).
-    - Otherwise the evidence's own scope + place mention is discovered from text.
-    Place discovery is a general Title-Case recognizer, so any place (e.g.
-    Maharashtra, Karnataka, Tamil Nadu, USA) is captured without enumeration.
-    """
-    if geography:
-        scope = detect_scope_cues(geography)
-        if scope == GeographicScope.UNKNOWN:
-            # Infer a generic scope for a bare place name if possible.
-            if any(w in geography.lower() for w in ("national", "country", "nation")):
-                scope = GeographicScope.NATIONAL
-            elif any(w in geography.lower() for w in ("state", "province")):
-                scope = GeographicScope.STATE
-        return scope, geography
-
-    scope = detect_scope_cues(text)
-    places = detect_place_mentions(text)
-    place = places[0] if places else ""
-    return scope, place
-
-
-def _enrich_evidence_metadata(ev: Evidence, classification: QueryClassification | None = None) -> Evidence:
-    """Populate metric, price-basis, geographic, temporal and source fields.
-
-    Rules:
-    - A specific metric acronym (GDP/GSDP/GVA/...) wins over a generic modifier
-      (growth rate / inflation). A generic modifier is overridden by a specific
-      classification hint.
-    - Evidence geography is discovered from its OWN text; it only inherits the
-      query geography when it names no place of its own (so a source about a
-      *different* place is still caught as a geographic mismatch).
-    - Price basis (current vs constant) is detected explicitly.
-    """
-    # ── Metric ──
-    detected = detect_metric_type(ev.text)
-    if detected != MetricType.UNKNOWN and detected not in (MetricType.GROWTH_RATE, MetricType.INFLATION):
-        ev.metric_type = detected
-    elif classification and classification.metric_hint != MetricType.UNKNOWN:
-        ev.metric_type = classification.metric_hint
-    elif detected != MetricType.UNKNOWN:
-        ev.metric_type = detected
-
-    # ── Price basis ──
-    if ev.price_basis == PriceBasis.UNKNOWN:
-        ev.price_basis = detect_price_basis(ev.text)
-    if ev.price_basis == PriceBasis.UNKNOWN and classification and getattr(classification, "price_basis", PriceBasis.UNKNOWN) != PriceBasis.UNKNOWN:
-        ev.price_basis = classification.price_basis  # type: ignore[attr-defined]
-
-    # ── Temporal ──
-    if ev.temporal_qualifier == TemporalQualifier.UNKNOWN:
-        ev.temporal_qualifier = detect_temporal_qualifier(ev.text)
-    if ev.temporal_qualifier == TemporalQualifier.UNKNOWN and classification and classification.temporal_qualifier != TemporalQualifier.UNKNOWN:
-        ev.temporal_qualifier = classification.temporal_qualifier
-
-    # ── Year / period ──
-    if not ev.year_period:
-        ev.year_period = extract_year_period(ev.text)
-
-    # ── Metric value ──
-    if not ev.metric_value:
-        ev.metric_value = _extract_metric_value(ev.text)
-
-    # ── Geography ──
-    text_place = detect_place_mentions(ev.text)
-    if text_place:
-        ev.geography = text_place[0]
-        scope = detect_scope_cues(ev.text)
-        if scope != GeographicScope.UNKNOWN:
-            ev.geographic_scope = scope
-    elif classification and classification.geography:
-        ev.geography = classification.geography
-        if classification.geographic_scope != GeographicScope.UNKNOWN:
-            ev.geographic_scope = classification.geographic_scope
-
-    # ── Source quality / authority ──
-    if ev.source_quality == SourceQuality.UNKNOWN:
-        ev.source_quality = classify_source_quality(ev.source_name, ev.source_url, ev.source_type)
-    if ev.authority_score == 0.0:
-        ev.authority_score = authority_score(ev.source_url, ev.source_type)
-
-    return ev
-
-
-# ── Authority / recency scoring ──────────────────────────────────────────────
+def _sanitize_evidence_text(text: str) -> str:
+    """Strip forged citation tokens so injected fake [E#] markers can't game the verifier."""
+    return re.sub(r"\[[Ee]\d{1,3}\]", "", text or "")
 
 
 def _parse_date(text: str | None) -> datetime | None:
     if not text:
         return None
-    m = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", text)
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", str(text))
     if m:
         try:
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
         except ValueError:
-            pass
-    months = {
-        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
-    }
-    m = re.search(r"(?i)(january|february|march|april|may|june|july|august|september|october|november|december)[\s,]+(20\d{2})", text)
+            return None
+    m = re.search(r"\b(20\d{2})\b", str(text))
     if m:
-        return datetime(int(m.group(2)), months[m.group(1).lower()], 1, tzinfo=timezone.utc)
+        return datetime(int(m.group(1)), 1, 1, tzinfo=timezone.utc)
     return None
 
 
-def _recency_score(evidence_date: datetime | None, temporal_focus: datetime | str | None = None) -> float:
-    if evidence_date is None:
-        return 0.5
-    now = utc_now()
-    reference = temporal_focus
-    if isinstance(reference, str):
-        reference = _parse_date(reference)
-    reference = reference or now
-    age_days = max(0, (reference - evidence_date).days)
-    return 0.9 if age_days < 365 else max(0.3, 0.9 - age_days / 3650.0)
+def _evidence_sort_key(ev: Evidence) -> float:
+    """Rank by rerank score when available, else retrieval score. Recency breaks ties."""
+    base = ev.rerank_score if ev.rerank_score is not None else ev.retrieval_score
+    if ev.source_date:
+        age_days = max((utc_now() - ev.source_date).days, 0)
+        base += min(age_days, 3650) / 365000  # tiny, bounded nudge toward fresher sources
+    return float(base or 0.0)
 
 
-def _combined_score(ev: Evidence) -> float:
-    """Backward-compatible combined score (no classification context)."""
-    return combined_score(ev, None)
+_CLASSIFY_PROMPT = """You are the planning module of a research assistant. Analyze the user's message and produce a JSON plan.
 
+Current date and time: {temporal_context}
 
-# ── Deterministic contradiction detection (delegates to conflicts) ────────────
+Conversation so far (may be empty):
+{conversation}
 
-def _normalize_claim(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+Verified facts carried over from earlier turns (may be empty):
+{prior_evidence}
 
+User message:
+{query}
 
-def _detect_contradiction(claim_text: str, evidence_text: str) -> tuple[bool, str]:
-    """Backward-compatible contradiction check (genuine contradiction or disagreement)."""
-    return is_genuine_contradiction(claim_text, evidence_text)
-
-
-def _detect_evidence_conflicts(evidence: list[Evidence]) -> list[dict]:
-    """Pairwise conflict detection (returns structured, classified records)."""
-    return detect_conflicts(evidence)
-
-
-# ── Nodes: classification & planning (single LLM call) ───────────────────────
-
-
-_CLASSIFY_AND_PLAN_PROMPT = """You are the classifier+planner for a business-ready self-correcting RAG agent.
-In ONE response, classify the user query AND produce a retrieval/verification plan.
-
-## Classification fields
-- primary_need: factual, procedural, comparative, temporal, exploratory
-- needs_documents: true if internal docs likely contain the answer
-- needs_web: true if public/web info is needed (latest news, external facts, updates beyond a textbook)
-- needs_calculation: true if arithmetic, dates, or aggregation required
-- temporal_focus: ISO date if about a specific date / "latest"
-- temporal_qualifier: actual / estimate / preliminary / revised / projected / advance / unknown
-- geographic_scope: global / national / state / district / city / region / unknown
-- geography: specific place name if mentioned; use "" if none
-- metric_hint: gdp / gsdp / gva / gva_share / output_share / employment / revenue / population / growth_rate / inflation / other / unknown
-  → CRITICAL: GSDP, GVA, GVA_SHARE, OUTPUT_SHARE, and GDP are DIFFERENT metrics. Never conflate them.
-- domain_hints: list of relevant domains
-- ambiguity: low / medium / high
-- rewrite: clearer, disambiguated version of the query
-
-## Plan steps
-Each step must have:
-- action: one of retrieve_documents, search_web, calculate, synthesize
-- queries: concrete search/retrieval queries (include EXACT metric acronym + geography)
-- expected_claims: factual claims evidence should support
-- rationale: why this step is needed
+Decide:
+1. mode:
+   - "conversational": greetings, thanks, small talk, or questions about the assistant itself. No facts need looking up.
+   - "clarification": the message is genuinely ambiguous — one term could mean two or more clearly different things and you cannot pick. Write one short question listing the distinct meanings. Unknown acronyms, unfamiliar names, news, and current-event questions are NOT ambiguity — research them instead; search will resolve them.
+   - "research": anything that needs evidence to answer.
+2. rewritten_query: the message rewritten as a fully standalone search query. Resolve pronouns and implicit references against the conversation ("what about the growth?" -> "growth of <topic from history>"). Keep the user's language and intent; add the time frame only if the conversation implies one.
+3. needs_documents: true if the user's own uploaded documents might be relevant.
+4. needs_web: true if public/web knowledge is needed. Default true for factual questions about the world.
+5. search_queries: 1-3 precise web/document search queries derived from rewritten_query. Each query must be self-contained.
+6. temporal_focus: the time frame the question is about ("latest", "2023", "Q1 2025", ...). Empty string if no time dimension.
+7. geography: the place the question is about, exactly as the user framed it. Empty string if none.
 
 Rules:
-- If metric_hint is set, every query MUST use that exact metric (never substitute GDP for GSDP, etc.).
-- Include geography and temporal qualifier in queries when known.
-- Prefer retrieve_documents first when needs_documents is true; add search_web when needs_web is true.
-
-User query: {query}
+- The current date matters: if the user asks for "latest"/"current"/"today", set temporal_focus accordingly and prefer fresh sources.
+- Never invent entities not present in the conversation or the message.
 """
 
 
-def _query_implies_web(query: str) -> bool:
-    """Heuristic: recency / compare-to-textbook questions need public web evidence."""
-    q = (query or "").lower()
-    keys = (
-        "latest",
-        "most recent",
-        "recent",
-        "current",
-        "today",
-        "this year",
-        "updated",
-        "still hold",
-        "still holds",
-        "compare",
-        "how does that picture compare",
-    )
-    return any(k in q for k in keys)
+_GENERATE_PROMPT = """You are a precise research assistant. Answer the user's question using ONLY the evidence below.
+
+Current date and time: {temporal_context}
+{temporal_focus_line}
+
+Evidence (cite with the bracketed keys):
+{context}
+
+Rules:
+1. EVERY sentence containing a number, date, amount, or named entity MUST end with a citation key from the evidence, e.g. ... [E3]. An uncited factual sentence will be flagged as unverified and shown to the user as a caveat.
+2. If the evidence is insufficient, say so plainly — never fabricate facts or citations.
+3. Respect time: if the question asks for latest/current figures, prefer the most recent evidence and say which period each figure covers.
+4. If two evidence items conflict, report both with citations instead of picking silently.
+5. Match the user's language. Be direct and concise; structure with short paragraphs or bullets when it helps.
+"""
 
 
-def _heuristic_classification(query: str) -> QueryClassification:
-    """Build a classification from the query text when the planner LLM fails.
+_VERIFY_PROMPT = """You are a strict fact verifier. Given an answer and the evidence it cites, check every factual assertion.
 
-    Metric/geo agnostic: uses existing detectors only — no named places or agencies.
-    Produces a short rewrite suitable for search (not the full user paragraph).
-    """
-    places = detect_place_mentions(query)
-    geography = places[0] if places else ""
-    metric = detect_metric_type(query)
-    want_web = _query_implies_web(query)
-    rewrite = compose_search_query(
-        geography=geography,
-        metric=metric,
-        temporal=TemporalQualifier.UNKNOWN,
-        base="",
-    )
-    # Keep rewrite short; append a compact topic cue from the first clause if needed
-    if not rewrite:
-        rewrite = re.split(r"[.?!\n]", query.strip())[0].strip()[:120]
-    else:
-        # Optional short topic from query without dumping the whole paragraph
-        first = re.split(r"[.?!\n]", query.strip())[0].strip()
-        if first and len(rewrite) < 40:
-            rewrite = f"{rewrite} {first[:80]}".strip()
-    rewrite = rewrite[:160]
-    return QueryClassification(
-        primary_need=QueryNeed.TEMPORAL if want_web else QueryNeed.FACTUAL,
-        needs_documents=True,
-        needs_web=want_web,
-        geography=geography,
-        metric_hint=metric,
-        rewrite=rewrite or query[:120],
-    )
+Current date: {temporal_context}
+
+Evidence:
+{context}
+
+Answer to verify:
+{answer}
+
+For each factual assertion in the answer (skip greetings, transitions, and hedged statements):
+- text: the assertion, quoted briefly
+- status: "verified" (cited evidence genuinely supports it), "contradicted" (evidence says otherwise), "unverified" (no cited evidence supports it), "uncertain" (evidence is ambiguous, partial, or conflicting)
+- evidence_ids: the cite keys (E1, E2, ...) that support or contradict it
+- reasoning: one sentence
+
+Also set:
+- overall: "supported" if every assertion is verified, "partial" if some are uncertain/unverified, "unsupported" if any assertion is contradicted or central claims are unverified
+- repair_queries: 1-3 web search queries that could fix the gaps — ONLY when gaps exist and are the kind a targeted search could fill. Empty list otherwise.
+- clarification_question: when assertions are "contradicted" because a key term matches DIFFERENT real things (two different people or organizations sharing a name, or an acronym with several expansions), write ONE short question listing the interpretations you found, e.g. "By CJP do you mean the Chief Justice of Pakistan or the Centre for Justice Policy?". Otherwise empty string.
+- explanation: one sentence summary of answer quality
+
+Be strict about numbers, dates, names, and causal claims. Do not fail an assertion merely for informal phrasing.
+"""
+_CONVERSATIONAL_PROMPT = """You are a friendly research assistant. The user's message is conversational — no lookup is needed.
+
+Current date and time: {temporal_context}
+
+Conversation so far:
+{conversation}
+
+Reply naturally in the user's language. If they greet you, greet back and briefly say what you can help with (answering questions from their documents and the web with cited, verified answers). Keep it to 1-3 sentences. If they ask what you are or what you can do, answer honestly and concisely.
+"""
+
+
+# ── Node: classify_and_plan ──────────────────────────────────────────────────
 
 
 def classify_and_plan(state: dict) -> dict:
-    """Classify intent and build a retrieval plan in a single structured LLM call."""
+    """Classify intent and build a retrieval plan in one structured LLM call.
+
+    Chat-aware (resolves followups against history) and temporally aware
+    (current date injected; temporal_focus extracted).
+    """
     t0 = time.perf_counter()
-    query = state["query"]
-    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
-    used_fallback = False
+    query = state.get("query_original") or state.get("query", "")
+    temporal_context = _temporal_context(state)
 
+    from langchain_core.messages import AIMessage
+
+    convo_lines = []
+    for msg in _format_history(state):
+        role = "user" if isinstance(msg, HumanMessage) else ("assistant" if isinstance(msg, AIMessage) else "system")
+        content = (getattr(msg, "content", "") or "").strip()
+        if content:
+            convo_lines.append(f"{role}: {content[:500]}")
+
+    messages = [
+        SystemMessage(content=_CLASSIFY_PROMPT.format(
+            temporal_context=temporal_context,
+            conversation="\n".join(convo_lines) or "(no prior conversation)",
+            prior_evidence=_prior_evidence_block(state) or "(none)",
+            query=query,
+        )),
+        HumanMessage(content=query),
+    ]
+
+    llms = _resolve_llms(state)
+    used = llms.label
     try:
-        plan = _llm_with_fallback(
-            llms.planner,
-            llms.planner_fallbacks,
-            [SystemMessage(content=_CLASSIFY_AND_PLAN_PROMPT.format(query=query))],
-            PlannerOutput,
+        u: QueryUnderstanding = _llm_with_fallback(
+            llms.planner, llms.planner_fallbacks, messages, QueryUnderstanding
         )
-        classification = plan.classification or QueryClassification(rewrite=query)
     except Exception as exc:
-        used_fallback = True
-        logger.exception("classify_and_plan failed: %s", exc)
-        classification = _heuristic_classification(query)
-        short_q = classification.rewrite or query[:120]
-        steps = [PlanStep(
-            action="retrieve_documents",
-            queries=[short_q],
-            expected_claims=[],
-            rationale="Fallback retrieve due to classify_and_plan failure",
-        )]
-        if classification.needs_web:
-            steps.append(PlanStep(
-                action="search_web",
-                queries=[short_q],
-                expected_claims=[],
-                rationale="Fallback web search from heuristic rewrite",
-            ))
-        plan = PlannerOutput(classification=classification, steps=steps)
+        # Honest safe default: treat as research, search everything with the raw query.
+        logger.warning("classify_and_plan LLM failed (%s); defaulting to research mode", exc)
+        u = QueryUnderstanding(
+            mode=QueryMode.RESEARCH,
+            rewritten_query=query,
+            needs_documents=True,
+            needs_web=True,
+            search_queries=[query],
+        )
+        used = f"{llms.label}+fallback-default"
+    # Sanitize planner output — never let a malformed plan starve the pipeline.
+    if u.mode == QueryMode.CLARIFICATION and not u.clarification_question.strip():
+        # Planner asked for clarification but wrote no question: treat as research.
+        logger.info("Planner chose clarification without a question; coercing to research")
+        u.mode = QueryMode.RESEARCH
+        u.needs_web = True
+    if u.mode == QueryMode.RESEARCH:
+        if not u.needs_documents and not u.needs_web:
+            u.needs_web = True  # research must look somewhere
+        if not any(q.strip() for q in u.search_queries):
+            u.search_queries = [u.rewritten_query or query]
 
-    if classification.primary_need in (QueryNeed.TEMPORAL, QueryNeed.EXPLORATORY):
-        classification.needs_web = True
-    # Recency / compare cues must force web even when the model (or fallback) missed it
-    if _query_implies_web(query):
-        classification.needs_web = True
-    # Keep plan.classification in sync after mutation
-    plan.classification = classification
-    if not plan.steps:
-        steps = []
-        if classification.needs_documents:
-            steps.append(PlanStep(
-                action="retrieve_documents",
-                queries=[classification.rewrite or query],
-                expected_claims=[],
-                rationale="Default document retrieval",
-            ))
-        if classification.needs_web:
-            steps.append(PlanStep(
-                action="search_web",
-                queries=[classification.rewrite or query],
-                expected_claims=[],
-                rationale="Default web search",
-            ))
-        plan.steps = steps or [PlanStep(
-            action="retrieve_documents",
-            queries=[classification.rewrite or query],
-            expected_claims=[],
-            rationale="Fallback retrieve",
-        )]
-    elif classification.needs_web and not any(s.action == "search_web" for s in plan.steps):
-        plan.steps = list(plan.steps) + [PlanStep(
-            action="search_web",
-            queries=[classification.rewrite or query],
-            expected_claims=[],
-            rationale="Added web search for recency/comparison query",
-        )]
-
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-    # #region agent log
-    qlow = (query or "").lower()
-    agent_debug_log(
-        "A",
-        "nodes.py:classify_and_plan",
-        "classify_plan_result",
-        {
-            "elapsed_ms": round(elapsed_ms),
-            "used_fallback": used_fallback,
-            "needs_web": bool(classification.needs_web),
-            "needs_documents": bool(classification.needs_documents),
-            "primary_need": getattr(classification.primary_need, "value", classification.primary_need),
-            "plan_actions": [s.action for s in (plan.steps or [])],
-            "rewrite": (classification.rewrite or "")[:120],
-            "query_has_recent": any(k in qlow for k in ("recent", "latest", "most recent", "current")),
-            "query_has_compare": "compare" in qlow or "textbook" in qlow,
-        },
+    logger.info(
+        "Node classify_and_plan completed in %.0fms mode=%s docs=%s web=%s queries=%s",
+        (time.perf_counter() - t0) * 1000, u.mode.value, u.needs_documents, u.needs_web, u.search_queries,
     )
-    # #endregion
-    logger.info("Node classify_and_plan completed in %.0fms", elapsed_ms)
     return {
-        "classification": classification,
-        "plan": plan,
-        "planner_state": PlannerDecision.NOT_ENOUGH.value,
-        "provider_used": llms.label,
+        "understanding": u,
+        "query": u.rewritten_query or query,
+        "provider_used": used,
+        "graph_steps": state.get("graph_steps", 0) + 1,
     }
 
 
-def classify_query(state: dict) -> dict:
-    """Backward-compatible wrapper — prefer classify_and_plan in the live graph."""
-    return classify_and_plan(state)
+def route_after_classify(state: dict) -> str:
+    u = state.get("understanding")
+    if u is None:
+        return "gather_evidence"
+    if u.mode == QueryMode.CONVERSATIONAL:
+        return "conversational_response"
+    if u.mode == QueryMode.CLARIFICATION and u.clarification_question.strip():
+        return "ask_clarification"
+    return "gather_evidence"
 
 
-def build_plan(state: dict) -> dict:
-    """No-op if classify_and_plan already produced a plan; otherwise run combined call."""
-    if state.get("plan") and state.get("classification"):
-        logger.info("Node build_plan skipped (already planned)")
-        return {
-            "plan": state["plan"],
-            "classification": state["classification"],
-            "planner_state": state.get("planner_state") or PlannerDecision.NOT_ENOUGH.value,
-            "provider_used": state.get("provider_used"),
-        }
-    return classify_and_plan(state)
+# ── Node: conversational short-circuits ──────────────────────────────────────
 
 
-# ── Precise query composition (LLM-driven explicit searches) ─────────────────
+def conversational_response(state: dict) -> dict:
+    """Reply to small talk / meta questions directly (one small LLM call)."""
+    query = state.get("query_original") or state.get("query", "")
+    temporal_context = _temporal_context(state)
 
-def _precise_query(state: dict) -> str:
-    """Build one precise, disambiguated retrieval/search query from classification."""
-    classification = state.get("classification")
-    query = state["query"]
-    if not classification:
-        return query
-    return compose_search_query(
-        geography=classification.geography,
-        metric=classification.metric_hint,
-        temporal=classification.temporal_qualifier,
-        base=classification.rewrite or query,
+    from langchain_core.messages import AIMessage
+
+    convo_lines = []
+    for msg in _format_history(state):
+        role = "user" if isinstance(msg, HumanMessage) else ("assistant" if isinstance(msg, AIMessage) else "system")
+        content = (getattr(msg, "content", "") or "").strip()
+        if content:
+            convo_lines.append(f"{role}: {content[:500]}")
+
+    messages = [
+        SystemMessage(content=_CONVERSATIONAL_PROMPT.format(
+            temporal_context=temporal_context,
+            conversation="\n".join(convo_lines) or "(no prior conversation)",
+        )),
+        HumanMessage(content=query),
+    ]
+    llms = _resolve_llms(state)
+    try:
+        answer, suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages)
+        used = f"{llms.label}+{suffix}"
+    except Exception as exc:
+        logger.warning("conversational_response LLM failed: %s", exc)
+        answer = "Hello! Ask me a question and I'll research it with cited sources."
+        used = llms.label
+    return {
+        "answer": answer,
+        "final_status": "conversational",
+        "provider_used": used,
+        "graph_steps": state.get("graph_steps", 0) + 1,
+    }
+
+
+def ask_clarification(state: dict) -> dict:
+    """Ask the user which meaning they intend (question comes from the planner LLM)."""
+    u = state.get("understanding")
+    question = (u.clarification_question if u else "").strip() or (
+        "Could you clarify what you'd like to know?"
     )
+    return {
+        "answer": question,
+        "final_status": "needs_clarification",
+        "graph_steps": state.get("graph_steps", 0) + 1,
+    }
 
 
-# ── Nodes: retrieval & web search ────────────────────────────────────────────
+# ── Node: gather_evidence ────────────────────────────────────────────────────
 
 
-def _chunks_to_evidence(chunks: list[dict], source_type: SourceType, classification: QueryClassification | None = None) -> list[Evidence]:
-    evidence = []
-    for idx, ch in enumerate(chunks):
-        text = ch.get("text", "")
-        meta = ch.get("metadata", {}) or {}
-        # Add parent context to metadata if available
-        if ch.get("parent_context"):
-            meta["parent_context"] = ch["parent_context"]
-        date = _parse_date(meta.get("date") or meta.get("source_date"))
-        raw_name = (
-            meta.get("source_name")
-            or meta.get("filename")
-            or meta.get("title")
-            or meta.get("source")
-            or ""
-        )
-        source_name = str(raw_name).strip()
-        if not source_name or source_name.lower() == "unknown":
-            source_name = "document"
-        ev = Evidence(
-            text=text,
-            source_type=source_type,
-            source_name=source_name,
-            source_url=meta.get("source_url"),
-            source_date=date,
-            retrieval_score=float(ch.get("score", 0.0)),
-            chunk_index=idx,
-            metadata=meta,
-        )
-        ev.authority_score = authority_score(ev.source_url, source_type)
-        ev.recency_score = _recency_score(date)
-        ev = _enrich_evidence_metadata(ev, classification)
-        ev.combined_score = combined_score(ev, classification)
-        evidence.append(ev)
-    return evidence
-
-
-async def retrieve_documents(state: dict) -> dict:
-    """Retrieve chunks from the knowledge base and wrap them as Evidence."""
-    t0 = time.perf_counter()
-    if state.get("retrieval_count", 0) >= state.get("max_retrievals", settings.MAX_RETRIEVALS):
-        logger.warning("Max retrievals reached; skipping document retrieval")
-        return {
-            "evidence": list(state.get("evidence", [])),
-            "chunks": [ev.text for ev in state.get("evidence", []) if ev.source_type == SourceType.DOCUMENT],
-            "retrieval_count": state.get("retrieval_count", 0),
-        }
-
-    query = state["query"]
-    classification = state.get("classification")
-    precise = _precise_query(state)
-    
-    # Use query decomposition for complex multi-part questions
-    decomposition = decompose_query_text(query)
-    
-    # Use query expansion for better recall
-    if classification:
-        retrieval_queries = expand_queries(
-            base_query=precise,
-            metric=classification.metric_hint,
-            geography=classification.geography,
-            temporal=classification.temporal_qualifier,
-            price_basis=getattr(classification, 'price_basis', PriceBasis.UNKNOWN),
-        )
-    else:
-        retrieval_queries = [precise]
-    
-    # Add decomposition-based queries if applicable
-    if decomposition.needs_decomposition and decomposition.sub_queries:
-        decomp_queries = get_retrieval_queries_for_subqueries(
-            base_query=query,
-            sub_queries=decomposition.sub_queries,
-            classification=classification,
-        )
-        for q in decomp_queries:
-            if q.lower() not in {x.lower() for x in retrieval_queries}:
-                retrieval_queries.append(q)
-    
-    # Add LLM rewrite if available
-    if classification and classification.rewrite:
-        if classification.rewrite not in retrieval_queries:
-            retrieval_queries.append(classification.rewrite)
-    
-    # Add plan queries if available
-    if state.get("plan"):
-        for step in state["plan"].steps:
-            if step.action == "retrieve_documents":
-                for q in step.queries:
-                    if q not in retrieval_queries:
-                        retrieval_queries.append(q)
+async def _retrieve_documents(queries: list[str], state: dict) -> list[Evidence]:
+    """Vector + BM25 retrieval over the user's knowledge base."""
+    from app.documents.service import retrieve_chunks
 
     user_id = state["user_id"]
     chat_id = state["chat_id"]
-    all_evidence: list[Evidence] = list(state.get("evidence", []))
-
     try:
-        tasks = [
+        results = await asyncio.gather(*[
             retrieve_chunks(q, user_id=user_id, top_k=30, scope="chat", chat_id=chat_id)
-            for q in retrieval_queries[:3]
-        ]
-        results = await asyncio.gather(*tasks)
-
-        chunks: list[dict] = []
-        for query_result in results:
-            for ch in query_result:
-                dist = ch.get("distance")
-                if dist is None:
-                    score = 0.5
-                else:
-                    score = 1.0 - min(1.0, max(0.0, float(dist)))
-                chunks.append({"text": ch["text"], "metadata": ch.get("metadata", {}), "score": score})
-
-        if chunks:
-            ranked = rerank(query, [("chunk", c["text"]) for c in chunks], top_k=len(chunks))
-            text_to_score = {r.text: r.score for r in ranked}
-            for ch in chunks:
-                ev = _chunks_to_evidence([ch], SourceType.DOCUMENT, classification)[0]
-                rs = text_to_score.get(ch["text"])
-                ev.rerank_score = float(rs) if rs is not None else None
-                ev = _enrich_evidence_metadata(ev, classification)
-                ev.combined_score = combined_score(ev, classification)
-                all_evidence.append(ev)
+            for q in queries[:MAX_SEARCH_QUERIES]
+        ])
     except Exception as exc:
         logger.exception("Document retrieval failed: %s", exc)
+        return []
 
-    logger.info("Node retrieve_documents completed in %.0fms", (time.perf_counter() - t0) * 1000)
-    return {
-        "evidence": all_evidence,
-        "chunks": [ev.text for ev in all_evidence if ev.source_type == SourceType.DOCUMENT],
-        "retrieval_count": state.get("retrieval_count", 0) + 1,
-    }
+    evidence: list[Evidence] = []
+    for query_result in results:
+        for ch in query_result:
+            text = (ch.get("text") or "").strip()
+            if not text:
+                continue
+            dist = ch.get("distance")
+            score = 0.5 if dist is None else 1.0 - min(1.0, max(0.0, float(dist)))
+            meta = dict(ch.get("metadata") or {})
+            evidence.append(Evidence(
+                text=text,
+                source_type=SourceType.DOCUMENT,
+                source_name=meta.get("source") or meta.get("filename") or "document",
+                source_date=_parse_date(meta.get("date") or meta.get("created_at")),
+                retrieval_score=float(score),
+                metadata=meta,
+            ))
+    return evidence
 
 
-async def search_web(state: dict) -> dict:
-    """Run web search and wrap results as Evidence."""
-    t0 = time.perf_counter()
-    if state.get("search_count", 0) >= state.get("max_searches", settings.MAX_SEARCHES):
-        logger.warning("Max searches reached; skipping web search")
-        return {
-            "evidence": list(state.get("evidence", [])),
-            "search": state.get("search", []),
-            "search_count": state.get("search_count", 0),
-        }
+async def _search_web(queries: list[str], state: dict) -> list[Evidence]:
+    """Parallel web search (SearXNG / Wikipedia / Tavily) with daily Tavily budget."""
+    from app.agent.search_tool import search_structured
 
-    classification = state.get("classification")
-    precise = _precise_query(state)
-    search_queries = [precise]
-    if classification:
-        search_queries.append(classification.rewrite or state["query"])
-    if state.get("plan"):
-        for step in state["plan"].steps:
-            if step.action == "search_web":
-                search_queries.extend(step.queries)
-
-    # Prefer one primary query; allow a second official-TLD variant (or gap-fill).
-    max_keep = 2 if state.get("repair_mode") == "surgical" else 1
-    queries = dedupe_search_queries(search_queries, max_keep=max_keep)
-    if classification and (classification.needs_web or (classification.geography or "").strip()):
-        extras: list[str] = []
-        for q in queries:
-            extras.extend(official_search_variants(q))
-        queries = dedupe_search_queries(queries + extras, max_keep=2)
-    prior_norms = {normalize_query(q) for q in (state.get("searxng_queries") or [])}
-    if prior_norms:
-        filtered = [q for q in queries if normalize_query(q) not in prior_norms]
-        queries = filtered or queries[:1]
-
-    all_evidence: list[Evidence] = list(state.get("evidence", []))
-    search_strings: list[str] = []
-
-    allow_tavily = True
     user_id = state.get("user_id")
+    allow_tavily = True
     if user_id is not None:
         try:
             from app.core.database import AsyncLocalSession
@@ -975,929 +714,377 @@ async def search_web(state: dict) -> dict:
             else:
                 logger.exception("Tavily budget check failed")
 
-    async def _one_search(q: str) -> list[dict]:
+    async def _one(q: str) -> list[dict]:
         try:
-            return await search_structured(
-                q, max_results=6, user_id=user_id, allow_tavily=allow_tavily
-            )
+            return await search_structured(q, max_results=6, user_id=user_id, allow_tavily=allow_tavily)
         except Exception as exc:
             logger.warning("Web search failed for query %r: %s", q, exc)
             return []
 
-    results_lists = await asyncio.gather(*[_one_search(q) for q in queries])
+    results_lists = await asyncio.gather(*[_one(q) for q in queries[:MAX_SEARCH_QUERIES]])
+
+    evidence: list[Evidence] = []
+    seen_urls: set[str] = set()
     for results in results_lists:
         for r in results:
-            text = r.get("content", "").strip()
+            text = (r.get("content") or "").strip()
             if not text:
                 continue
             url = r.get("url")
-            date = _parse_date(r.get("published_date") or r.get("date"))
-            ev = Evidence(
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            evidence.append(Evidence(
                 text=text,
                 source_type=SourceType.WEB,
                 source_name=r.get("title") or r.get("source") or urlparse(url or "").netloc,
                 source_url=url,
-                source_date=date,
+                source_date=_parse_date(r.get("published_date") or r.get("date")),
                 retrieval_score=float(r.get("score", 0.5)),
-                metadata=r,
-            )
-            ev.authority_score = authority_score(url, SourceType.WEB)
-            ev.recency_score = _recency_score(date, classification.temporal_focus if classification else None)
-            ev = _enrich_evidence_metadata(ev, classification)
-            ev.combined_score = combined_score(ev, classification)
-            if not evidence_fits_classification(ev, classification):
-                continue
-            all_evidence.append(ev)
-            search_strings.append(text)
-
-    logger.info(
-        "Node search_web completed in %.0fms (queries=%s)",
-        (time.perf_counter() - t0) * 1000,
-        queries,
-    )
-    return {
-        "evidence": all_evidence,
-        "search": search_strings,
-        "search_count": state.get("search_count", 0) + 1,
-        "searxng_queries": list(state.get("searxng_queries") or []) + list(queries),
-    }
+                metadata=dict(r),
+            ))
+    return evidence
 
 
-# ── Node: evidence assembly (ranking + conflict classification + context) ─────
+async def gather_evidence(state: dict) -> dict:
+    """Run document retrieval and web search in parallel, rerank, assign cite keys.
 
-
-def _count_tokens(text: str) -> int:
-    return len(text) // 4
-
-
-def assemble_evidence(state: dict) -> dict:
-    """Deduplicate, rank (geo/metric-aware), classify conflicts, build context.
-
-    Also merges the PERSISTENT cross-turn evidence state: established facts from
-    prior turns are carried forward (provenance preserved) and ranked alongside
-    freshly retrieved evidence, without dumping the whole conversation.
+    On the repair pass, uses the judge's repair_queries instead of the plan.
     """
-    evidence: list[Evidence] = list(state.get("evidence", []))
-    classification: QueryClassification | None = state.get("classification")
-    prior: Any = state.get("prior_evidence_state") or state.get("evidence_state")
+    t0 = time.perf_counter()
+    u = state.get("understanding") or QueryUnderstanding(
+        rewritten_query=state.get("query_original") or state.get("query", ""),
+        needs_documents=True, needs_web=True,
+    )
+    repair_mode = bool(state.get("repair_queries"))
+    if repair_mode:
+        queries = [q for q in state["repair_queries"] if q.strip()][:MAX_SEARCH_QUERIES]
+        needs_web, needs_documents = True, u.needs_documents
+    else:
+        queries = [q for q in (u.search_queries or [u.rewritten_query]) if q.strip()][:MAX_SEARCH_QUERIES]
+        needs_web, needs_documents = u.needs_web, u.needs_documents
+    if not queries:
+        queries = [state.get("query_original") or state.get("query", "")]
 
-    # Merge prior established evidence (clearly marked, slightly discounted).
-    merged: list[Evidence] = list(evidence)
-    if prior and prior.established:
-        seen_ids = {ev.evidence_id for ev in evidence}
-        for ev in prior.established:
-            if ev.evidence_id not in seen_ids:
-                ev.combined_score = 0.6
-                merged.append(ev)
-                seen_ids.add(ev.evidence_id)
+    tasks: dict[str, asyncio.Task] = {}
+    if needs_documents and state.get("retrieval_count", 0) < settings.MAX_RETRIEVALS:
+        tasks["docs"] = asyncio.ensure_future(_retrieve_documents(queries, state))
+    if needs_web and state.get("search_count", 0) < settings.MAX_SEARCHES:
+        tasks["web"] = asyncio.ensure_future(_search_web(queries, state))
 
-    # Deduplicate by near-duplicate text, then rank.
+    evidence: list[Evidence] = list(state.get("evidence") or [])
+    if tasks:
+        done = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for name, result in zip(tasks.keys(), done):
+            if isinstance(result, Exception):
+                logger.exception("%s failed: %s", name, result)
+                continue
+            evidence.extend(result)
+
+    # Carry forward verified facts from prior turns (chat memory).
+    prior = state.get("prior_evidence_state")
+    if prior and not repair_mode:
+        evidence.extend(prior.all_evidence())
+
+    # Deduplicate by normalized text prefix, then rerank against the query.
+    seen_texts: set[str] = set()
     unique: list[Evidence] = []
-    seen_hashes = set()
-    for ev in merged:
-        h = hash(_normalize_claim(ev.text)[:200])
-        if h in seen_hashes:
+    for ev in evidence:
+        key = re.sub(r"\s+", " ", ev.text[:300]).lower()
+        if key in seen_texts:
             continue
-        seen_hashes.add(h)
-        ev = _enrich_evidence_metadata(ev, classification)
-        ev.combined_score = combined_score(ev, classification)
+        seen_texts.add(key)
         unique.append(ev)
 
-    unique = rank_evidence(unique, classification)
-    unique = filter_evidence_by_classification(unique, classification)
+    query = state.get("query") or u.rewritten_query
+    if unique:
+        ranked = rerank(query, [
+            ("chunk" if ev.source_type == SourceType.DOCUMENT else "search", ev.text)
+            for ev in unique
+        ], top_k=len(unique))
+        score_by_text = {r.text: r.score for r in ranked}
+        for ev in unique:
+            rs = score_by_text.get(ev.text)
+            ev.rerank_score = float(rs) if rs is not None else None
+        unique.sort(key=_evidence_sort_key, reverse=True)
+        selected = unique[:MAX_EVIDENCE]
 
-    # Classify conflicts (not all disagreements are contradictions).
-    conflicts = detect_conflicts(unique)
+        # Enforce the generator token budget in ranked order.
+        budget_chars = GENERATOR_BUDGET.total_tokens * 4
+        kept: list[Evidence] = []
+        used_chars = 0
+        for ev in selected:
+            cost = min(len(ev.text), EVIDENCE_SNIPPET_CHARS) + 120
+            if used_chars + cost > budget_chars and kept:
+                break
+            kept.append(ev)
+            used_chars += cost
+        selected = kept
+    else:
+        selected = []
 
-    # Penalize ONLY genuine contradictions / source disagreements, never updates.
-    for c in conflicts:
-        if c.get("is_contradiction"):
-            loser = next((e for e in unique if e.evidence_id == c["loser"]), None)
-            if loser:
-                loser.authority_score *= 0.7
-                loser.combined_score = combined_score(loser, classification)
-    unique = rank_evidence(unique, classification)
-
-    # Build token-budgeted context with full structured metadata + E1..En cite keys.
-    # Cap hard — large contexts dominate generate_answer latency on OpenRouter.
-    CONTEXT_TOKEN_BUDGET = 8000
-    context_parts: list[str] = []
-    token_count = 0
+    # Assign cite keys and build the context block.
     cite_map: dict[str, str] = {}
-    kept: list[Evidence] = []
-
-    cross_turn = to_context_block(prior)
-    if cross_turn:
-        context_parts.append(cross_turn)
-        token_count += _count_tokens(cross_turn)
-
-    cite_idx = 0
-    for ev in unique:
-        header = f"SOURCE: {ev.source_type.value} | {ev.source_name}"
+    blocks: list[str] = []
+    for i, ev in enumerate(selected, start=1):
+        key = f"E{i}"
+        ev.metadata["cite_key"] = key
+        cite_map[key] = ev.evidence_id
+        src = f"document: {ev.source_name}" if ev.source_type == SourceType.DOCUMENT else f"web: {ev.source_name}"
         if ev.source_url:
-            header += f" | {ev.source_url}"
+            src += f" ({ev.source_url})"
         if ev.source_date:
-            header += f" | {ev.source_date.date().isoformat()}"
-        meta_parts = []
-        if ev.metric_type != MetricType.UNKNOWN:
-            meta_parts.append(f"metric={ev.metric_type.value}")
-        if ev.metric_value:
-            meta_parts.append(f"value={ev.metric_value}")
-        if ev.price_basis != PriceBasis.UNKNOWN:
-            meta_parts.append(f"price={ev.price_basis.value}")
-        if ev.geographic_scope != GeographicScope.UNKNOWN:
-            meta_parts.append(f"scope={ev.geographic_scope.value}")
-        if ev.geography:
-            meta_parts.append(f"geo={ev.geography}")
-        if ev.year_period:
-            meta_parts.append(f"period={ev.year_period}")
-        if ev.temporal_qualifier != TemporalQualifier.UNKNOWN:
-            meta_parts.append(f"temporal={ev.temporal_qualifier.value}")
-        if ev.source_quality != SourceQuality.UNKNOWN:
-            meta_parts.append(f"quality={ev.source_quality.value}")
-        if meta_parts:
-            header += f" | {' '.join(meta_parts)}"
+            src += f", published {ev.source_date.date().isoformat()}"
+        blocks.append(f"[{key}] {src}\n{_sanitize_evidence_text(ev.text[:EVIDENCE_SNIPPET_CHARS])}")
+    context = "\n\n".join(blocks)
 
-        # Tentative cite key for budget check
-        tentative_key = f"E{cite_idx + 1}"
-        entry = f"[{tentative_key}] {header}\n{ev.text}"
-
-        parent_ctx = ev.metadata.get("parent_context")
-        if parent_ctx:
-            entry += f"\n\n[CONTEXT] {parent_ctx[:500]}"
-
-        entry_tokens = _count_tokens(entry)
-        if token_count + entry_tokens > CONTEXT_TOKEN_BUDGET and context_parts:
-            break
-
-        cite_idx += 1
-        cite_key = f"E{cite_idx}"
-        ev.metadata = {**(ev.metadata or {}), "cite_key": cite_key}
-        cite_map[cite_key] = ev.evidence_id
-        entry = f"[{cite_key}] {header}\n{ev.text}"
-        if parent_ctx:
-            entry += f"\n\n[CONTEXT] {parent_ctx[:500]}"
-        context_parts.append(entry)
-        token_count += entry_tokens
-        kept.append(ev)
-
-    key_legend = "Cite keys: " + ", ".join(
-        f"[{k}]→{v}" for k, v in cite_map.items()
-    ) if cite_map else ""
-    assembled = (key_legend + "\n\n" if key_legend else "") + "\n\n---\n\n".join(context_parts)
-
-    gaps = grade_coverage(
-        state.get("query", ""),
-        kept or unique,
-        classification,
-    )
     logger.info(
-        "Assembled context: %d items, ~%d tokens, cite_keys=%d, coverage_gaps=%d",
-        len(kept),
-        token_count,
-        len(cite_map),
-        len(gaps),
+        "Node gather_evidence completed in %.0fms (queries=%s evidence=%d selected=%d repair=%s)",
+        (time.perf_counter() - t0) * 1000, queries, len(unique), len(selected), repair_mode,
     )
-
-    return {
-        "evidence": unique,
-        "conflicts": conflicts,
-        "assembled_context": assembled,
+    updates: dict = {
+        "evidence": selected,
         "cite_map": cite_map,
-        "coverage_gaps": gaps,
+        "assembled_context": context,
+        "graph_steps": state.get("graph_steps", 0) + 1,
     }
+    if needs_documents:
+        updates["retrieval_count"] = state.get("retrieval_count", 0) + 1
+    if needs_web:
+        updates["search_count"] = state.get("search_count", 0) + 1
+    return updates
 
 
-# ── Node: claim extraction & verification ────────────────────────────────────
-
-
-_CLAIM_PROMPT = """You are a fact-checking assistant. Given the query, evidence context, and source metadata, extract 1-8 atomic factual claims that an answer should make.
-
-For each claim provide:
-- text: the claim text
-- status: one of verified / partial / contradicted / unverified / uncertain
-- claim_type: fact / inference / speculation
-  -> "fact" if directly supported by a single evidence item
-  -> "inference" if deduced from combining multiple evidence items (label it as inference!)
-  -> "speculation" if extrapolating beyond evidence
-- evidence_ids: list of evidence IDs that support it
-- contradicting_evidence_ids: list of evidence IDs that contradict it
-- reasoning: one-sentence justification
-- repair_action: none / search_web / retrieve_documents / reject / rephrase
-
-IMPORTANT economic-data checks:
-- Verify the EXACT metric (GDP vs GSDP vs GVA vs GVA_SHARE vs OUTPUT_SHARE are DIFFERENT)
-- Verify price basis (current/nominal vs constant/real)
-- Verify geographic scope matches (national vs state vs district)
-- Verify temporal qualifiers match (actual vs estimate vs revised vs advance vs projected)
-- Clearly separate facts from inferences; never present an inference as a hard fact.
-
-Evidence context:
-{context}
-
-User query: {query}
-"""
-
-
-class _ClaimList(BaseModel):
-    claims: list[Claim]
-
-
-def extract_verify_claims(state: dict) -> dict:
-    """Pre-generation claim extraction (disabled for cost; post-gen verify covers it)."""
-    return {"claims": []}
-
-
-# ── Node: answer generation ──────────────────────────────────────────────────
-
-
-_ANSWER_PROMPT = """You are a precise research assistant with structured reasoning. Answer the user's query using ONLY the evidence below.
-
-## YOUR THINKING PROCESS (internal - don't show to user):
-1. UNDERSTAND: What specific metric, geography, and time period is the user asking about?
-2. GATHER: Which evidence items are most relevant? List their cite keys (E1, E2, ...).
-3. VERIFY: Do sources agree? Any conflicts? Which source is more authoritative?
-4. SYNTHESIZE: What's the direct answer? What caveats apply?
-
-## ANSWER FORMAT (must follow this structure):
-
-### Direct Answer
-[One sentence answering the exact question asked, ending with an inline [E#] citation]
-
-### Supporting Evidence
-- **Fact 1** [E#]: [specific evidence from source]
-- **Fact 2** [E#]: [specific evidence from source]
-- ...
-
-### Analysis & Caveats
-- **Confidence**: High/Medium/Low (based on source quality & agreement)
-- **Limitations**: [Any missing data, conflicts, or uncertainties]
-- **Inference**: [If combining multiple sources, clearly label as inference]
-
-## CRITICAL RULES (mandatory):
-- GSDP ≠ GDP ≠ GVA ≠ GVA_SHARE ≠ OUTPUT_SHARE (DIFFERENT metrics)
-- State ≠ National (Maharashtra GSDP ≠ India GDP)
-- Current prices ≠ Constant prices (nominal vs real)
-- Advance estimate ≠ Revised estimate ≠ Actual (different accuracy)
-- EVERY factual sentence MUST end with a cite key from the evidence list, e.g. [E3]
-- Use ONLY keys listed in the Cite keys legend / evidence headers — never invent IDs
-- Do NOT put a bibliography-only list of citations; cite inline on the claim sentence
-- If sources conflict, explain WHY (different years? different statuses?)
-- If evidence is insufficient, say "Insufficient data" — NEVER guess
-- Do not introduce numbers, totals, or percentages that do not appear in the cited evidence snippets
-- If cited items use different metric types, name each metric; do not treat them as interchangeable
-
-## CROSS-TURN EVIDENCE
-If a [CROSS-TURN EVIDENCE STATE] block is present:
-- Treat ESTABLISHED FACTS as verified but re-verify against current question
-- Treat SUPERSEDED items as OUTDATED (don't present as current)
-- Treat OPEN CONFLICTS as UNRESOLVED (don't assert either side as fact)
-
-Evidence context:
-{context}
-
-Conflicts detected:
-{conflicts}
-
-User query: {query}
-"""
+# ── Node: generate_answer ────────────────────────────────────────────────────
 
 
 def generate_answer(state: dict) -> dict:
-    """Generate a cited answer from assembled evidence."""
+    """Generate a cited answer from assembled evidence (chat history included)."""
     t0 = time.perf_counter()
-    query = state["query"]
     context = state.get("assembled_context", "")
-    conflicts = json.dumps(state.get("conflicts", []), indent=2, default=str)
+    u = state.get("understanding")
 
     if not context.strip():
         return {
             "answer": "I don't have enough reliable information to answer this question.",
-            "regeneration_count": state.get("regeneration_count", 0) + 1,
+            "claims": [],
+            "verification_errors": [],
+            "final_status": "answered_with_caveats",
+            "graph_steps": state.get("graph_steps", 0) + 1,
         }
+
+    temporal_focus = getattr(u, "temporal_focus", "") if u else ""
+    temporal_focus_line = f'The user is asking about: "{temporal_focus}" (current date above). Prefer evidence matching that period; state the period of every figure.' if temporal_focus else ""
 
     messages = [
-        SystemMessage(content=_ANSWER_PROMPT.format(context=context, conflicts=conflicts, query=query)),
-        HumanMessage(content=query),
+        SystemMessage(content=_GENERATE_PROMPT.format(
+            temporal_context=_temporal_context(state),
+            temporal_focus_line=temporal_focus_line,
+            context=context,
+        )),
+        *_format_history(state),
+        HumanMessage(content=state.get("query_original") or state.get("query", "")),
     ]
 
-    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
+    llms = _resolve_llms(state)
     try:
-        answer, used_suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages)
+        answer, suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages)
+        answer = answer.replace("【", "[").replace("】", "]")
+        used = f"{llms.label}+{suffix}"
     except Exception as exc:
         logger.warning("generate_answer LLM failed: %s", exc)
-        answer, used_suffix = "", "failed"
-    used = llms.label if used_suffix == "primary" else f"{llms.label}+{used_suffix}"
-
-    if not (answer or "").strip():
-        logger.warning("generate_answer produced empty text; returning fallback")
         return {
-            "answer": (
-                "I retrieved evidence but could not generate a readable answer "
-                "(empty model response). Please try again."
-            ),
-            "regeneration_count": state.get("regeneration_count", 0) + 1,
-            "provider_used": used,
+            "answer": "I retrieved evidence but could not generate an answer (model error). Please try again.",
+            "claims": [],
             "verification_errors": [],
+            "final_status": "answered_with_caveats",
+            "provider_used": llms.label,
         }
 
+
     evidence: list[Evidence] = state.get("evidence", [])
-    cite_map: dict[str, str] = state.get("cite_map") or {}
-    citation_check = validate_answer_citations(answer, evidence, cite_map=cite_map)
+    citation_check: CitationValidationResult = validate_answer_citations(
+        answer, evidence, cite_map=state.get("cite_map") or {}
+    )
     answer = flag_uncited_in_answer(answer, citation_check)
 
     logger.info(
         "Node generate_answer completed in %.0fms (uncited=%d invalid_cites=%d answer_chars=%d)",
         (time.perf_counter() - t0) * 1000,
-        len(citation_check.uncited_sentences),
-        len(citation_check.invalid_citation_ids),
-        len(answer),
+        len(citation_check.uncited_sentences), len(citation_check.invalid_citation_ids), len(answer),
     )
     return {
         "answer": answer,
-        "regeneration_count": state.get("regeneration_count", 0) + 1,
-        "provider_used": used,
+        "claims": citation_check.claims,
         "verification_errors": [e.to_dict() for e in citation_check.errors],
+        "provider_used": used,
+        "graph_steps": state.get("graph_steps", 0) + 1,
     }
 
 
-# ── Node: claim-level verification / hallucination check ─────────────────────
+# ── Node: verify_answer ──────────────────────────────────────────────────────
 
 
-_VERIFY_PROMPT = """You are a strict claim-level hallucination checker.
-Given the generated answer, the evidence context, and the extracted claims, verify each claim.
-
-For each claim, decide:
-- status: verified / partial / contradicted / unverified / uncertain
-- claim_type: fact / inference / speculation
-- evidence_ids: supporting evidence IDs
-- contradicting_evidence_ids: contradicting evidence IDs
-- reasoning: concise justification
-- repair_action: none / search_web / retrieve_documents / reject / rephrase
-
-CHECK LIST (fail the claim if any mismatch):
-1. SUPPORT: Is every important factual claim backed by cited evidence?
-2. EVIDENCE MATCH: Does the cited evidence actually support the claim?
-3. METRIC: metric in claim == metric in evidence (GDP != GSDP != GVA != GVA_SHARE != OUTPUT_SHARE)
-4. GEOGRAPHY: geography in claim == geography in evidence (national != state)
-5. DATE: period in claim == period in evidence
-6. STATUS: estimate status in claim == status in evidence (actual vs advance vs revised)
-7. PRICE BASIS: current vs constant prices are not interchangeable
-8. AUTHORITY: is the cited source authoritative enough for the claim?
-9. INFERENCE: is the conclusion stronger than the evidence? (correlation != causation)
-10. MIXING: are sources being mixed incorrectly (different geos/metrics)?
-11. CONTRADICTIONS: are apparent conflicts genuine, or just different years/statuses?
-
-Evidence context:
-{context}
-
-Answer:
-{answer}
-
-Existing claims:
-{claims}
-"""
-
-
-_ANSWER_CITATION_RE = re.compile(r"\[([Ee]\d{1,3}|[a-fA-F0-9]{6,12})\]")
-
-
-def _claims_from_answer_citations(
-    answer: str,
-    evidence: list[Evidence],
-    cite_map: dict[str, str] | None = None,
-) -> list[Claim]:
-    """Heuristic claim extraction when the verifier LLM fails or times out."""
-    if not answer or not evidence:
-        return []
-    known = {ev.evidence_id: ev for ev in evidence}
-    claims: list[Claim] = []
-    parts = re.split(r"(?<=[.!?])\s+", answer)
-    for part in parts:
-        text = part.strip()
-        if len(text) < 20:
-            continue
-        ids = []
-        for tok in _ANSWER_CITATION_RE.findall(text):
-            eid = resolve_citation_token(tok, evidence, cite_map)
-            if eid and eid in known:
-                ids.append(eid)
-        if not ids:
-            continue
-        claims.append(
-            Claim(
-                text=text[:500],
-                status=ClaimStatus.PARTIALLY_VERIFIED,
-                claim_type=ClaimType.FACT,
-                evidence_ids=list(dict.fromkeys(ids)),
-                reasoning="Extracted from answer citations (verifier skipped/failed)",
-            )
-        )
-        if len(claims) >= 8:
+def _verify_context(evidence: list[Evidence], cite_map: dict[str, str], max_chars: int = 6000) -> str:
+    """Compact evidence listing for the judge prompt (keys, sources, snippets)."""
+    reverse = {v: k for k, v in (cite_map or {}).items()}
+    blocks = []
+    used = 0
+    for ev in evidence:
+        key = reverse.get(ev.evidence_id, ev.metadata.get("cite_key", ev.evidence_id))
+        src = ev.source_name or ev.source_url or "unknown"
+        date = ev.source_date.date().isoformat() if ev.source_date else "no date"
+        block = f"[{key}] {src} ({date}): {_sanitize_evidence_text(ev.text[:400])}"
+        if used + len(block) > max_chars:
             break
-    return claims
+        blocks.append(block)
+        used += len(block)
+    return "\n\n".join(blocks)
 
 
-def _verify_context_budget(context: str, max_chars: int = 6000) -> str:
-    """Keep verify prompts small — large contexts dominate verifier latency."""
-    if len(context) <= max_chars:
-        return context
-    return context[:max_chars] + "\n\n[... context truncated for verification ...]"
-
-
-def _cascade_llm_residual(
-    sentences: list[str],
-    evidence: list[Evidence],
-    state: dict,
-) -> list[Claim]:
-    """Batched structured verify for escalated sentences only."""
-    if not sentences:
-        return []
-    cite_map = state.get("cite_map") or {}
-    known = {ev.evidence_id: ev for ev in evidence}
-    snippets = []
-    for s in sentences:
-        for tok in extract_citation_tokens(s):
-            eid = resolve_citation_token(tok, evidence, cite_map)
-            if eid and eid in known:
-                snippets.append(f"[{eid}] {known[eid].text[:350]}")
-    snippets = list(dict.fromkeys(snippets))[:12]
-    prompt = (
-        "Verify each claim against its cited evidence. Return JSON claims list.\n"
-        "For each claim: status (verified/partial/contradicted/unverified/uncertain), "
-        "evidence_ids, reasoning, repair_action (none/rephrase/search_web).\n\n"
-        f"Evidence snippets:\n{chr(10).join(snippets)}\n\n"
-        f"Claims to verify:\n" + "\n".join(f"- {s}" for s in sentences)
-    )
-    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
-    result = _llm_with_fallback(
-        llms.verifier,
-        llms.verifier_fallbacks,
-        [SystemMessage(content=prompt)],
-        _ClaimList,
-    )
-    claims = list(result.claims) if result and result.claims else []
-    if not claims:
-        raise ValueError("Cascade LLM residual returned empty claims")
-    return claims
-
-
-def verify_answer_claims(state: dict) -> dict:
-    """Hard citation check + cascade (or legacy LLM) claim verification."""
+def verify_answer(state: dict) -> dict:
+    """Mechanical citation check + one LLM judge call over the whole answer."""
     t0 = time.perf_counter()
     answer = state.get("answer", "")
-    context = _verify_context_budget(state.get("assembled_context", ""))
     evidence: list[Evidence] = state.get("evidence", [])
     cite_map: dict[str, str] = state.get("cite_map") or {}
-    prior: Any = state.get("prior_evidence_state") or state.get("evidence_state")
-    prior_claims: list[Claim] = state.get("claims", [])
 
-    citation_check = validate_answer_citations(answer, evidence, cite_map=cite_map)
-    citation_errors = list(citation_check.errors)
+    if not answer or not evidence:
+        return {
+            "claims": [],
+            "verification_errors": state.get("verification_errors", []),
+            "final_status": "answered_with_caveats",
+            # LangGraph keeps prior values for absent keys — an explicit clear
+            # is required or a stale repair_queries loops the graph forever.
+            "repair_queries": [],
+            "graph_steps": state.get("graph_steps", 0) + 1,
+        }
 
-    claims: list[Claim] = []
-
-    if settings.USE_VERIFY_CASCADE:
-        try:
-            cascade = run_verify_cascade(
-                answer,
-                evidence,
-                cite_map=cite_map,
-                llm_invoke=lambda sents, ev: _cascade_llm_residual(sents, ev, state),
-            )
-            claims = cascade.claims
-        except Exception as exc:
-            logger.warning("Verify cascade failed (%s); using citation heuristics", exc)
-            claims = _claims_from_answer_citations(answer, evidence, cite_map)
-    else:
-        try:
-            llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
-            result = _llm_with_fallback(
-                llms.verifier,
-                llms.verifier_fallbacks,
-                [SystemMessage(content=_VERIFY_PROMPT.format(
-                    context=context,
-                    answer=answer[:4000],
-                    claims=json.dumps([c.model_dump() for c in prior_claims], default=str)[:2000],
-                ))],
-                _ClaimList,
-            )
-            claims = result.claims
-        except Exception as exc:
-            logger.warning("Claim verification failed (%s); using citation heuristics", exc)
-            claims = _claims_from_answer_citations(answer, evidence, cite_map)
-
-    if not claims:
-        claims = list(citation_check.claims) or _claims_from_answer_citations(answer, evidence, cite_map)
-    else:
-        existing_texts = {c.text.strip().lower() for c in claims}
-        for c in citation_check.claims:
-            if c.status == ClaimStatus.UNVERIFIED and c.text.strip().lower() not in existing_texts:
-                claims.append(c)
-
-    known_ids = {ev.evidence_id for ev in evidence}
-    for claim in claims:
-        bad = [i for i in claim.evidence_ids if i not in known_ids]
-        if bad:
-            claim.status = ClaimStatus.UNVERIFIED
-            claim.reasoning = (claim.reasoning + " " if claim.reasoning else "") + (
-                f"Invalid citation ids: {bad}"
-            )
-            claim.repair_action = claim.repair_action or "rephrase"
-        elif not claim.evidence_ids and claim.status not in (
-            ClaimStatus.VERIFIED,
-            ClaimStatus.PARTIALLY_VERIFIED,
-        ):
-            claim.status = ClaimStatus.UNVERIFIED
-            claim.repair_action = claim.repair_action or "rephrase"
-
-    for claim in claims:
-        for ev in evidence:
-            is_contra, reason = is_genuine_contradiction(claim.text, ev.text)
-            if is_contra:
-                claim.status = ClaimStatus.CONTRADICTED
-                claim.contradicting_evidence_ids = list(set(claim.contradicting_evidence_ids + [ev.evidence_id]))
-                claim.reasoning = f"Deterministic contradiction: {reason}"
-                claim.repair_action = claim.repair_action or "rephrase"
-
-    errors = audit_claims(claims, evidence, prior)
-    all_errors = [e.to_dict() for e in citation_errors] + [e.to_dict() for e in errors]
-
-    citation_usage = [
-        CitationUsage(claim_id=claim.claim_id, evidence_ids=claim.evidence_ids)
-        for claim in claims
-    ]
-
-    logger.info(
-        "Node verify_answer_claims completed in %.0fms (claims=%d citation_errors=%d cascade=%s)",
-        (time.perf_counter() - t0) * 1000,
-        len(claims),
-        len(citation_errors),
-        settings.USE_VERIFY_CASCADE,
+    mechanical: CitationValidationResult = validate_answer_citations(
+        answer, evidence, cite_map=cite_map
     )
-    # #region agent log
-    agent_debug_log(
-        "E",
-        "nodes.py:verify_answer_claims",
-        "verify_complete",
-        {
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000),
-            "claims": len(claims),
-            "citation_errors": len(citation_errors),
-            "uncited": len(citation_check.uncited_sentences),
-            "failed": sum(
-                1
-                for c in claims
-                if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
-            ),
-            "cascade": settings.USE_VERIFY_CASCADE,
-        },
-    )
-    # #endregion
-    return {
-        "claims": claims,
-        "citation_usage": citation_usage,
-        "verification_errors": all_errors,
-    }
+    claims_by_text = {c.text: c for c in mechanical.claims}
 
-
-# ── Node: repair ─────────────────────────────────────────────────────────────
-
-
-def repair_claims(state: dict) -> dict:
-    """Surgical patch (cascade) or legacy re-search/regenerate repair."""
-    claims: list[Claim] = state.get("claims", [])
-    failed = [
-        c for c in claims
-        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
-    ]
-
-    if not failed:
-        return {"repair_state": RepairDecision.SATISFACTORY.value, "final_status": "answered"}
-
-    if settings.USE_VERIFY_CASCADE:
-        return _repair_claims_surgical(state, failed)
-
-    # Legacy path
-    if state.get("regeneration_count", 0) >= state.get("max_regenerations", settings.MAX_REGENERATIONS):
-        return {
-            "repair_state": RepairDecision.MAX_ATTEMPTS.value,
-            "final_status": "max_attempts",
-            "answer": _add_caveats(state.get("answer", ""), failed),
-        }
-
-    new_steps: list[PlanStep] = []
-    for claim in failed:
-        if claim.repair_action in ("search_web", ""):
-            new_steps.append(PlanStep(
-                action="search_web",
-                queries=[claim.text],
-                expected_claims=[claim.text],
-                rationale=f"Repair unverified claim: {claim.text[:80]}",
-            ))
-        elif claim.repair_action == "retrieve_documents":
-            new_steps.append(PlanStep(
-                action="retrieve_documents",
-                queries=[claim.text],
-                expected_claims=[claim.text],
-                rationale=f"Repair contradicted claim: {claim.text[:80]}",
-            ))
-
-    seen = set()
-    deduped = []
-    for step in new_steps:
-        key = (step.action, tuple(step.queries))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(step)
-
-    retrieval_available = state.get("retrieval_count", 0) < state.get("max_retrievals", settings.MAX_RETRIEVALS)
-    search_available = state.get("search_count", 0) < state.get("max_searches", settings.MAX_SEARCHES)
-    actionable = [
-        s for s in deduped
-        if (s.action == "retrieve_documents" and retrieval_available)
-        or (s.action == "search_web" and search_available)
-    ]
-    if not actionable:
-        logger.warning(
-            "Repair needed but no actionable steps (retrieval=%s search=%s failed=%d)",
-            retrieval_available,
-            search_available,
-            len(failed),
-        )
-        return {
-            "repair_state": RepairDecision.MAX_ATTEMPTS.value,
-            "final_status": "max_attempts",
-            "answer": _add_caveats(state.get("answer", ""), failed),
-        }
-
-    if state.get("regeneration_count", 0) >= 1 and (
-        state.get("search_count", 0) >= 1 or state.get("retrieval_count", 0) >= 1
-    ):
-        if state.get("final_status") == "repairing":
-            return {
-                "repair_state": RepairDecision.MAX_ATTEMPTS.value,
-                "final_status": "max_attempts",
-                "answer": _add_caveats(state.get("answer", ""), failed),
-            }
-
-    return {
-        "repair_state": RepairDecision.REPAIR.value,
-        "plan": PlannerOutput(
-            classification=state.get("classification") or QueryClassification(),
-            steps=actionable,
-        ),
-        "final_status": "repairing",
-    }
-
-
-def _repair_claims_surgical(state: dict, failed: list[Claim]) -> dict:
-    """One-pass surgical sentence patch; optional single coverage-gap search."""
-    repair_pass = int(state.get("repair_pass_count") or 0)
-    max_passes = int(getattr(settings, "MAX_REPAIR_PASSES", 1) or 1)
-    # #region agent log
-    agent_debug_log(
-        "E",
-        "nodes.py:_repair_claims_surgical",
-        "surgical_repair_entry",
-        {
-            "failed_count": len(failed),
-            "repair_pass": repair_pass,
-            "coverage_gaps": list(state.get("coverage_gaps") or [])[:3],
-            "repair_mode": state.get("repair_mode"),
-            "final_status": state.get("final_status"),
-        },
-    )
-    # #endregion
-
-    # After gap search: patch with refreshed evidence and end
-    if state.get("repair_mode") == "surgical" and state.get("final_status") == "repairing":
-        return _do_surgical_patch(state, failed, repair_pass)
-
-    if repair_pass >= max_passes:
-        return {
-            "repair_state": RepairDecision.MAX_ATTEMPTS.value,
-            "final_status": "max_attempts",
-            "answer": _add_caveats(state.get("answer", ""), failed),
-            "repair_mode": "surgical",
-        }
-
-    gaps = list(state.get("coverage_gaps") or [])
-    search_available = state.get("search_count", 0) < state.get("max_searches", settings.MAX_SEARCHES)
-    prior_norms = {normalize_query(q) for q in (state.get("searxng_queries") or [])}
-
-    if gaps and search_available:
-        # One targeted gap query only
-        gap_q = gaps[0]
-        # Prefer a short search query derived from the gap + original query
-        query = state.get("query", "")
-        targeted = gap_q if len(gap_q) < 160 else f"{query} {gap_q[:80]}"
-        if normalize_query(targeted) in prior_norms:
-            # Already searched this — patch with existing evidence
-            return _do_surgical_patch(state, failed, repair_pass)
-        return {
-            "repair_state": RepairDecision.REPAIR.value,
-            "repair_mode": "surgical",
-            "final_status": "repairing",
-            "plan": PlannerOutput(
-                classification=state.get("classification") or QueryClassification(),
-                steps=[PlanStep(
-                    action="search_web",
-                    queries=[targeted],
-                    expected_claims=[c.text for c in failed[:3]],
-                    rationale=f"Coverage gap fill: {gap_q[:120]}",
-                )],
-            ),
-        }
-
-    return _do_surgical_patch(state, failed, repair_pass)
-
-
-def _do_surgical_patch(state: dict, failed: list[Claim], repair_pass: int) -> dict:
-    """Patch flagged sentences inline and force end via max_attempts."""
-    evidence: list[Evidence] = state.get("evidence", [])
-    cite_map: dict[str, str] = state.get("cite_map") or {}
-    answer = state.get("answer", "")
-
-    llms = resolve_llms(state.get("provider", "auto"), user_credentials=state.get("user_credentials") or {})
-
-    def _rewrite(prompt: str) -> str:
-        text, _ = _invoke_chat(
-            llms.generator,
-            llms.generator_fallbacks,
-            [SystemMessage(content=prompt), HumanMessage(content="Rewrite the target sentence only.")],
-        )
-        return text
-
+    llms = _resolve_llms(state)
+    verdict = Verdict(overall="partial", explanation="")
     try:
-        patched = patch_flagged_sentences(answer, failed, evidence, cite_map, _rewrite)
+        messages = [
+            SystemMessage(content=_VERIFY_PROMPT.format(
+                temporal_context=_temporal_context(state),
+                context=_verify_context(evidence, cite_map),
+                answer=answer,
+            )),
+            HumanMessage(content="Verify the answer now. Respond with the JSON verdict."),
+        ]
+        verdict = _llm_with_fallback(
+            llms.verifier, llms.verifier_fallbacks, messages, Verdict
+        )
+        used = llms.label
     except Exception as exc:
-        logger.warning("Surgical patch failed: %s", exc)
-        patched = answer
+        logger.warning("verify_answer judge failed: %s; relying on mechanical checks only", exc)
+        used = f"{llms.label}+mechanical-only"
 
-    failed_ids = {c.claim_id for c in failed}
-    updated = []
-    for c in state.get("claims", []):
-        if c.claim_id in failed_ids:
-            nc = c.model_copy(deep=True)
-            if nc.status == ClaimStatus.CONTRADICTED:
-                updated.append(nc)
-            elif nc.status != ClaimStatus.VERIFIED:
-                nc.status = ClaimStatus.UNCERTAIN
-                nc.reasoning = (nc.reasoning or "") + " | surgical patch attempted"
-                updated.append(nc)
-            else:
-                updated.append(nc)
-        else:
-            updated.append(c)
+    # Merge: judge verdicts win; mechanical uncited assertions stay unverified.
+    merged: dict[str, Claim] = {}
+    for c in verdict.claims:
+        merged[c.text] = c
+    for c in mechanical.claims:
+        if c.text not in merged:
+            merged[c.text] = c
+    claims = list(merged.values())
 
-    still_hard = [
-        c for c in updated
-        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED)
-    ]
-    uncertain = [c for c in updated if c.status == ClaimStatus.UNCERTAIN]
+    errors = [e.to_dict() for e in mechanical.errors]
+    contradicted = [c for c in claims if c.status == ClaimStatus.CONTRADICTED]
+    unverified = [c for c in claims if c.status == ClaimStatus.UNVERIFIED]
 
-    if still_hard:
-        final_status = "max_attempts"
-        repair_state = RepairDecision.MAX_ATTEMPTS.value
-        patched = _add_caveats(patched, still_hard)
-    elif uncertain:
-        final_status = "partial"
-        repair_state = RepairDecision.SATISFACTORY.value
-        patched = _add_caveats(patched, uncertain)
+    repair_count = state.get("repair_count", 0)
+    fixable = (
+        repair_count < settings.MAX_REPAIR_PASSES
+        and bool(verdict.repair_queries)
+        and not contradicted  # contradictions need re-answer, not more search
+    )
+    if fixable:
+        logger.info(
+            "Node verify_answer: gaps found (%d unverified); scheduling repair search %.0fms",
+            len(unverified), (time.perf_counter() - t0) * 1000,
+        )
+        return {
+            "claims": claims,
+            "verification_errors": errors,
+            "repair_queries": [q for q in verdict.repair_queries if q.strip()][:MAX_SEARCH_QUERIES],
+            "repair_count": repair_count + 1,
+            "graph_steps": state.get("graph_steps", 0) + 1,
+            "provider_used": used,
+        }
+
+    if contradicted and verdict.clarification_question.strip():
+        # Conflicting sources trace back to an ambiguous term — asking the user
+        # which meaning they meant beats presenting a caveat-laden guess.
+        answer = _conflict_clarification(contradicted, verdict.clarification_question.strip())
+        final_status = "needs_clarification"
+    elif contradicted or (verdict.overall == "unsupported"):
+        final_status = "answered_with_caveats"
+        answer = _append_caveats(answer, contradicted + unverified)
+    elif unverified or verdict.overall == "partial" or mechanical.errors:
+        final_status = "answered_with_caveats"
+        answer = _append_caveats(answer, unverified)
     else:
         final_status = "answered"
-        repair_state = RepairDecision.SATISFACTORY.value
 
     logger.info(
-        "Surgical repair pass %d patched %d failed claims status=%s",
-        repair_pass + 1,
-        len(failed),
-        final_status,
+        "Node verify_answer completed in %.0fms overall=%s claims=%d status=%s repair_used=%d",
+        (time.perf_counter() - t0) * 1000, verdict.overall, len(claims), final_status, repair_count,
     )
     return {
-        "answer": patched,
-        "claims": updated,
-        "repair_pass_count": repair_pass + 1,
-        "repair_state": repair_state,
+        "answer": answer,
+        "claims": claims,
+        "verification_errors": errors,
         "final_status": final_status,
-        "repair_mode": "surgical",
-        "coverage_gaps": [],
+        # Same as above: without this explicit clear, the repair_queries left
+        # in state by a previous pass would re-trigger the repair loop forever.
+        "repair_queries": [],
+        "provider_used": used,
+        "graph_steps": state.get("graph_steps", 0) + 1,
     }
 
 
-def _add_caveats(answer: str, failed: list[Claim]) -> str:
+def _append_caveats(answer: str, failed: list[Claim]) -> str:
+    """Honest caveats section listing what could not be verified."""
+    failed = [c for c in failed if c.text]
     if not failed:
         return answer
-    caveat = "\n\nNote: The following claims could not be fully verified: " + "; ".join(
-        f'"{c.text}"' for c in failed
-    )
-    if "could not be fully verified" in (answer or ""):
-        return answer
-    return (answer or "") + caveat
+    lines = ["", "Caveats:", "The following points could not be fully verified against the retrieved evidence:"]
+    seen: set[str] = set()
+    for c in failed:
+        t = c.text.strip()[:300]
+        if t in seen:
+            continue
+        seen.add(t)
+        lines.append(f"- {t}")
+    return answer.rstrip() + "\n\n" + "\n".join(lines)
 
 
-# ── Legacy compatibility wrappers (deprecated) ───────────────────────────────
 
-
-def Planner(state: dict) -> dict:
-    return build_plan(state)
-
-
-def Hallucination_Check(state: dict) -> dict:
-    return verify_answer_claims(state)
-
-
-def search_tool(state: dict) -> dict:
-    return search_web(state)
-
-
-async def Initial_Chunks(state: dict) -> dict:
-    return await retrieve_documents(state)
-
-
-def should_retrieve_documents(state: dict) -> str:
-    classification = state.get("classification")
-    if classification and classification.needs_documents:
-        return "retrieve_documents"
-    return "assemble"
-
-
-def should_search_web(state: dict) -> str:
-    classification = state.get("classification")
-    decision = "search_web" if (classification and classification.needs_web) else "assemble"
-    # #region agent log
-    agent_debug_log(
-        "C",
-        "nodes.py:should_search_web",
-        "search_routing",
-        {
-            "decision": decision,
-            "needs_web": bool(classification.needs_web) if classification else None,
-            "search_count": state.get("search_count", 0),
-        },
-    )
-    # #endregion
-    return decision
-
-
-def should_post_assemble(state: dict) -> str:
-    """After assemble: surgical repair loop skips generate; first pass continues."""
-    if (
-        settings.USE_VERIFY_CASCADE
-        and state.get("repair_mode") == "surgical"
-        and state.get("final_status") == "repairing"
-        and int(state.get("repair_pass_count") or 0) == 0
-    ):
-        return "repair_claims"
-    return "extract_verify_claims"
-
-
-def hallucination_router(state: dict) -> str:
-    claims = state.get("claims", [])
-    failed = [
-        c for c in claims
-        if c.status in (ClaimStatus.UNVERIFIED, ClaimStatus.CONTRADICTED, ClaimStatus.UNCERTAIN)
+def _conflict_clarification(contradicted: list[Claim], question: str) -> str:
+    """Present conflicting findings and ask which interpretation was meant."""
+    lines = [
+        "I found conflicting information and need one detail to give you an accurate answer:",
+        "",
+        question,
+        "",
+        "The conflicting findings were:",
     ]
-    if not failed:
-        decision = "satisfactory"
-    elif settings.USE_VERIFY_CASCADE:
-        if int(state.get("repair_pass_count") or 0) >= int(settings.MAX_REPAIR_PASSES or 1):
-            decision = "max_attempts"
-        else:
-            decision = "repair"
-    elif state.get("regeneration_count", 0) >= state.get("max_regenerations", settings.MAX_REGENERATIONS):
-        decision = "max_attempts"
-    else:
-        decision = "repair"
-    # #region agent log
-    agent_debug_log(
-        "E",
-        "nodes.py:hallucination_router",
-        "verify_route",
-        {
-            "decision": decision,
-            "failed_count": len(failed),
-            "failed_statuses": [getattr(c.status, "value", c.status) for c in failed[:8]],
-            "failed_previews": [c.text[:80] for c in failed[:4]],
-            "repair_pass_count": state.get("repair_pass_count", 0),
-            "citation_error_count": len(state.get("verification_errors") or []),
-        },
-    )
-    # #endregion
-    return decision
+    seen: set[str] = set()
+    for c in contradicted:
+        t = c.text.strip()[:300]
+        if t and t not in seen:
+            seen.add(t)
+            lines.append(f"- {t}")
+    return "\n".join(lines)
 
-
-def planner_router(state: dict) -> str:
-    plan = state.get("plan")
-    if plan:
-        actions = {s.action for s in plan.steps}
-        if "retrieve_documents" in actions:
-            return "retrieve_documents"
-        if "search_web" in actions:
-            return "search_web"
-    return "generate"
-
-
-def Hallucination_Check_router(state: dict) -> str:
-    return hallucination_router(state)
+def route_after_verify(state: dict) -> str:
+    """Loop back to gathering when the judge scheduled a repair search."""
+    if state.get("repair_queries"):
+        return "gather_evidence"
+    return END

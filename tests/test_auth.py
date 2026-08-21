@@ -30,9 +30,8 @@ class TestRegister:
         assert resp.status_code == 201
         data = resp.json()
         assert data["email"] == email
-        assert "user_id" in data
-        assert data["is_active"] is True
-        assert "hashed_password" not in data  # must never leak
+        assert data["email_verified"] is False
+        assert "user_id" not in data  # identity only revealed after verification
 
     async def test_register_duplicate_email(self, client: httpx.AsyncClient):
         """A2: Duplicate email → 400."""
@@ -42,8 +41,35 @@ class TestRegister:
         assert resp1.status_code == 201
 
         resp2 = await client.post("/api/v1/auth/register", json=payload)
-        assert resp2.status_code == 400
-        assert "already exists" in resp2.json()["detail"]
+        # Unverified duplicate: re-registration resets the password and resends the OTP.
+        assert resp2.status_code == 201
+
+        # A verified duplicate is rejected.
+        await client.post("/api/v1/auth/verify-email", json={"email": email, "code": "123456"})
+        resp3 = await client.post("/api/v1/auth/register", json=payload)
+        assert resp3.status_code == 400
+        assert "already exists" in resp3.json()["detail"]
+
+    async def test_register_echoes_otp_when_delivery_fails(self, client: httpx.AsyncClient):
+        """Local dev: when mail cannot be delivered (non-production), the code
+        is echoed as debug_otp so registration is testable without SMTP."""
+        from unittest.mock import patch
+
+        email = f"echo_{uuid.uuid4().hex[:8]}@example.com"
+        with patch("app.auth.otp.send_email", lambda *a, **k: False):
+            resp = await client.post(
+                "/api/v1/auth/register",
+                json={"email": email, "password": "validpassword123"},
+            )
+        assert resp.status_code == 201
+        assert resp.json()["debug_otp"], "undelivered OTP must be echoed in non-production"
+
+        # And the echoed code actually verifies.
+        ver = await client.post(
+            "/api/v1/auth/verify-email",
+            json={"email": email, "code": resp.json()["debug_otp"]},
+        )
+        assert ver.status_code == 200
 
     async def test_register_short_password(self, client: httpx.AsyncClient):
         """A3: Password < 8 chars → 422."""

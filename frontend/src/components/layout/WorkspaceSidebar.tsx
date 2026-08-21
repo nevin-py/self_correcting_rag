@@ -13,7 +13,7 @@ import {
   PanelLeftOpen,
   Database,
 } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
 import { useAuthStore } from "@/stores/authStore";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
@@ -36,9 +36,18 @@ export default function WorkspaceSidebar() {
     fetchChats();
   }, [fetchChats]);
 
-  const handleNewChat = async () => {
-    const chat = await createChat(`Session ${String(chats.length + 1).padStart(3, "0")}`);
-    router.push(`/chat/${chat.chat_id}`);
+    const handleNewChat = async () => {
+    const title = nextSessionTitle(chats);
+    try {
+      const chat = await createChat(title);
+      router.push(`/chat/${chat.chat_id}`);
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : undefined;
+      window.alert(detail || "Could not create a session.");
+    }
   };
 
   const width = sidebarCollapsed ? "var(--sidebar-collapsed)" : "var(--sidebar-width)";

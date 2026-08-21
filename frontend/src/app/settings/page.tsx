@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
+import { useChatStore } from "@/stores/chatStore";
 import { authApi, settingsApi, type ProviderSettings } from "@/lib/api";
 import AppShell from "@/components/layout/AppShell";
 import { Input } from "@/components/ui/Input";
@@ -31,6 +32,9 @@ export default function SettingsPage() {
   const { token, user, loadUser } = useAuthStore();
   const [activeTab, setActiveTab] = useState("profile");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState("");
+  const [purgeErr, setPurgeErr] = useState("");
+  const [purging, setPurging] = useState(false);
   const [provider, setProvider] = useState<string>(() => {
     if (typeof window === "undefined") return "auto";
     return localStorage.getItem("llm_provider") || "auto";
@@ -123,6 +127,25 @@ export default function SettingsPage() {
           ? (err.response as { data?: { detail?: string } })?.data?.detail
           : undefined;
       setProviderErr(detail || "Clear failed");
+    }
+  };
+
+  const purgeAll = async () => {
+    setPurgeMsg("");
+    setPurgeErr("");
+    setPurging(true);
+    try {
+      const deleted = await useChatStore.getState().purgeAllChats();
+      setPurgeMsg(`Deleted ${deleted} session(s) and indexed memory for this account.`);
+      setConfirmClear(false);
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err.response as { data?: { detail?: string } })?.data?.detail
+          : undefined;
+      setPurgeErr(detail || "Purge failed");
+    } finally {
+      setPurging(false);
     }
   };
 
@@ -315,15 +338,17 @@ export default function SettingsPage() {
                 </Button>
               ) : (
                 <div className="mt-4 flex items-center gap-3 border border-error bg-accent-glow p-3">
-                  <span className="text-xs text-error">Irreversible operation.</span>
-                  <Button variant="accent" size="sm" onClick={() => setConfirmClear(false)}>
-                    Confirm
+                  <span className="text-xs text-error">Deletes all chats, messages, and indexed files for this account.</span>
+                  <Button variant="accent" size="sm" onClick={purgeAll} disabled={purging}>
+                    {purging ? "Purging…" : "Confirm"}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => setConfirmClear(false)}>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmClear(false)} disabled={purging}>
                     Cancel
                   </Button>
                 </div>
               )}
+              {purgeErr && <p className="mt-3 font-mono text-xs text-error">{purgeErr}</p>}
+              {purgeMsg && <p className="mt-3 font-mono text-xs text-text-secondary">{purgeMsg}</p>}
             </div>
           )}
 

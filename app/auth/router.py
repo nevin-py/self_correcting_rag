@@ -11,7 +11,7 @@ from sqlalchemy.future import select
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password
 from app.auth.models import User
-from app.auth.otp import create_and_send_otp, verify_otp, resend_allowed
+from app.auth.otp import create_and_send_otp, should_echo_otp, verify_otp, resend_allowed
 from app.auth.tokens import issue_token_pair, rotate_refresh_token, revoke_refresh_token
 from app.auth.schemas import (
     UserCreate,
@@ -92,7 +92,7 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         await db.refresh(target)
 
     try:
-        await create_and_send_otp(
+        code, delivered = await create_and_send_otp(
             db,
             target,
             "verify_email",
@@ -110,10 +110,16 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         )
 
     logger.info("Registration pending verification: user_id=%s", target.user_id)
+    if not delivered and settings.ENVIRONMENT == "production":
+        raise HTTPException(
+            status_code=503,
+            detail="Could not send verification email. Check SMTP settings or try again.",
+        )
     return RegisterPendingResponse(
         detail="Verification code sent. Check your email.",
         email=target.email,
         email_verified=False,
+        debug_otp=code if should_echo_otp(delivered) else None,
     )
 
 
@@ -159,7 +165,7 @@ async def resend_otp(body: ResendOtpRequest, db: AsyncSession = Depends(get_db))
         else "Reset your password"
     )
     try:
-        await create_and_send_otp(
+        code, delivered = await create_and_send_otp(
             db,
             user,
             body.purpose,
@@ -172,7 +178,10 @@ async def resend_otp(body: ResendOtpRequest, db: AsyncSession = Depends(get_db))
         logger.exception("Resend OTP failed for %s", body.email)
         raise HTTPException(status_code=503, detail="Could not send email.")
 
-    return MessageResponse(detail="If that email exists, a code was sent.")
+    return MessageResponse(
+        detail="If that email exists, a code was sent.",
+        debug_otp=code if should_echo_otp(delivered) else None,
+    )
 
 
 @router.post("/login", response_model=Token)

@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
-import { useChatStore } from "@/stores/chatStore";
+import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
 import AppShell from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
 
@@ -22,8 +22,17 @@ export default function ChatPage() {
   }, [token, router]);
 
   const handleNewChat = async () => {
-    const chat = await useChatStore.getState().createChat("Session 001");
-    router.push(`/chat/${chat.chat_id}`);
+    const title = nextSessionTitle(useChatStore.getState().chats);
+    try {
+      const chat = await useChatStore.getState().createChat(title);
+      router.push(`/chat/${chat.chat_id}`);
+    } catch (err) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : undefined;
+      window.alert(detail || "Could not create a session.");
+    }
   };
 
   return (

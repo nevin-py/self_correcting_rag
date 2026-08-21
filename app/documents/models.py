@@ -24,3 +24,8 @@ class IngestionLog(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def ingestion_id(self) -> uuid.UUID:
+        """API-facing alias: schemas expose the PK as ``ingestion_id``."""
+        return self.id

@@ -19,13 +19,23 @@ async def health_check():
 
 @router.get("/health/ready")
 async def readiness_check():
-    """Readiness probe — confirms DB connectivity."""
+    """Readiness probe — confirms DB connectivity.
+
+    Uses a throwaway engine (NullPool): a pooled asyncpg connection is bound
+    to the event loop that created it, which fails intermittently under test
+    runners or multiple workers.
+    """
+    from app.core.database import make_engine
+
+    engine = make_engine()
     try:
-        async with AsyncLocalSession() as session:
+        async with engine.connect() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ready", "database": "ok"}
     except Exception as e:
         return {"status": "not ready", "database": str(e)}
+    finally:
+        await engine.dispose()
 
 
 @router.get("/metrics")

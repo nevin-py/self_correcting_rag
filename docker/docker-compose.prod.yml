@@ -1,11 +1,20 @@
 # Production stack — do not publish Postgres / SearXNG / Chroma to the host.
 # Usage:
-#   cp .env.example .env   # fill secrets; set ENVIRONMENT=production
+#   cp .env.example .env   # fill secrets
 #   docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
 #
 # Required env (in .env or shell):
-#   SECRET_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DOMAIN (for TLS),
-#   NOMIC_API_KEY, TAVILY_API_KEY, SMTP_* for OTP email
+#   SECRET_KEY, POSTGRES_USER, POSTGRES_PASSWORD, SEARXNG_SECRET
+#   CORS_ORIGINS, DOMAIN (for TLS), SMTP_HOST, SMTP_FROM
+#   NOMIC_API_KEY, TAVILY_API_KEY
+# Gmail OTP: SMTP_HOST=smtp.gmail.com SMTP_PORT=587 SMTP_TLS=true
+#            SMTP_USER=you@gmail.com SMTP_FROM=you@gmail.com
+#            SMTP_PASSWORD=<Google App Password>
+#
+# This file is for a VM / VPS. Cloud Run cannot run this Compose file;
+# see docs/DEPLOY_CLOUD_RUN.md for Cloud Run + Cloud SQL.
+
+name: scrag-prod
 
 services:
   db:
@@ -58,6 +67,12 @@ services:
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+      SMTP_HOST: ${SMTP_HOST:?set SMTP_HOST (e.g. smtp.gmail.com)}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:?set SMTP_FROM}
+      SMTP_TLS: ${SMTP_TLS:-true}
     volumes:
       - chroma_data:/app/data/chroma
     depends_on:

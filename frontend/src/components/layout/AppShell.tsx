@@ -47,6 +47,9 @@ export default function AppShell({ children, header, rightPanel, showRightPanel 
             </>
           )}
         </div>
+        <footer className="border-t border-border px-3 py-1 text-center font-mono text-[9px] text-text-muted">
+          SCRAG · Nevin Sunil Oommen
+        </footer>
       </div>
     </div>
   );

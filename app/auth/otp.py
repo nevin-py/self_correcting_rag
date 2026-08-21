@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import EmailOTP, User
@@ -25,8 +25,12 @@ async def create_and_send_otp(
     *,
     subject: str,
     body_template: str,
-) -> None:
-    """Invalidate prior OTPs for purpose, create a new one, email the code."""
+) -> tuple[str, bool]:
+    """Invalidate prior OTPs, create a new one, attempt email delivery.
+
+    Returns ``(code, delivered)``. Callers may echo the code in API responses
+    when it was not delivered (non-production only — see ``should_echo_otp``).
+    """
     now = datetime.now(UTC).replace(tzinfo=None)
     result = await db.execute(
         select(EmailOTP).where(
@@ -46,11 +50,18 @@ async def create_and_send_otp(
         expires_at=now + timedelta(minutes=settings.OTP_TTL_MINUTES),
         attempts=0,
     )
+
     db.add(otp)
     await db.commit()
 
     body = body_template.format(code=code, minutes=settings.OTP_TTL_MINUTES)
-    send_email(user.email, subject, body)
+    delivered = send_email(user.email, subject, body)
+    return code, delivered
+
+
+def should_echo_otp(delivered: bool) -> bool:
+    """Echo the OTP in API responses only when mail did not go out."""
+    return settings.ENVIRONMENT != "production" and not delivered
 
 
 async def latest_unconsumed_otp(
@@ -99,11 +110,19 @@ async def verify_otp(
 
 
 async def resend_allowed(db: AsyncSession, user: User, purpose: str) -> bool:
-    otp = await latest_unconsumed_otp(db, user.user_id, purpose)
-    if not otp or not otp.created_at:
-        return True
-    created = otp.created_at
-    if created.tzinfo is not None:
-        created = created.replace(tzinfo=None)
-    elapsed = (datetime.now(UTC).replace(tzinfo=None) - created).total_seconds()
-    return elapsed >= settings.OTP_RESEND_COOLDOWN_SECONDS
+    """True when no unconsumed OTP was created within the cooldown window.
+
+    Measured on the DATABASE clock (created_at uses func.now()) — comparing
+    against Python-side UTC breaks on any Postgres whose timezone differs
+    from UTC and would block resends for hours.
+    """
+    result = await db.execute(
+        select(EmailOTP.id).where(
+            EmailOTP.user_id == user.user_id,
+            EmailOTP.purpose == purpose,
+            EmailOTP.consumed_at.is_(None),
+            EmailOTP.created_at
+            >= func.now() - timedelta(seconds=settings.OTP_RESEND_COOLDOWN_SECONDS),
+        ).limit(1)
+    )
+    return result.scalar_one_or_none() is None

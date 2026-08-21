@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy import delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -18,8 +19,8 @@ from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats, Agent_interact
 from app.agent.message_models import ChatMessage
-from app.agent.graph import rag_app
-from app.agent.state import PlannerDecision, RepairDecision, Evidence, Claim, EvidenceState
+from app.agent.graph import rag_app, create_initial_state
+from app.agent.state import Evidence, Claim, EvidenceState
 from app.agent.evidence_state import (
     build_evidence_state,
     merge_evidence_state,
@@ -38,9 +39,10 @@ from app.agent.schemas import (
     InteractionListResponse,
     MessageResponse,
     MessageListResponse,
+    UsageSummary,
 )
 from app.documents.service import estimate_tokens
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
@@ -69,59 +71,25 @@ _query_limiter = Limiter(key_func=_user_key_func)
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_initial_state(query: str, user_id: _uuid.UUID, chat_id: _uuid.UUID, provider: str = "auto", history: list = None, prior_evidence_summary: str = "", prior_evidence_state: EvidenceState | None = None, user_credentials: dict | None = None) -> dict:
-    """Build the initial LangGraph state dict for a new query."""
-    from app.core.config import settings
-
-    effective_query = query
-    if prior_evidence_summary:
-        effective_query = f"{query}\n\n[Context from prior conversation turn:]\n{prior_evidence_summary}"
-
-    return {
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "query": effective_query,
-        "provider": provider,
-        "user_credentials": user_credentials or {},
-        "messages": history or [],
-        "chunks": [],
-        "search": [],
-        "planner_state": PlannerDecision.NOT_ENOUGH,
-        "retrieval_queries": [],
-        "wiki_queries": [],
-        "tavily_queries": [],
-        "searxng_queries": [],
-        "cross_chat_enabled": False,
-        "answer": "",
-        "provider_used": "",
-        "need_repair": RepairDecision.REPAIR,
-        "hallucination_reason": [],
-        "max_tries_planner": 0,
-        "max_tries_hallucinator": 0,
-        "steps_taken": 0,
-        "searches_done": 0,
-        "retrievals_done": 0,
-        "regenerations_done": 0,
-        # Business-ready structured state
-        "classification": None,
-        "plan": None,
-        "evidence": [],
-        "claims": [],
-        "conflicts": [],
-        "citation_usage": [],
-        "assembled_context": "",
-        "evidence_state": None,
-        "prior_evidence_state": prior_evidence_state,
-        "final_status": "",
-        "graph_steps": 0,
-        "search_count": 0,
-        "retrieval_count": 0,
-        "regeneration_count": 0,
-        "max_graph_steps": settings.MAX_GRAPH_STEPS,
-        "max_searches": settings.MAX_SEARCHES,
-        "max_retrievals": settings.MAX_RETRIEVALS,
-        "max_regenerations": settings.MAX_REGENERATIONS,
-    }
+def _build_initial_state(
+    query: str,
+    user_id: _uuid.UUID,
+    chat_id: _uuid.UUID,
+    provider: str = "auto",
+    history: list | None = None,
+    prior_evidence_state: EvidenceState | None = None,
+    user_credentials: dict | None = None,
+) -> dict:
+    """Build the initial LangGraph state via the graph's canonical factory."""
+    return create_initial_state(
+        query=query,
+        user_id=user_id,
+        chat_id=chat_id,
+        provider=provider,
+        messages=history or [],
+        user_credentials=user_credentials or {},
+        prior_evidence_state=prior_evidence_state,
+    )
 
 
 
@@ -135,35 +103,51 @@ async def create_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new chat session (rate-limited)."""
-    from datetime import UTC, datetime, timedelta
-    from sqlalchemy import func
-    from app.core.usage import record_usage, count_events_since
+    """Create a new chat session (rate-limited).
+
+    Reuses an existing empty chat only when the requested title matches —
+    a POST with a different title must never be silently redirected to
+    an unrelated session.
+    """
+    from datetime import timedelta
+    from sqlalchemy import exists, func
+    from app.core.usage import record_usage, count_events_in_last
+
+    empty = await db.execute(
+        select(Chats)
+        .where(Chats.user_id == current_user.user_id)
+        .where(Chats.title == body.title)
+        .where(~exists(select(ChatMessage.id).where(ChatMessage.chat_id == Chats.chat_id)))
+        .order_by(Chats.created_at.desc())
+        .limit(1)
+    )
+    existing_empty = empty.scalar_one_or_none()
+    if existing_empty:
+        return existing_empty
 
     total = await db.execute(
         select(func.count()).select_from(Chats).where(Chats.user_id == current_user.user_id)
     )
-    if int(total.scalar_one() or 0) >= settings.MAX_CHATS_PER_USER:
+    total_n = int(total.scalar_one() or 0)
+    creates = await count_events_in_last(db, current_user.user_id, "chat_create", timedelta(hours=1))
+    recent_chats = await db.execute(
+        select(func.count()).select_from(Chats).where(
+            Chats.user_id == current_user.user_id,
+            Chats.created_at >= func.now() - timedelta(hours=1),
+        )
+    )
+    recent_n = int(recent_chats.scalar_one() or 0)
+    if total_n >= settings.MAX_CHATS_PER_USER:
         raise HTTPException(
             status_code=429,
             detail=f"Chat limit reached ({settings.MAX_CHATS_PER_USER} total).",
         )
-
-    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
-    # Prefer UsageEvent; also count recent Chats.created_at as a safety net
-    creates = await count_events_since(db, current_user.user_id, "chat_create", since)
     if creates >= settings.MAX_CHAT_CREATES_PER_HOUR:
         raise HTTPException(
             status_code=429,
             detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
         )
-    recent_chats = await db.execute(
-        select(func.count()).select_from(Chats).where(
-            Chats.user_id == current_user.user_id,
-            Chats.created_at >= since,
-        )
-    )
-    if int(recent_chats.scalar_one() or 0) >= settings.MAX_CHAT_CREATES_PER_HOUR:
+    if recent_n >= settings.MAX_CHAT_CREATES_PER_HOUR:
         raise HTTPException(
             status_code=429,
             detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
@@ -216,6 +200,52 @@ async def get_chat(
     return chat
 
 
+def _delete_chroma_for_chat(user_id: _uuid.UUID, chat_id: _uuid.UUID | None = None) -> None:
+    """Best-effort vector cleanup: one chat or the whole user collection."""
+    try:
+        from app.documents.clients import get_chroma_client
+
+        client = get_chroma_client()
+        if client is None:
+            return
+        name = f"user_{user_id.hex[:16]}"
+        collection = client.get_or_create_collection(name=name)
+        if chat_id is None:
+            client.delete_collection(name)
+        else:
+            collection.delete(where={"chat_id": str(chat_id)})
+    except Exception:
+        logger.warning("Chroma cleanup failed for user=%s chat=%s", user_id, chat_id, exc_info=True)
+
+
+async def _delete_chat_children(db: AsyncSession, chat_id: _uuid.UUID) -> None:
+    """Remove FK children before deleting chats (DB FKs are ON DELETE RESTRICT)."""
+    from app.documents.models import IngestionLog
+
+    await db.execute(sql_delete(ChatMessage).where(ChatMessage.chat_id == chat_id))
+    await db.execute(sql_delete(Agent_interact).where(Agent_interact.chat_id == chat_id))
+    await db.execute(sql_delete(IngestionLog).where(IngestionLog.chat_id == chat_id))
+
+
+@router.post("/chats/purge")
+async def purge_all_chats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete every chat (messages, interactions, ingest logs) and the user's Chroma collection."""
+    result = await db.execute(select(Chats).where(Chats.user_id == current_user.user_id))
+    chats = list(result.scalars().all())
+    for chat in chats:
+        await _delete_chat_children(db, chat.chat_id)
+        await db.delete(chat)
+    from app.auth.models import UsageEvent
+    await db.execute(sql_delete(UsageEvent).where(UsageEvent.user_id == current_user.user_id))
+    await db.commit()
+    _delete_chroma_for_chat(current_user.user_id, None)
+    logger.info("Purged %d chats for user_id=%s", len(chats), current_user.user_id)
+    return {"deleted": len(chats)}
+
+
 @router.delete("/chats/{chat_id}", status_code=204)
 async def delete_chat(
     chat_id: _uuid.UUID,
@@ -232,8 +262,10 @@ async def delete_chat(
     chat = result.scalar_one_or_none()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
+    await _delete_chat_children(db, chat_id)
     await db.delete(chat)
     await db.commit()
+    _delete_chroma_for_chat(current_user.user_id, chat_id)
     logger.info("Chat deleted: chat_id=%s user_id=%s", chat_id, current_user.user_id)
 
 
@@ -276,6 +308,8 @@ async def _load_history(session: AsyncSession, chat_id: _uuid.UUID) -> list:
             messages.append(HumanMessage(content=row.content))
         elif row.role == "assistant":
             messages.append(AIMessage(content=row.content))
+        elif row.role == "system":
+            messages.append(SystemMessage(content=row.content))
     return messages
 
 
@@ -306,8 +340,7 @@ def _finalize_evidence_state(
     """Build the turn's evidence state and merge it with the prior state."""
     evidence: list[Evidence] = final_state.get("evidence", [])
     claims: list[Claim] = final_state.get("claims", [])
-    conflicts: list[dict] = final_state.get("conflicts", [])
-    current = build_evidence_state(evidence, claims, conflicts, turn=turn)
+    current = build_evidence_state(evidence, claims, turn=turn)
     return merge_evidence_state(prior_state, current)
 
 
@@ -353,28 +386,32 @@ async def _load_prior_evidence_summary(session: AsyncSession, chat_id: _uuid.UUI
 
 
 async def _store_messages(
-    session: AsyncSession, chat_id: _uuid.UUID, user_msg: str, ai_msg: str
+    session: AsyncSession,
+    chat_id: _uuid.UUID,
+    user_msg: str,
+    ai_msg: str,
+    *,
+    provenance: dict | None = None,
+    token_estimate: int | None = None,
+    estimated_cost_usd: float | None = None,
+    is_ingest_notice: bool = False,
 ) -> None:
-    """Store a user+assistant message pair.
-    
-    Uses advisory lock to prevent race conditions on concurrent inserts.
+    """Store a user+assistant message pair (assistant row keeps analysis provenance).
+
+    A5: When is_ingest_notice=True, stores a typed metadata flag on the system
+    message so downstream detection uses the flag, not text sniffing.
     """
     from sqlalchemy import text
     import hashlib
-    
-    # Use advisory lock on chat_id to serialize message inserts per chat
-    # Convert UUID to a hash-based integer that fits in int64 range (max 9223372036854775807)
-    # This prevents race conditions when multiple requests try to insert simultaneously
-    # The lock is automatically released when the transaction ends
-    # Use MD5 hash and take modulo to ensure it fits in int64
+    import json as _json
+
     chat_id_hash = hashlib.md5(chat_id.bytes).digest()[:8]
-    chat_id_int = int.from_bytes(chat_id_hash, byteorder='big') % (2**63)
+    chat_id_int = int.from_bytes(chat_id_hash, byteorder="big") % (2**63)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:chat_id)"),
-        {"chat_id": chat_id_int}
+        {"chat_id": chat_id_int},
     )
-    
-    # Get next sequence number (now safe due to advisory lock)
+
     result = await session.execute(
         select(ChatMessage.sequence)
         .where(ChatMessage.chat_id == chat_id)
@@ -384,8 +421,24 @@ async def _store_messages(
     last_seq = result.scalar()
     next_seq = (last_seq or 0) + 1
 
+    prov_text = _json.dumps(provenance, default=str) if provenance else None
     session.add(ChatMessage(chat_id=chat_id, role="user", content=user_msg, sequence=next_seq))
-    session.add(ChatMessage(chat_id=chat_id, role="assistant", content=ai_msg, sequence=next_seq + 1))
+    # A5: Store typed ingest signal in provenance_json for system messages
+    assistant_prov = dict(provenance) if provenance else {}
+    if is_ingest_notice:
+        assistant_prov["_ingest_chat_id"] = str(chat_id)
+    prov_text_final = _json.dumps(assistant_prov, default=str) if assistant_prov else prov_text
+    session.add(
+        ChatMessage(
+            chat_id=chat_id,
+            role="assistant",
+            content=ai_msg,
+            sequence=next_seq + 1,
+            provenance_json=prov_text_final,
+            token_estimate=token_estimate,
+            estimated_cost_usd=estimated_cost_usd,
+        )
+    )
     await session.commit()
 
 
@@ -484,18 +537,6 @@ async def query_agent(request: Request,
     merged_state = _finalize_evidence_state(final_state, prior_evidence_state, turn)
     trajectory = _build_trajectory(final_state) + "\n" + serialize_for_storage(merged_state)
 
-    # ── Step 3: Log interaction + store messages (fresh session) ─────────
-    async with session_factory() as log_session:
-        await _log_interaction(
-            db=log_session,
-            chat_id=chat_id,
-            user_input=body.message,
-            agent_output=answer,
-            routing_path=trajectory,
-            latency=elapsed,
-        )
-        await _store_messages(log_session, chat_id, body.message, answer)
-
     evidence = final_state.get("evidence", [])
     claims = final_state.get("claims", [])
     verification_errors = _normalize_verification_errors(final_state.get("verification_errors", []))
@@ -507,15 +548,13 @@ async def query_agent(request: Request,
             source_name=ev.source_name,
             source_url=ev.source_url,
             source_date=ev.source_date,
-            authority_score=ev.authority_score,
-            recency_score=ev.recency_score,
-            metric_type=ev.metric_type.value if hasattr(ev, "metric_type") else "unknown",
-            metric_value=ev.metric_value if hasattr(ev, "metric_value") else "",
-            geographic_scope=ev.geographic_scope.value if hasattr(ev, "geographic_scope") else "unknown",
-            geography=ev.geography if hasattr(ev, "geography") else "",
-            year_period=ev.year_period if hasattr(ev, "year_period") else "",
-            temporal_qualifier=ev.temporal_qualifier.value if hasattr(ev, "temporal_qualifier") else "unknown",
-            source_quality=ev.source_quality.value if hasattr(ev, "source_quality") else "unknown",
+            metric_type="unknown",
+            metric_value="",
+            geographic_scope="unknown",
+            geography="",
+            year_period="",
+            temporal_qualifier="unknown",
+            source_quality="unknown",
         )
         for ev in evidence[:10]
     ]
@@ -524,23 +563,55 @@ async def query_agent(request: Request,
             claim_id=c.claim_id,
             text=c.text,
             status=c.status.value,
-            claim_type=c.claim_type.value if hasattr(c, "claim_type") else "fact",
+            claim_type="fact",
             evidence_ids=c.evidence_ids,
-            contradicting_evidence_ids=c.contradicting_evidence_ids,
+            contradicting_evidence_ids=[],
             reasoning=c.reasoning,
         )
         for c in claims
     ]
+    provider_used = final_state.get("provider_used", "unknown")
+    provenance = {
+        "citations": [c.model_dump(mode="json") for c in citations],
+        "claims": [c.model_dump(mode="json") for c in claim_responses],
+        "conflicts": [],
+        "final_status": final_state.get("final_status", "answered"),
+        "latency_ms": latency_ms,
+        "provider_used": provider_used,
+        "verification_errors": verification_errors,
+    }
+
+    # ── Step 3: Log interaction + store messages (fresh session) ─────────
+    async with session_factory() as log_session:
+        meta = await _log_interaction(
+            db=log_session,
+            chat_id=chat_id,
+            user_input=body.message,
+            agent_output=answer,
+            routing_path=trajectory,
+            latency=elapsed,
+            provenance=provenance,
+            provider_used=provider_used,
+        )
+        await _store_messages(
+            log_session,
+            chat_id,
+            body.message,
+            answer,
+            provenance=provenance,
+            token_estimate=meta.get("token_metric"),
+            estimated_cost_usd=meta.get("estimated_cost_usd"),
+        )
 
     return QueryResponse(
         answer=answer,
         chat_id=chat_id,
         latency_ms=latency_ms,
-        provider_used=final_state.get("provider_used", "unknown"),
+        provider_used=provider_used,
         final_status=final_state.get("final_status", "answered"),
         claims=claim_responses,
         citations=citations,
-        conflicts=final_state.get("conflicts", []),
+        conflicts=[],
         verification_errors=verification_errors,
     )
 
@@ -551,15 +622,11 @@ async def query_agent(request: Request,
 
 NODE_LABELS = {
     "classify_and_plan": "Understanding & planning",
-    "classify_query": "Understanding your question",
-    "build_plan": "Planning search strategy",
-    "retrieve_documents": "Retrieving documents",
-    "search_web": "Searching the web",
-    "assemble_evidence": "Assembling evidence",
-    "extract_verify_claims": "Extracting claims",
+    "gather_evidence": "Gathering evidence",
     "generate_answer": "Generating answer",
-    "verify_answer_claims": "Verifying facts",
-    "repair_claims": "Repairing answer",
+    "verify_answer": "Verifying facts",
+    "conversational_response": "Responding",
+    "ask_clarification": "Asking for clarification",
 }
 
 
@@ -618,32 +685,21 @@ async def _stream_query(
                     # Build rich status details based on node
                     detail = ""
                     if node_name == "classify_and_plan" and isinstance(node_output, dict):
-                        plan = node_output.get("plan")
-                        if plan:
-                            actions = ", ".join({s.action for s in plan.steps})
-                            detail = f"Planned actions: {actions}"
-                    elif node_name == "build_plan" and isinstance(node_output, dict):
-                        plan = node_output.get("plan")
-                        if plan:
-                            actions = ", ".join({s.action for s in plan.steps})
-                            detail = f"Planned actions: {actions}"
-                    elif node_name == "search_web" and isinstance(node_output, dict):
-                        search_count = len(node_output.get("search", []))
-                        detail = f"Found {search_count} web results"
-                    elif node_name == "retrieve_documents" and isinstance(node_output, dict):
-                        chunk_count = len(node_output.get("chunks", []))
-                        detail = f"Found {chunk_count} document matches"
-                    elif node_name == "assemble_evidence" and isinstance(node_output, dict):
-                        conflict_count = len(node_output.get("conflicts", []))
-                        detail = f"Detected {conflict_count} evidence conflicts"
-                    elif node_name == "verify_answer_claims" and isinstance(node_output, dict):
-                        claims = node_output.get("claims", [])
+                        u = node_output.get("understanding")
+                        if u is not None:
+                            mode = getattr(u, "mode", None)
+                            detail = f"Mode: {getattr(mode, 'value', mode)}"
+                    elif node_name == "gather_evidence" and isinstance(node_output, dict):
+                        ev_count = len(node_output.get("evidence", []) or [])
+                        detail = f"Found {ev_count} evidence items"
+                    elif node_name == "verify_answer" and isinstance(node_output, dict):
+                        claims = node_output.get("claims", []) or []
                         failed = [
                             c for c in claims
-                            if getattr(getattr(c, "status", None), "value", c.status if isinstance(c.status, str) else "")
+                            if (c.status.value if hasattr(c.status, "value") else str(c.status))
                             in ("unverified", "contradicted", "uncertain")
                         ]
-                        detail = f"Claims: {len(claims)} total, {len(failed)} need repair"
+                        detail = f"Claims: {len(claims)} total, {len(failed)} need attention"
 
                     # Send status update
                     label = NODE_LABELS.get(node_name, node_name)
@@ -653,6 +709,10 @@ async def _stream_query(
                     if node_name == "generate_answer" and isinstance(node_output, dict):
                         new_answer = node_output.get("answer", "")
                         if new_answer and new_answer != answer:
+                            if answer:
+                                # Repair pass produced a replacement — tell the
+                                # client to discard the previously streamed text.
+                                yield "event: answer_reset\ndata: {}\n\n"
                             answer = new_answer
                             chunk_size = 100
                             for i in range(0, len(answer), chunk_size):
@@ -663,12 +723,12 @@ async def _stream_query(
                         accumulated_state.update(node_output)
 
                     # Push evidence to the UI as soon as it exists (don't wait for verify/done).
-                    if node_name in ("assemble_evidence", "generate_answer") and isinstance(node_output, dict):
+                    if node_name in ("gather_evidence", "generate_answer") and isinstance(node_output, dict):
                         ev = accumulated_state.get("evidence") or []
                         if ev:
                             yield (
                                 "event: provenance\ndata: "
-                                + json.dumps({"citations": _citations_payload(ev), "conflicts": accumulated_state.get("conflicts", [])})
+                                + json.dumps({"citations": _citations_payload(ev), "conflicts": []})
                                 + "\n\n"
                             )
 
@@ -697,21 +757,45 @@ async def _stream_query(
         # Build structured provenance payload from accumulated node outputs.
         evidence = final_state.get("evidence", []) if isinstance(final_state, dict) else []
         claims = final_state.get("claims", []) if isinstance(final_state, dict) else []
-        conflicts = final_state.get("conflicts", []) if isinstance(final_state, dict) else []
+        conflicts: list = []
         citations = _citations_payload(evidence)
         claim_payload = _claims_payload(claims)
 
-        # Persist interaction
+        provider_used = final_state.get("provider_used")
+        latency_ms = round(elapsed * 1000, 2)
+        provenance = {
+            "citations": citations,
+            "claims": claim_payload,
+            "conflicts": conflicts,
+            "final_status": final_state.get("final_status"),
+            "latency_ms": latency_ms,
+            "provider_used": provider_used,
+            "verification_errors": verification_errors,
+            "trajectory": trajectory,
+        }
+
+        meta: dict = {}
+        # Persist interaction + assistant provenance for Analysis panel restore
         async with session_factory() as log_session:
-            await _log_interaction(
+            meta = await _log_interaction(
                 db=log_session,
                 chat_id=chat_id,
                 user_input=message,
                 agent_output=answer,
                 routing_path=trajectory,
                 latency=elapsed,
+                provenance=provenance,
+                provider_used=provider_used,
             )
-            await _store_messages(log_session, chat_id, message, answer)
+            await _store_messages(
+                log_session,
+                chat_id,
+                message,
+                answer,
+                provenance=provenance,
+                token_estimate=meta.get("token_metric"),
+                estimated_cost_usd=meta.get("estimated_cost_usd"),
+            )
 
         yield (
             "event: done\ndata: "
@@ -719,14 +803,16 @@ async def _stream_query(
                 {
                     "answer": answer,
                     "chat_id": str(chat_id),
-                    "latency_ms": round(elapsed * 1000, 2),
-                    "provider_used": final_state.get("provider_used"),
+                    "latency_ms": latency_ms,
+                    "provider_used": provider_used,
                     "final_status": final_state.get("final_status"),
                     "claims": claim_payload,
                     "citations": citations,
                     "conflicts": conflicts,
                     "verification_errors": verification_errors,
                     "trajectory": trajectory,
+                    "token_estimate": meta.get("token_metric"),
+                    "estimated_cost_usd": meta.get("estimated_cost_usd"),
                 }
             )
             + "\n\n"
@@ -745,25 +831,45 @@ async def _stream_query(
             evidence = accumulated_state.get("evidence", []) if isinstance(accumulated_state, dict) else []
             claims = accumulated_state.get("claims", []) if isinstance(accumulated_state, dict) else []
             if not claims:
-                from app.agent.nodes import _claims_from_answer_citations
+                from app.agent.citation_validator import validate_answer_citations
                 try:
-                    claims = _claims_from_answer_citations(answer, evidence)
+                    claims = validate_answer_citations(
+                        answer, evidence, cite_map=accumulated_state.get("cite_map") or {}
+                    ).claims
                 except Exception:
                     claims = []
             citations = _citations_payload(evidence)
             claim_payload = _claims_payload(claims)
             suffix = f" ({status})"
             try:
+                provenance = {
+                    "citations": citations,
+                    "claims": claim_payload,
+                    "conflicts": [],
+                    "final_status": status,
+                    "latency_ms": round(elapsed * 1000, 2),
+                    "provider_used": accumulated_state.get("provider_used") if isinstance(accumulated_state, dict) else None,
+                }
                 async with session_factory() as log_session:
-                    await _log_interaction(
+                    meta = await _log_interaction(
                         db=log_session,
                         chat_id=chat_id,
                         user_input=message,
                         agent_output=answer,
                         routing_path=" → ".join(trajectory_nodes) + suffix,
                         latency=elapsed,
+                        provenance=provenance,
+                        provider_used=provenance.get("provider_used"),
                     )
-                    await _store_messages(log_session, chat_id, message, answer)
+                    await _store_messages(
+                        log_session,
+                        chat_id,
+                        message,
+                        answer,
+                        provenance=provenance,
+                        token_estimate=meta.get("token_metric"),
+                        estimated_cost_usd=meta.get("estimated_cost_usd"),
+                    )
             except Exception:
                 logger.exception("Failed to persist partial answer after %s for chat %s", status, chat_id)
             yield (
@@ -777,7 +883,7 @@ async def _stream_query(
                         "final_status": status,
                         "claims": claim_payload,
                         "citations": citations,
-                        "conflicts": accumulated_state.get("conflicts", []),
+                        "conflicts": [],
                         "verification_errors": [],
                         "trajectory": " → ".join(trajectory_nodes) + suffix,
                     }
@@ -836,21 +942,38 @@ async def _log_interaction(
     agent_output: str,
     routing_path: str,
     latency: float,
-) -> None:
-    """Write one interaction row using the caller's session. Failure is logged, not raised."""
+    *,
+    provenance: dict | None = None,
+    provider_used: str | None = None,
+) -> dict:
+    """Write one interaction row. Returns token/cost metrics for message storage."""
+    import json as _json
+    from app.core.costing import estimate_cost_usd
+
+    tokens = estimate_tokens(user_input) + estimate_tokens(agent_output)
+    cost = estimate_cost_usd(tokens, provider_used)
+    meta = {
+        "token_metric": tokens,
+        "estimated_cost_usd": cost,
+        "provider_used": provider_used,
+    }
     try:
         interaction = Agent_interact(
             chat_id=chat_id,
             user_input=user_input,
             agent_output=agent_output,
             routing_path=routing_path,
-            token_metric=estimate_tokens(user_input) + estimate_tokens(agent_output),
+            token_metric=tokens,
             latency=round(latency, 4),
+            provenance_json=_json.dumps(provenance, default=str) if provenance else None,
+            estimated_cost_usd=cost,
+            provider_used=provider_used,
         )
         db.add(interaction)
         await db.commit()
     except Exception:
         logger.exception("Failed to log interaction for chat %s", chat_id)
+    return meta
 
 
 def _citations_payload(evidence: list, limit: int = 15) -> list[dict]:
@@ -865,15 +988,13 @@ def _citations_payload(evidence: list, limit: int = 15) -> list[dict]:
                 "source_name": ev.source_name,
                 "source_url": ev.source_url,
                 "source_date": ev.source_date.isoformat() if ev.source_date else None,
-                "authority_score": ev.authority_score,
-                "recency_score": ev.recency_score,
-                "metric_type": ev.metric_type.value if hasattr(ev, "metric_type") and hasattr(ev.metric_type, "value") else "unknown",
-                "metric_value": getattr(ev, "metric_value", "") or "",
-                "geographic_scope": ev.geographic_scope.value if hasattr(ev, "geographic_scope") and hasattr(ev.geographic_scope, "value") else "unknown",
-                "geography": getattr(ev, "geography", "") or "",
-                "year_period": getattr(ev, "year_period", "") or "",
-                "temporal_qualifier": ev.temporal_qualifier.value if hasattr(ev, "temporal_qualifier") and hasattr(ev.temporal_qualifier, "value") else "unknown",
-                "source_quality": ev.source_quality.value if hasattr(ev, "source_quality") and hasattr(ev.source_quality, "value") else "unknown",
+                "metric_type": "unknown",
+                "metric_value": "",
+                "geographic_scope": "unknown",
+                "geography": "",
+                "year_period": "",
+                "temporal_qualifier": "unknown",
+                "source_quality": "unknown",
             }
         )
     return out
@@ -887,9 +1008,9 @@ def _claims_payload(claims: list) -> list[dict]:
                 "claim_id": c.claim_id,
                 "text": c.text,
                 "status": c.status.value if hasattr(c.status, "value") else str(c.status),
-                "claim_type": c.claim_type.value if hasattr(c, "claim_type") and hasattr(c.claim_type, "value") else "fact",
+                "claim_type": "fact",
                 "evidence_ids": c.evidence_ids,
-                "contradicting_evidence_ids": c.contradicting_evidence_ids,
+                "contradicting_evidence_ids": [],
                 "reasoning": c.reasoning,
             }
         )
@@ -908,15 +1029,10 @@ def _build_trajectory(state: dict) -> str:
     if state.get("search_count", 0) > 0:
         steps.append("search_web")
 
-    steps.extend(["assemble_evidence", "extract_verify_claims", "generate_answer", "verify_answer_claims"])
+    steps.extend(["generate_answer", "verify_answer"])
 
-    repair_state = state.get("repair_state")
-    if repair_state == "repair":
-        steps.append("repair_claims→repair")
-    elif repair_state == "max_attempts":
-        steps.append("repair_claims→max_attempts")
-    else:
-        steps.append("repair_claims→satisfactory")
+    if state.get("repair_count", 0) > 0:
+        steps.append(f"repair×{state['repair_count']}")
 
     trajectory = " → ".join(steps)
     return trajectory
@@ -981,6 +1097,64 @@ async def get_chat_messages(
     )
     messages = result.scalars().all()
     return MessageListResponse(messages=messages)
+
+
+@router.get("/chats/{chat_id}/usage", response_model=UsageSummary)
+async def get_chat_usage(
+    chat_id: _uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Estimated token + USD cost for one chat (from logged interactions)."""
+    from sqlalchemy import func
+
+    await _verify_chat_ownership(db, chat_id, current_user.user_id)
+    result = await db.execute(
+        select(
+            func.coalesce(func.sum(Agent_interact.token_metric), 0),
+            func.coalesce(func.sum(Agent_interact.estimated_cost_usd), 0.0),
+            func.count(),
+        ).where(Agent_interact.chat_id == chat_id)
+    )
+    tokens, cost, count = result.one()
+    return UsageSummary(
+        token_total=int(tokens or 0),
+        estimated_cost_usd=float(cost or 0.0),
+        interaction_count=int(count or 0),
+        chat_id=chat_id,
+    )
+
+
+@router.get("/context-window")
+async def get_context_window_config(current_user: User = Depends(get_current_user)):
+    """Return configured soft context window size for the UI meter."""
+    return {"context_window_tokens": settings.CONTEXT_WINDOW_TOKENS}
+
+
+@router.get("/usage", response_model=UsageSummary)
+async def get_user_usage(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Estimated token + USD cost across all of the current user's chats."""
+    from sqlalchemy import func
+
+    result = await db.execute(
+        select(
+            func.coalesce(func.sum(Agent_interact.token_metric), 0),
+            func.coalesce(func.sum(Agent_interact.estimated_cost_usd), 0.0),
+            func.count(),
+        )
+        .select_from(Agent_interact)
+        .join(Chats, Chats.chat_id == Agent_interact.chat_id)
+        .where(Chats.user_id == current_user.user_id)
+    )
+    tokens, cost, count = result.one()
+    return UsageSummary(
+        token_total=int(tokens or 0),
+        estimated_cost_usd=float(cost or 0.0),
+        interaction_count=int(count or 0),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1052,7 +1226,9 @@ async def ws_query(websocket: WebSocket, chat_id: _uuid.UUID):
                 # Stream tokens from answer generation
                 if node_name == "generate_answer" and isinstance(node_output, dict):
                     new_answer = node_output.get("answer", "")
-                    if new_answer:
+                    if new_answer and new_answer != answer:
+                        if answer:
+                            await websocket.send_json({"type": "answer_reset"})
                         answer = new_answer
                         chunk_size = 100
                         for i in range(0, len(answer), chunk_size):

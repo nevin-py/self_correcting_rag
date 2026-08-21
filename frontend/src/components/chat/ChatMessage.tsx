@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Copy, Check } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Copy, Check, MoreHorizontal, PanelRightOpen } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import type { Citation, Claim, Conflict } from "@/lib/api";
 import { Badge } from "@/components/ui/Badge";
@@ -20,6 +20,7 @@ interface MessageProps {
   conflicts?: Conflict[];
   finalStatus?: string;
   latencyMs?: number;
+  estimatedCostUsd?: number;
   timestamp: Date;
 }
 
@@ -52,13 +53,25 @@ export default function ChatMessage({
   conflicts,
   finalStatus,
   latencyMs,
+  estimatedCostUsd,
   timestamp,
 }: MessageProps) {
   const [copied, setCopied] = useState(false);
-  const { selectedMessageId, setSelectedMessage } = useChatStore();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const { selectedMessageId, openMessageAnalysis } = useChatStore();
   const isSelected = selectedMessageId === id;
   const isUser = role === "user";
   const isSystem = role === "system";
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(content);
@@ -87,7 +100,9 @@ export default function ChatMessage({
 
   return (
     <article
-      onClick={() => !isUser && setSelectedMessage(id)}
+      onClick={() => {
+        if (!isUser) openMessageAnalysis(id);
+      }}
       className={cn(
         "group relative border transition-colors",
         isUser
@@ -99,7 +114,6 @@ export default function ChatMessage({
             )
       )}
     >
-      {/* Header rail */}
       <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
         <div className="flex items-center gap-3">
           <span className="font-mono text-[9px] uppercase tracking-[0.15em] text-text-muted">
@@ -113,25 +127,52 @@ export default function ChatMessage({
             {typeof latencyMs === "number" && (
               <span className="font-mono text-[9px] text-text-muted">{latencyMs.toFixed(0)}ms</span>
             )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleCopy();
-              }}
-              className="opacity-0 transition-opacity group-hover:opacity-100"
-              title="Copy response"
-            >
-              {copied ? (
-                <Check size={11} className="text-success" />
-              ) : (
-                <Copy size={11} className="text-text-muted hover:text-text-primary" />
+            {typeof estimatedCostUsd === "number" && estimatedCostUsd > 0 && (
+              <span className="font-mono text-[9px] text-text-muted">~${estimatedCostUsd.toFixed(4)}</span>
+            )}
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuOpen((o) => !o);
+                }}
+                className="opacity-0 transition-opacity group-hover:opacity-100 p-1 text-text-muted hover:text-text-primary"
+                title="Message actions"
+                aria-label="Message actions"
+              >
+                <MoreHorizontal size={14} />
+              </button>
+              {menuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] border border-border bg-surface shadow-lg">
+                  <button
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openMessageAnalysis(id);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <PanelRightOpen size={12} />
+                    Show analysis
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCopy();
+                      setMenuOpen(false);
+                    }}
+                  >
+                    {copied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
+                    Copy response
+                  </button>
+                </div>
               )}
-            </button>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Content */}
       <div className={cn("px-4 py-3 select-text", isUser ? "text-sm text-text-primary" : "")}>
         {isUser ? (
           <p className="leading-relaxed">{content}</p>

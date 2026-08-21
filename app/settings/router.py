@@ -37,9 +37,9 @@ def _env_defaults(provider: str) -> dict:
             "has_server_key": bool(settings.GOOGLE_AI_API_KEY),
         }
     return {
-        "planner_model": "llama-3.3-70b-versatile",
+        "planner_model": "qwen/qwen3.6-27b",
         "generator_model": "openai/gpt-oss-120b",
-        "verifier_model": "llama-3.3-70b-versatile",
+        "verifier_model": "qwen/qwen3.6-27b",
         "has_server_key": bool(settings.GROQ_KEY),
     }
 

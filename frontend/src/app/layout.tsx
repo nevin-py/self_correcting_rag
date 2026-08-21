@@ -16,7 +16,10 @@ const ibmPlexMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: "SCRAG — Self-Correcting Knowledge Workspace",
-  description: "Enterprise retrieval, verification, and correction terminal",
+  description:
+    "Enterprise retrieval, verification, and correction terminal. Created by Nevin Sunil Oommen.",
+  authors: [{ name: "Nevin Sunil Oommen" }],
+  creator: "Nevin Sunil Oommen",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

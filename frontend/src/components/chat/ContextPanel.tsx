@@ -80,8 +80,7 @@ function EvidenceItem({ citation, index }: { citation: Citation; index: number }
           <p className="text-xs leading-relaxed text-text-secondary select-text">{citation.text}</p>
           <div className="mt-2 flex flex-wrap gap-3 font-mono text-[9px] text-text-muted">
             {citation.source_date && <span>DATE {new Date(citation.source_date).toLocaleDateString()}</span>}
-            <span>AUTH {(citation.authority_score * 100).toFixed(0)}%</span>
-            <span>REC {(citation.recency_score * 100).toFixed(0)}%</span>
+            <span>{citation.source_type === "web" ? "WEB" : "DOC"}</span>
           </div>
         </div>
       )}
@@ -239,6 +238,14 @@ export default function ContextPanel() {
               {selected.finalStatus && <Badge variant="mono">{selected.finalStatus}</Badge>}
               {typeof selected.latencyMs === "number" && (
                 <Badge variant="mono">{selected.latencyMs.toFixed(0)}ms</Badge>
+              )}
+              {typeof selected.estimatedCostUsd === "number" && selected.estimatedCostUsd > 0 && (
+                <Badge variant="mono">~${selected.estimatedCostUsd.toFixed(4)}</Badge>
+              )}
+              {(selected.citations?.length || selected.claims?.length) ? (
+                <Badge variant="accent">Turn analysis</Badge>
+              ) : (
+                <Badge variant="mono">No stored analysis</Badge>
               )}
             </div>
           </div>

@@ -166,6 +166,7 @@ export const chatApi = {
   create: (title: string) => api.post("/api/v1/agent/chats", { title }),
   get: (id: string) => api.get(`/api/v1/agent/chats/${id}`),
   delete: (id: string) => api.delete(`/api/v1/agent/chats/${id}`),
+  purge: () => api.post<{ deleted: number }>("/api/v1/agent/chats/purge"),
   query: (chatId: string, message: string, provider?: string) => {
     const providerPref = provider || localStorage.getItem("llm_provider") || "auto";
     return api.post(`/api/v1/agent/chats/${chatId}/query`, { message, provider: providerPref });
@@ -174,6 +175,21 @@ export const chatApi = {
     api.get(`/api/v1/agent/chats/${chatId}/history`, { params }),
   messages: (chatId: string, params?: { limit?: number }) =>
     api.get(`/api/v1/agent/chats/${chatId}/messages`, { params }),
+  chatUsage: (chatId: string) =>
+    api.get<{
+      token_total: number;
+      estimated_cost_usd: number;
+      interaction_count: number;
+      chat_id: string;
+    }>(`/api/v1/agent/chats/${chatId}/usage`),
+  userUsage: () =>
+    api.get<{
+      token_total: number;
+      estimated_cost_usd: number;
+      interaction_count: number;
+    }>("/api/v1/agent/usage"),
+  contextWindow: () =>
+    api.get<{ context_window_tokens: number }>("/api/v1/agent/context-window"),
 };
 
 // ── Documents ───────────────────────────────────────────────────────────────
@@ -185,8 +201,6 @@ export interface Citation {
   source_name: string;
   source_url?: string | null;
   source_date?: string | null;
-  authority_score: number;
-  recency_score: number;
 }
 
 export interface Claim {

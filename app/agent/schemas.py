@@ -40,9 +40,6 @@ class CitationResponse(BaseModel):
     source_name: str
     source_url: str | None = None
     source_date: datetime | None = None
-    authority_score: float
-    recency_score: float
-    # New structured metadata fields
     metric_type: str = "unknown"
     metric_value: str = ""
     geographic_scope: str = "unknown"
@@ -81,6 +78,9 @@ class InteractionResponse(BaseModel):
     agent_output: str
     routing_path: str | None = None
     token_metric: int | None = None
+    estimated_cost_usd: float | None = None
+    provider_used: str | None = None
+    provenance_json: str | None = None
     latency: float
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -95,8 +95,18 @@ class MessageResponse(BaseModel):
     content: str
     sequence: int
     created_at: datetime
+    provenance_json: str | None = None
+    token_estimate: int | None = None
+    estimated_cost_usd: float | None = None
     model_config = ConfigDict(from_attributes=True)
 
 
 class MessageListResponse(BaseModel):
     messages: list[MessageResponse]
+
+
+class UsageSummary(BaseModel):
+    token_total: int = 0
+    estimated_cost_usd: float = 0.0
+    interaction_count: int = 0
+    chat_id: uuid.UUID | None = None

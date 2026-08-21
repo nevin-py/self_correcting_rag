@@ -10,12 +10,36 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+import os
+
+
+def valid_key(key: str | None) -> bool:
+    """Reject empty or placeholder credentials ("fill this later", "TODO", ...).
+
+    A placeholder key must never reach an API: it turns a missing-credential
+    condition into a confusing remote 401 deep inside a fallback chain.
+    """
+    if not key:
+        return False
+    k = key.strip().strip("\"'")
+    if len(k) < 16 or " " in k:
+        return False
+    if any(bad in k.lower() for bad in ("fill", "todo", "placeholder", "changeme", "xxx")):
+        return False
+    return True
+
+
+# Some libraries (e.g. langchain_openai) silently fall back to the OPENAI_API_KEY
+# env var. If it holds a placeholder, remove it so failures stay local and explicit.
+if not valid_key(os.environ.get("OPENAI_API_KEY")):
+    os.environ.pop("OPENAI_API_KEY", None)
+
 # ── LLM + search clients (server env defaults; user keys override at resolve) ─
 
 chat_llm = None
 routing_llm = None
 groq_client = None
-if settings.GROQ_KEY:
+if valid_key(settings.GROQ_KEY):
     chat_llm = ChatGroq(
         api_key=settings.GROQ_KEY,
         model="openai/gpt-oss-120b",
@@ -23,7 +47,7 @@ if settings.GROQ_KEY:
     )
     routing_llm = ChatGroq(
         api_key=settings.GROQ_KEY,
-        model="llama-3.3-70b-versatile",
+        model="qwen/qwen3.6-27b",
         temperature=0,
     )
     groq_client = Groq(api_key=settings.GROQ_KEY)
@@ -39,7 +63,7 @@ openrouter_hallucination_llm = None
 _openrouter_alt_llms: list[Any] = []
 
 _OPENROUTER_ALTS = (
-    "xiaomi/mimo-v2.5-pro",
+    "openai/gpt-oss-20b",
 )
 
 
@@ -67,23 +91,27 @@ def _make_openrouter_llm(
     return ChatOpenAI(**kwargs)
 
 
-if settings.OPENROUTER_API_KEY:
-    # No forced reasoning effort — medium/high on MiMo blew classify/plan past 60s.
-    # No HTTP timeout: slow networks / OpenRouter queues must be allowed to finish.
+if valid_key(settings.OPENROUTER_API_KEY):
+    # gpt-oss (and similar) are reasoning models: hidden reasoning tokens run
+    # before the answer and can blow past timeouts or exhaust max_tokens.
+    # Effort "low" keeps a short deliberation while JSON compliance stays high.
     openrouter_planner_llm = _make_openrouter_llm(
         settings.OPENROUTER_PLANNER_MODEL,
         settings.OPENROUTER_API_KEY,
-        max_tokens=1024,
+        max_tokens=2048,
+        reasoning_effort="low",
     )
     openrouter_generator_llm = _make_openrouter_llm(
         settings.OPENROUTER_GENERATOR_MODEL,
         settings.OPENROUTER_API_KEY,
         max_tokens=4096,
+        reasoning_effort="low",
     )
     openrouter_hallucination_llm = _make_openrouter_llm(
         settings.OPENROUTER_HALLUCINATION_MODEL,
         settings.OPENROUTER_API_KEY,
-        max_tokens=2048,
+        max_tokens=3072,
+        reasoning_effort="low",
     )
 
     configured = {
@@ -134,7 +162,7 @@ def _make_google_llm(model: str, api_key: str):
     )
 
 
-if settings.GOOGLE_AI_API_KEY:
+if valid_key(settings.GOOGLE_AI_API_KEY):
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: F401
 
@@ -195,13 +223,16 @@ def _uniq_llms(*models: Any) -> tuple[Any, ...]:
 
 
 def _pick_key(user_entry: dict | None, server_key: str) -> str | None:
-    """Prefer user primary key, then user fallback, then server env key."""
+    """Prefer user primary key, then user fallback, then server env key.
+
+    Every candidate must pass valid_key — a placeholder string is treated as
+    "no key" so the provider is skipped instead of failing with a remote 401.
+    """
     if user_entry:
-        if user_entry.get("api_key"):
-            return user_entry["api_key"]
-        if user_entry.get("fallback_api_key"):
-            return user_entry["fallback_api_key"]
-    return server_key or None
+        for cand in (user_entry.get("api_key"), user_entry.get("fallback_api_key")):
+            if valid_key(cand):
+                return cand
+    return server_key if valid_key(server_key) else None
 
 
 def _user_models(user_entry: dict | None) -> tuple[str | None, str | None, str | None]:
@@ -215,9 +246,9 @@ def _user_models(user_entry: dict | None) -> tuple[str | None, str | None, str |
 
 
 def _build_openrouter_bundle(api_key: str, planner: str, generator: str, verifier: str) -> tuple[Any, Any, Any, tuple[Any, ...]]:
-    p = _make_openrouter_llm(planner, api_key, max_tokens=1024)
-    g = _make_openrouter_llm(generator, api_key, max_tokens=4096)
-    v = _make_openrouter_llm(verifier, api_key, max_tokens=2048)
+    p = _make_openrouter_llm(planner, api_key, max_tokens=2048, reasoning_effort="low")
+    g = _make_openrouter_llm(generator, api_key, max_tokens=4096, reasoning_effort="low")
+    v = _make_openrouter_llm(verifier, api_key, max_tokens=3072, reasoning_effort="low")
     alts: list[Any] = []
     configured = {planner, generator, verifier}
     for model_id in _OPENROUTER_ALTS:
@@ -331,9 +362,9 @@ def resolve_llms(
     ):
         gq_planner, gq_generator, gq_verifier = _build_groq_bundle(
             gq_key,
-            gq_pm or "llama-3.3-70b-versatile",
+            gq_pm or "qwen/qwen3.6-27b",
             gq_gm or "openai/gpt-oss-120b",
-            gq_vm or "llama-3.3-70b-versatile",
+            gq_vm or "qwen/qwen3.6-27b",
         )
     elif not gq_key:
         gq_planner = gq_generator = gq_verifier = None
@@ -356,13 +387,38 @@ def resolve_llms(
         if not or_generator:
             logger.warning("OpenRouter requested but no key available; falling back to auto")
             return resolve_llms("auto", user_credentials=creds)
+        # P0: Build fallback chain from config — cheap + good reasoning models.
+        # When the primary (e.g., xiaomi/mimo-v2.5) returns empty, try these.
+        or_key = _pick_key(creds.get("openrouter"), settings.OPENROUTER_API_KEY)
+
+        def _make_or_llm(model_name: str):
+            if not model_name or not or_key:
+                return None
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=model_name,
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+                max_tokens=4096,
+                temperature=0.1,
+                default_headers={"HTTP-Referer": "https://self-correcting-rag.local"},
+            )
+
+        pb_names = [m.strip() for m in settings.OPENROUTER_PLANNER_FALLBACKS.split(",") if m.strip()]
+        gb_names = [m.strip() for m in settings.OPENROUTER_GENERATOR_FALLBACKS.split(",") if m.strip()]
+        vb_names = [m.strip() for m in settings.OPENROUTER_VERIFIER_FALLBACKS.split(",") if m.strip()]
+
+        planner_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in pb_names], go_planner, gq_planner)
+        generator_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in gb_names], go_generator, gq_generator)
+        verifier_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in vb_names], go_verifier, gq_verifier)
+
         return ProviderLLMs(
             planner=or_planner or or_generator,
-            planner_fallbacks=(),
+            planner_fallbacks=planner_fallbacks,
             generator=or_generator,
-            generator_fallbacks=(),
+            generator_fallbacks=generator_fallbacks,
             verifier=or_verifier or or_generator,
-            verifier_fallbacks=(),
+            verifier_fallbacks=verifier_fallbacks,
             label="openrouter",
         )
 

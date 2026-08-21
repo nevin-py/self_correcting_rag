@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
-import { useChatStore } from "@/stores/chatStore";
+import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
 import AppShell from "@/components/layout/AppShell";
 import ContextPanel from "@/components/chat/ContextPanel";
 import ChatMessage from "@/components/chat/ChatMessage";
@@ -17,7 +17,8 @@ function EmptyWorkspace() {
   const router = useRouter();
 
   const handleNew = async () => {
-    const chat = await useChatStore.getState().createChat("Session 001");
+    const title = nextSessionTitle(useChatStore.getState().chats);
+    const chat = await useChatStore.getState().createChat(title);
     router.push(`/chat/${chat.chat_id}`);
   };
 
@@ -125,6 +126,7 @@ export default function ChatSessionPage() {
                   conflicts={msg.conflicts}
                   finalStatus={msg.finalStatus}
                   latencyMs={msg.latencyMs}
+                  estimatedCostUsd={msg.estimatedCostUsd}
                 />
               ))}
               <div ref={messagesEnd} />

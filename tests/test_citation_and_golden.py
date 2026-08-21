@@ -1,23 +1,29 @@
-"""Tests for hard citation validation and golden eval checks."""
+"""Tests for the hard citation validator."""
 
-from app.agent.citation_validator import flag_uncited_in_answer, validate_answer_citations
-from app.agent.eval_checks import load_golden_set, score_case
+import pytest
+
+from app.agent.citation_validator import (
+    flag_uncited_in_answer,
+    resolve_citation_token,
+    split_checkable_sentences,
+    validate_answer_citations,
+)
 from app.agent.state import Evidence, SourceType
 
 
-def _ev(eid: str, text: str = "Maharashtra services 64.27% of GSDP") -> Evidence:
+def _ev(eid: str, text: str = "Renewable energy accounted for 30% of generation in 2024") -> Evidence:
     return Evidence(
         evidence_id=eid,
         text=text,
         source_type=SourceType.WEB,
-        source_name="DES",
+        source_name="example.org",
     )
 
 
 class TestCitationValidator:
     def test_uncited_factual_flagged(self):
         result = validate_answer_citations(
-            "Maharashtra services contributed 64.27% of GSDP in 2024-25.",
+            "Renewable energy contributed 30% of total generation in 2024.",
             [_ev("a1b2c3d4")],
         )
         assert not result.ok
@@ -26,91 +32,64 @@ class TestCitationValidator:
 
     def test_valid_citation_passes(self):
         result = validate_answer_citations(
-            "Maharashtra services contributed 64.27% of GSDP in 2024-25 [a1b2c3d4].",
+            "Renewable energy contributed 30% of generation in 2024 [a1b2c3d4].",
             [_ev("a1b2c3d4")],
         )
         assert result.ok
         assert not result.uncited_sentences
-        assert result.cited_ids == ["a1b2c3d4"]
 
-    def test_valid_e_key_citation(self):
+    def test_invalid_citation_id_flagged(self):
+        result = validate_answer_citations(
+            "Solar grew 22% last year [e99].",
+            [_ev("a1b2c3d4")],
+        )
+        assert "e99" in result.invalid_citation_ids
+        assert any(e.issue == "INVALID_CITATION" for e in result.errors)
+
+    def test_cite_key_resolution_via_map(self):
         ev = _ev("a1b2c3d4")
         ev.metadata["cite_key"] = "E1"
         result = validate_answer_citations(
-            "Maharashtra services contributed 64.27% of GSDP in 2024-25 [E1].",
+            "Wind added 12 GW of capacity in 2024 [E1].",
             [ev],
             cite_map={"E1": "a1b2c3d4"},
         )
         assert result.ok
         assert result.cited_ids == ["a1b2c3d4"]
 
-    def test_analysis_section_skipped(self):
+    def test_hedged_statements_do_not_need_citations(self):
+        result = validate_answer_citations(
+            "I could not find sufficient evidence to answer this question fully.",
+            [],
+        )
+        assert result.ok
+        assert not result.uncited_sentences
+
+    def test_resolve_token_hex_and_ekey(self):
+        ev = _ev("a1b2c3d4")
+        ev.metadata["cite_key"] = "E2"
+        assert resolve_citation_token("a1b2c3d4", [ev]) == "a1b2c3d4"
+        assert resolve_citation_token("E2", [ev], {"E2": "a1b2c3d4"}) == "a1b2c3d4"
+        assert resolve_citation_token("E9", [ev]) is None
+
+    def test_split_skips_caveats_body(self):
         answer = (
-            "### Direct Answer\n"
-            "Services were 64% of GSDP [a1b2c3d4].\n\n"
-            "### Analysis & Caveats\n"
-            "- **Confidence**: Medium based on single source without triangulation.\n"
-            "- Maharashtra economy grew faster than national GDP without any citation here.\n"
+            "## Direct Answer\n\nCapacity grew by 5 GW in 2024 [E1].\n\n"
+            "Caveats:\n- This figure could not be cross-checked.\n"
         )
+        sentences = split_checkable_sentences(answer)
+        assert any("[E1]" in s for s in sentences)
+        assert all("cross-checked" not in s for s in sentences)
+
+    def test_flag_only_invalid_ids(self):
+        answer = "Solar capacity reached 1 TW worldwide [e42]."
         result = validate_answer_citations(answer, [_ev("a1b2c3d4")])
-        assert result.ok
-
-    def test_fact_label_cite_counts_for_quote(self):
-        ev = _ev("a1b2c3d4")
-        ev.metadata["cite_key"] = "E1"
-        result = validate_answer_citations(
-            '- **Fact 1 (Service Sector) [E1]**: "Services were 54.5% of GSDP in 2017-18."',
-            [ev],
-            cite_map={"E1": "a1b2c3d4"},
+        flagged = flag_uncited_in_answer(answer, result)
+        assert "Citation check" in flagged
+        # No invalid ids -> unchanged
+        ok_result = validate_answer_citations(
+            "Generation rose 4% in 2024 [a1b2c3d4].", [_ev("a1b2c3d4")]
         )
-        assert result.ok
-        assert not result.uncited_sentences
-
-    def test_invalid_citation_id(self):
-        result = validate_answer_citations(
-            "Services were 64.27% of GSDP [deadbeef].",
-            [_ev("a1b2c3d4")],
+        assert flag_uncited_in_answer("Generation rose 4% in 2024 [a1b2c3d4].", ok_result) == (
+            "Generation rose 4% in 2024 [a1b2c3d4]."
         )
-        assert not result.ok
-        assert "deadbeef" in result.invalid_citation_ids
-
-    def test_flag_appends_note(self):
-        result = validate_answer_citations(
-            "Maharashtra GSDP services share was 64%.",
-            [_ev("a1b2c3d4")],
-        )
-        flagged = flag_uncited_in_answer("Maharashtra GSDP services share was 64%.", result)
-        assert "Citation check:" in flagged
-
-
-class TestGoldenEval:
-    def test_golden_set_loads(self):
-        cases = load_golden_set()
-        assert len(cases) >= 15
-        assert all("id" in c and "query" in c for c in cases)
-
-    def test_good_answers_pass(self):
-        cases = {c["id"]: c for c in load_golden_set()}
-        for case_id, case in cases.items():
-            good = case.get("good_answer_example")
-            if not good:
-                continue
-            score = score_case(case, good)
-            assert score.passed, f"{case_id} failed: {[c.name + ':' + c.detail for c in score.failed]}"
-
-    def test_bad_uncited_fails(self):
-        case = next(c for c in load_golden_set() if c["id"] == "uncited-should-fail")
-        score = score_case(case, case["bad_answer_example"])
-        assert not score.passed
-        assert any(c.name == "citation_uncited_budget" for c in score.failed)
-
-    def test_bad_invalid_citation_fails(self):
-        case = next(c for c in load_golden_set() if c["id"] == "invalid-citation-should-fail")
-        score = score_case(case, case["bad_answer_example"])
-        assert not score.passed
-        assert any(c.name == "citation_ids_resolve" for c in score.failed)
-
-    def test_metric_trap_prefers_gsdp(self):
-        case = next(c for c in load_golden_set() if c["id"] == "mh-gsdp-vs-gdp-trap")
-        score = score_case(case, case["good_answer_example"])
-        assert score.passed

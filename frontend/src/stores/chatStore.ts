@@ -14,6 +14,30 @@ export interface Message {
   finalStatus?: string;
   latencyMs?: number;
   trajectory?: string;
+  tokenEstimate?: number;
+  estimatedCostUsd?: number;
+}
+
+function parseProvenance(raw: string | null | undefined): Partial<Message> {
+  if (!raw) return {};
+  try {
+    const p = JSON.parse(raw);
+    return {
+      citations: p.citations,
+      claims: p.claims,
+      conflicts: p.conflicts,
+      finalStatus: p.final_status,
+      latencyMs: p.latency_ms,
+      trajectory: p.trajectory,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Rough char→token estimate for the context meter. */
+export function estimateLocalTokens(text: string): number {
+  return Math.max(0, Math.ceil((text || "").length / 4));
 }
 
 export interface GraphStatus {
@@ -39,6 +63,15 @@ export interface Chat {
   created_at: string;
 }
 
+export function nextSessionTitle(chats: Chat[]): string {
+  let max = 0;
+  for (const c of chats) {
+    const m = /^Session\s+(\d+)$/i.exec((c.title || "").trim());
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `Session ${String(max + 1).padStart(3, "0")}`;
+}
+
 interface ChatState {
   chats: Chat[];
   activeChatId: string | null;
@@ -50,15 +83,21 @@ interface ChatState {
   sidebarCollapsed: boolean;
   sidebarOpen: boolean;
   rightPanelOpen: boolean;
+  chatCostUsd: number;
+  allSessionsCostUsd: number;
+  contextWindowTokens: number;
 
   fetchChats: () => Promise<void>;
   createChat: (title: string) => Promise<Chat>;
   selectChat: (chatId: string) => Promise<void>;
   deleteChat: (chatId: string) => Promise<void>;
+  purgeAllChats: () => Promise<number>;
   sendMessage: (content: string) => Promise<void>;
   toggleSidebar: () => void;
   toggleRightPanel: () => void;
   setSelectedMessage: (id: string | null) => void;
+  openMessageAnalysis: (id: string) => void;
+  refreshUsage: () => Promise<void>;
   addSystemMessage: (content: string, meta?: { filename?: string; status?: string }) => void;
 }
 
@@ -73,6 +112,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sidebarCollapsed: false,
   sidebarOpen: true,
   rightPanelOpen: true,
+  chatCostUsd: 0,
+  allSessionsCostUsd: 0,
+  contextWindowTokens: 128000,
 
   fetchChats: async () => {
     if (typeof window !== "undefined" && !localStorage.getItem("token")) return;
@@ -85,37 +127,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   createChat: async (title: string) => {
-    const res = await chatApi.create(title);
-    const chat = res.data;
-    set((s) => ({
-      chats: [chat, ...s.chats],
-      activeChatId: chat.chat_id,
-      messages: [],
-      pipelineEvents: [],
-      selectedMessageId: null,
-    }));
-    return chat;
+    try {
+      const res = await chatApi.create(title);
+      const chat = res.data;
+      set((s) => {
+        const exists = s.chats.some((c) => c.chat_id === chat.chat_id);
+        return {
+          chats: exists ? s.chats.map((c) => (c.chat_id === chat.chat_id ? chat : c)) : [chat, ...s.chats],
+          activeChatId: chat.chat_id,
+          messages: exists && s.activeChatId === chat.chat_id ? s.messages : [],
+          pipelineEvents: [],
+          selectedMessageId: null,
+        };
+      });
+      return chat;
+    } catch (err) {
+      await get().fetchChats();
+      throw err;
+    }
   },
 
   selectChat: async (chatId: string) => {
-    set({ activeChatId: chatId, messages: [], pipelineEvents: [], selectedMessageId: null });
+    set({ activeChatId: chatId, messages: [], pipelineEvents: [], selectedMessageId: null, chatCostUsd: 0 });
     if (typeof window !== "undefined" && !localStorage.getItem("token")) return;
     try {
-      const res = await chatApi.messages(chatId, { limit: 50 });
+      const res = await chatApi.messages(chatId, { limit: 100 });
       const messages: Message[] = (
         res.data.messages as Array<{
           sequence: number;
           role: "user" | "assistant" | "system";
           content: string;
           created_at: string;
+          provenance_json?: string | null;
+          token_estimate?: number | null;
+          estimated_cost_usd?: number | null;
         }>
-      ).map((m) => ({
-        id: `${m.sequence}`,
-        role: m.role,
-        content: m.content,
-        timestamp: new Date(m.created_at),
-      }));
-      set({ messages });
+      ).map((m) => {
+        const prov = m.role === "assistant" ? parseProvenance(m.provenance_json) : {};
+        return {
+          id: `${m.sequence}`,
+          role: m.role,
+          content: m.content,
+          timestamp: new Date(m.created_at),
+          tokenEstimate: m.token_estimate ?? undefined,
+          estimatedCostUsd: m.estimated_cost_usd ?? undefined,
+          ...prov,
+        };
+      });
+      const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+      set({
+        messages,
+        selectedMessageId: lastAssistant?.id ?? null,
+      });
+      void get().refreshUsage();
     } catch {
       set({ messages: [] });
     }
@@ -128,6 +192,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeChatId: s.activeChatId === chatId ? null : s.activeChatId,
       messages: s.activeChatId === chatId ? [] : s.messages,
     }));
+  },
+
+  purgeAllChats: async () => {
+    const res = await chatApi.purge();
+    set({
+      chats: [],
+      activeChatId: null,
+      messages: [],
+      pipelineEvents: [],
+      selectedMessageId: null,
+      chatCostUsd: 0,
+    });
+    return res.data.deleted;
   },
 
   sendMessage: async (content: string) => {
@@ -212,7 +289,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   },
                   pipelineEvents: [...s.pipelineEvents, event],
                 }));
-              } else if (currentEvent === "token") {
+              } else if (currentEvent === "answer_reset") {
+                // Repair pass: the previously streamed answer is replaced.
+                fullAnswer = "";
+                set((s) => {
+                  const msgs = [...s.messages];
+                  const lastMsg = msgs[msgs.length - 1];
+                  if (lastMsg && lastMsg.role === "assistant" && lastMsg.id.startsWith("stream-")) {
+                    lastMsg.content = "";
+                    return { messages: msgs };
+                  }
+                  return s;
+                });
+               } else if (currentEvent === "token") {
                 fullAnswer += String(data.content);
                 set((s) => {
                   const msgs = [...s.messages];
@@ -279,15 +368,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     finalStatus: provenance?.final_status,
                     latencyMs: provenance?.latency_ms,
                     trajectory: provenance?.trajectory,
+                    tokenEstimate: typeof data.token_estimate === "number" ? data.token_estimate : undefined,
+                    estimatedCostUsd:
+                      typeof data.estimated_cost_usd === "number" ? data.estimated_cost_usd : undefined,
                   });
                   return {
                     messages: msgs,
                     isStreaming: false,
                     graphStatus: null,
                     selectedMessageId: msgId,
+                    rightPanelOpen: true,
                     pipelineEvents: s.pipelineEvents.map((e) => ({ ...e, status: "done" as const })),
                   };
                 });
+                void get().refreshUsage();
               } else if (currentEvent === "error") {
                 set((s) => {
                   // Keep streamed answer + evidence; don't replace with a bare error bubble.
@@ -397,6 +491,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
 
   setSelectedMessage: (id) => set({ selectedMessageId: id }),
+
+  openMessageAnalysis: (id) =>
+    set({ selectedMessageId: id, rightPanelOpen: true }),
+
+  refreshUsage: async () => {
+    const chatId = get().activeChatId;
+    try {
+      const [allRes, winRes] = await Promise.all([
+        chatApi.userUsage(),
+        chatApi.contextWindow().catch(() => ({ data: { context_window_tokens: 128000 } })),
+      ]);
+      let chatCost = 0;
+      if (chatId) {
+        try {
+          const chatRes = await chatApi.chatUsage(chatId);
+          chatCost = chatRes.data.estimated_cost_usd || 0;
+        } catch {
+          chatCost = 0;
+        }
+      }
+      set({
+        allSessionsCostUsd: allRes.data.estimated_cost_usd || 0,
+        chatCostUsd: chatCost,
+        contextWindowTokens: winRes.data.context_window_tokens || 128000,
+      });
+    } catch {
+      // ignore usage fetch errors
+    }
+  },
 
   addSystemMessage: (content, meta) => {
     const msg: Message = {

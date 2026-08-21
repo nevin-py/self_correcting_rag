@@ -1,0 +1,36 @@
+# Core framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0.0
+pydantic-core>=0.18.0
+
+# LangChain for LLM integration
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+
+# Database
+sqlalchemy>=2.0.0
+redis>=5.0.0
+redis-py-cluster>=5.0.0
+
+# HTTP clients
+httpx>=0.25.0
+aiohttp>=3.9.0
+
+# Utilities
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+
+# Security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+
+# Optional: Geocoding API
+# requests>=2.31.0
+# (for OpenCage, Google Maps, etc.)
+
+# Optional: Browser automation for location tool
+# playwright>=1.40.0
+# (uncomment if using browser-based location lookup)

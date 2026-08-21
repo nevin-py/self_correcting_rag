@@ -108,6 +108,10 @@ def _validate_production_settings() -> None:
     problems: list[str] = []
     if not settings.cors_origin_set:
         problems.append("CORS_ORIGINS must list your frontend origin(s) in production")
+    if not (settings.SMTP_HOST or "").strip() or not (settings.SMTP_FROM or "").strip():
+        problems.append("SMTP_HOST and SMTP_FROM are required in production (OTP email)")
+    if (settings.SMTP_USER or "").strip() and not (settings.SMTP_PASSWORD or "").strip():
+        problems.append("SMTP_PASSWORD is required when SMTP_USER is set")
     weak_secrets = {
         "",
         "your_secret_key_here",
@@ -127,7 +131,10 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 app = FastAPI(
     title="Self-Correcting RAG",
-    description="Agentic RAG with hallucination detection and self-repair.",
+    description=(
+        "Agentic RAG with hallucination detection and self-repair. "
+        "Created by Nevin Sunil Oommen."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )

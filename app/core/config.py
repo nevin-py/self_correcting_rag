@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     OPENROUTER_PLANNER_MODEL: str = "xiaomi/mimo-v2.5"
     OPENROUTER_GENERATOR_MODEL: str = "xiaomi/mimo-v2.5"
     OPENROUTER_HALLUCINATION_MODEL: str = "xiaomi/mimo-v2.5"
+    # Fallback chain: cheap + good reasoning models (comma-separated)
+    OPENROUTER_PLANNER_FALLBACKS: str = "google/gemini-2.5-flash,deepseek/deepseek-chat-v3-0324"
+    OPENROUTER_GENERATOR_FALLBACKS: str = "google/gemini-2.5-flash,deepseek/deepseek-chat-v3-0324"
+    OPENROUTER_VERIFIER_FALLBACKS: str = "google/gemini-2.5-flash,qwen/qwen3-235b-a22b"
 
     # Nomic embedding rate limit
     NOMIC_CONCURRENCY: int = 2
@@ -70,19 +74,31 @@ class Settings(BaseSettings):
 
     # Graph execution guards
     MAX_GRAPH_STEPS: int = 20
-    MAX_SEARCHES: int = 2
+    MAX_SEARCHES: int = 4
     MAX_RETRIEVALS: int = 3
     MAX_REGENERATIONS: int = 2
 
     USE_VERIFY_CASCADE: bool = True
     MAX_REPAIR_PASSES: int = 1
+    MAX_REPAIR_SEARCHES: int = 3  # C1: independent search-only budget for gap filling
     NLI_ENTAIL_THRESHOLD: float = 0.7
     NLI_CONTRADICT_THRESHOLD: float = 0.7
+    # C5: Near-duplicate similarity threshold for evidence dedup (0-1)
+    DEDUP_SIMILARITY_THRESHOLD: float = 0.70
+    # C9: Numeric contradiction penalty multiplier (lower = harsher penalty)
+    NUMERIC_CONTRADICTION_PENALTY: float = 0.5
 
     QUERY_TIMEOUT_SECONDS: int = 0
     STREAM_NODE_TIMEOUT_SECONDS: int = 60
+    # Soft context window for UI meter (tokens)
+    CONTEXT_WINDOW_TOKENS: int = 128_000
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        # .env is shared with docker-compose (POSTGRES_*, SEARXNG_SECRET, DOMAIN, …)
+        extra="ignore",
+    )
 
     @property
     def cors_origin_set(self) -> set[str]:

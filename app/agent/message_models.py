@@ -15,4 +15,8 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" or "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Assistant turns: citations/claims/conflicts/status/cost for Analysis panel restore
+    provenance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

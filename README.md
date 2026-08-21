@@ -1,5 +1,7 @@
 # Self-Correcting RAG
 
+**Author:** Nevin Sunil Oommen
+
 An agentic retrieval-augmented generation system with built-in hallucination detection and self-repair. When the LLM's answer isn't grounded in evidence, the system automatically re-plans, retrieves additional context (from vector DB, Wikipedia, or Tavily web search), and regenerates — looping until the answer passes a factual verification step.
 
 ## Architecture
@@ -88,6 +90,8 @@ createdb self_correcting_rag
 uvicorn app.main:app --reload
 ```
 
+**Full local command cheat sheet** (backend + frontend): [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
+
 ### Production Docker
 
 See [docker/PRODUCTION.md](docker/PRODUCTION.md). Short version:
@@ -98,7 +102,9 @@ docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
 ./docker/backup.sh   # Postgres + Chroma volume snapshot
 ```
 
-**Split deploy (Render API + Vercel frontend):** see [docs/DEPLOY_RENDER_VERCEL.md](docs/DEPLOY_RENDER_VERCEL.md).
+**Google Cloud Run (Always Free only, no Cloud SQL):** see [docs/DEPLOY_CLOUD_RUN.md](docs/DEPLOY_CLOUD_RUN.md).
+
+**Split deploy (Oracle Cloud API + Vercel frontend):** see [docs/DEPLOY_ORACLE_VERCEL.md](docs/DEPLOY_ORACLE_VERCEL.md).
 
 **Production:** keep personal LLM keys out of git and Docker images; use placeholders in `.env.example`; set `ENVIRONMENT=production` (disables SQL echo, validates CORS/`SECRET_KEY`); lock CORS via `CORS_ORIGINS`. Caddy terminates TLS. Migrations run on API container start.
 ## API Endpoints (in progress)
@@ -156,4 +162,4 @@ self_correcting_rag/
 
 ## License
 
-MIT
+Copyright © Nevin Sunil Oommen. Released under the MIT License.

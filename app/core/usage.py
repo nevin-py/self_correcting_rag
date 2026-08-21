@@ -12,10 +12,6 @@ from app.auth.models import UsageEvent
 from app.core.config import settings
 
 
-def _naive_utc_now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
-
-
 async def record_usage(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -26,33 +22,42 @@ async def record_usage(
     await db.commit()
 
 
-async def sum_usage_since(
+async def sum_usage_in_last(
     db: AsyncSession,
     user_id: uuid.UUID,
     kind: str,
-    since: datetime,
+    window: timedelta,
 ) -> int:
+    """Sum event amounts inside a trailing window on the DATABASE clock."""
     result = await db.execute(
         select(func.coalesce(func.sum(UsageEvent.amount), 0)).where(
             UsageEvent.user_id == user_id,
             UsageEvent.kind == kind,
-            UsageEvent.created_at >= since,
+            UsageEvent.created_at >= func.now() - window,
         )
     )
     return int(result.scalar_one() or 0)
 
 
-async def count_events_since(
+
+async def count_events_in_last(
     db: AsyncSession,
     user_id: uuid.UUID,
     kind: str,
-    since: datetime,
+    window: timedelta,
 ) -> int:
+    """Count events inside a trailing window measured on the DATABASE clock.
+
+    ``created_at`` is filled by the server (func.now(), DB-local naive time).
+    Comparing it against Python-side UTC breaks wherever the Postgres timezone
+    differs from UTC — hourly caps would silently never trigger. Doing the
+    arithmetic in SQL keeps both sides on the same clock.
+    """
     result = await db.execute(
         select(func.count()).select_from(UsageEvent).where(
             UsageEvent.user_id == user_id,
             UsageEvent.kind == kind,
-            UsageEvent.created_at >= since,
+            UsageEvent.created_at >= func.now() - window,
         )
     )
     return int(result.scalar_one() or 0)
@@ -61,8 +66,7 @@ async def count_events_since(
 async def enforce_query_rate(db: AsyncSession, user_id: uuid.UUID) -> None:
     from fastapi import HTTPException
 
-    since = _naive_utc_now() - timedelta(hours=1)
-    used = await count_events_since(db, user_id, "query", since)
+    used = await count_events_in_last(db, user_id, "query", timedelta(hours=1))
     if used >= settings.MAX_QUERIES_PER_HOUR:
         raise HTTPException(
             status_code=429,
@@ -73,8 +77,7 @@ async def enforce_query_rate(db: AsyncSession, user_id: uuid.UUID) -> None:
 async def enforce_tavily_budget(db: AsyncSession, user_id: uuid.UUID) -> None:
     from fastapi import HTTPException
 
-    since = _naive_utc_now() - timedelta(days=1)
-    used = await count_events_since(db, user_id, "tavily", since)
+    used = await count_events_in_last(db, user_id, "tavily", timedelta(days=1))
     if used >= settings.MAX_TAVILY_CALLS_PER_DAY:
         raise HTTPException(
             status_code=429,
@@ -87,8 +90,7 @@ async def enforce_ingest_budget(
 ) -> None:
     from fastapi import HTTPException
 
-    since = _naive_utc_now() - timedelta(days=1)
-    used = await sum_usage_since(db, user_id, "ingest_tokens", since)
+    used = await sum_usage_in_last(db, user_id, "ingest_tokens", timedelta(days=1))
     if used + tokens > settings.MAX_INGEST_TOKENS_PER_DAY:
         raise HTTPException(
             status_code=429,

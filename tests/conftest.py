@@ -55,39 +55,55 @@ async def client(db_session: tuple[AsyncSession, AsyncEngine]) -> AsyncGenerator
     app.dependency_overrides.clear()
 
 
+def _enable_fixed_otp() -> None:
+    """Force a deterministic OTP code so tests can complete email verification.
+
+    The real generator produces a random 6-digit code that is only emailed;
+    tests cannot read it. Patching the generator keeps the production flow
+    intact while making registration verifiable end-to-end.
+    """
+    from app.auth import otp as otp_module
+
+    otp_module._generate_code = lambda: "123456"
+
+
+_enable_fixed_otp()
+
+
+async def _register_verified(client: httpx.AsyncClient, email: str, password: str) -> dict:
+    """Register, verify via the fixed OTP, log in, and return identity + headers."""
+    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
+    assert resp.status_code == 201, f"Registration failed: {resp.text}"
+    resp = await client.post(
+        "/api/v1/auth/verify-email", json={"email": email, "code": "123456"}
+    )
+    assert resp.status_code == 200, f"Email verification failed: {resp.text}"
+    token = resp.json()["access_token"]
+    import jwt as pyjwt
+
+    from app.core.config import settings
+
+    user_id = pyjwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])["sub"]
+    return {"email": email, "password": password, "user_id": user_id, "token": token}
+
+
 @pytest_asyncio.fixture
 async def registered_user(client: httpx.AsyncClient) -> dict:
     email = f"test_{uuid.uuid4().hex[:8]}@example.com"
-    password = "testpassword123"
-    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
-    assert resp.status_code == 201, f"Registration failed: {resp.text}"
-    return {"email": email, "password": password, "user_id": resp.json()["user_id"]}
+    return await _register_verified(client, email, "testpassword123")
 
 
 @pytest_asyncio.fixture
 async def auth_headers(client: httpx.AsyncClient, registered_user: dict) -> dict:
-    resp = await client.post(
-        "/api/v1/auth/login",
-        data={"username": registered_user["email"], "password": registered_user["password"]},
-    )
-    assert resp.status_code == 200, f"Login failed: {resp.text}"
-    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    return {"Authorization": f"Bearer {registered_user['token']}"}
 
 
 @pytest_asyncio.fixture
 async def second_user(client: httpx.AsyncClient) -> dict:
     email = f"test2_{uuid.uuid4().hex[:8]}@example.com"
-    password = "testpassword456"
-    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
-    assert resp.status_code == 201
-    return {"email": email, "password": password, "user_id": resp.json()["user_id"]}
+    return await _register_verified(client, email, "testpassword456")
 
 
 @pytest_asyncio.fixture
 async def second_auth_headers(client: httpx.AsyncClient, second_user: dict) -> dict:
-    resp = await client.post(
-        "/api/v1/auth/login",
-        data={"username": second_user["email"], "password": second_user["password"]},
-    )
-    assert resp.status_code == 200
-    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    return {"Authorization": f"Bearer {second_user['token']}"}

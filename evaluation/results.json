@@ -1,0 +1,168 @@
+{
+  "timestamp": "2026-08-14T16:06:03.550832+00:00",
+  "judge_model": "xiaomi/mimo-v2.5",
+  "threshold": 0.3,
+  "total_cases": 5,
+  "passed": 0,
+  "failed": 5,
+  "avg_faithfulness": 0.0,
+  "avg_answer_relevancy": 0.0,
+  "avg_contextual_relevancy": 0.0,
+  "cases": [
+    {
+      "case_id": "squad-0",
+      "query": "Near what city in Sudan do many Somalis reside?",
+      "answer": "### Direct Answer\nMany Somalis reside near Khartoum in Sudan [E1].\n\n### Supporting Evidence\n- **Fact 1** [E1]: “Primarily concentrated in the north and Khartoum, the expatriate community mainly consists of students as well as some businesspeople.”  \n\n### Analysis & Caveats\n- **Confidence**: High – the source explicitly names Khartoum as the concentration point.\n- **Limitations**: None; the evidence directly answers the question.",
+      "passed": false,
+      "rag_latency_s": 44.0,
+      "total_latency_s": 44.03,
+      "scores": {
+        "faithfulness": {
+          "metric": "Faithfulness",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "answerrelevancy": {
+          "metric": "AnswerRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "contextualrelevancy": {
+          "metric": "ContextualRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        }
+      }
+    },
+    {
+      "case_id": "squad-1",
+      "query": "In what geographical portion of Sudan do some Somalis live?",
+      "answer": "I don't have enough reliable information to answer this question.",
+      "passed": false,
+      "rag_latency_s": 61.7,
+      "total_latency_s": 61.71,
+      "scores": {
+        "faithfulness": {
+          "metric": "Faithfulness",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "answerrelevancy": {
+          "metric": "AnswerRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "contextualrelevancy": {
+          "metric": "ContextualRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        }
+      }
+    },
+    {
+      "case_id": "squad-2",
+      "query": "Where did Truman Capote live in relation to Lee?",
+      "answer": "Could you specify which Lee you are referring to? For example, Lee Radziwill, Lee Harvey Oswald, or another Lee?",
+      "passed": false,
+      "rag_latency_s": 64.26,
+      "total_latency_s": 64.27,
+      "scores": {
+        "faithfulness": {
+          "metric": "Faithfulness",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "answerrelevancy": {
+          "metric": "AnswerRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "contextualrelevancy": {
+          "metric": "ContextualRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        }
+      }
+    },
+    {
+      "case_id": "squad-3",
+      "query": "What year did Lee and Capote go to Kansas together?",
+      "answer": "### Direct Answer\nHarper Lee and Truman Capote traveled together to Kansas in 1959 [E2].\n\n### Supporting Evidence\n- **Fact 1**: “In 1959, authors Truman Capote and Harper Lee ventured to western Kansas…” [E2].\n- **Fact 2**: “When Capote traveled to Kansas in 1959… Lee accompanied him as what he called his ‘assistant researchist.’” [E3].\n- **Fact 3**: “Lee accompanied Capote to Kansas for research into the 1959 murder of the Clutter family…” [E5].\n- **Fact 4**: “As the To Kill a Mockingbird manus",
+      "passed": false,
+      "rag_latency_s": 20.69,
+      "total_latency_s": 20.7,
+      "scores": {
+        "faithfulness": {
+          "metric": "Faithfulness",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "answerrelevancy": {
+          "metric": "AnswerRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "contextualrelevancy": {
+          "metric": "ContextualRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        }
+      }
+    },
+    {
+      "case_id": "squad-4",
+      "query": "What movie block shows silent films?",
+      "answer": "### Direct Answer\nThe “Silent Movie Week” programming block screens silent films — for example, MoMA’s fourth annual Silent Movie Week in July 2026 shows a lineup of classic silent titles [E1].\n\n### Supporting Evidence\n- **Fact 1** MoMA's fourth annual Silent Movie Week, running July 29–August 4, 2026, features a strong lineup of major silent films by directors such as D. W. Griffith, Buster Keaton, Charles Chaplin, Raoul Walsh, Ernst Lubitsch, John Ford, and F. W. Murnau [E1]\n- **Fact 2** [E3]:",
+      "passed": false,
+      "rag_latency_s": 17.8,
+      "total_latency_s": 17.82,
+      "scores": {
+        "faithfulness": {
+          "metric": "Faithfulness",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "answerrelevancy": {
+          "metric": "AnswerRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        },
+        "contextualrelevancy": {
+          "metric": "ContextualRelevancy",
+          "score": 0.0,
+          "threshold": 0.3,
+          "passed": false,
+          "reason": ""
+        }
+      }
+    }
+  ]
+}

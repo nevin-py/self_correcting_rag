@@ -1,4 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from sqlalchemy.orm import DeclarativeBase
 
@@ -19,9 +20,43 @@ _sql_echo = (
     if settings.ENVIRONMENT != "production"
     else False
 )
+
+_db_url = settings.DATABASE_URL
+_engine_kwargs: dict = {"echo": _sql_echo}
+_connect_args: dict = {}
+# Supabase transaction pooler (6543) does not support prepared-statement caching.
+if "pooler.supabase.com" in _db_url or ":6543/" in _db_url or _db_url.rstrip("/").endswith(":6543"):
+    _engine_kwargs["poolclass"] = NullPool
+    _connect_args["statement_cache_size"] = 0
+if "supabase.co" in _db_url or "supabase.com" in _db_url:
+    import ssl as _ssl
+
+    # Pooler presents an intermediate chain that fails default verify.
+    # Traffic is still TLS-encrypted (equivalent to sslmode=require).
+    _ctx = _ssl.create_default_context()
+    _ctx.check_hostname = False
+    _ctx.verify_mode = _ssl.CERT_NONE
+    _connect_args["ssl"] = _ctx
+
+def make_engine():
+    """Build a fresh engine with the same URL-specific tuning as the global one.
+
+    Used by health probes so they never touch the module-level engine — a
+    pooled asyncpg connection is bound to the event loop that created it and
+    fails intermittently under test runners or multiple workers.
+    """
+    return create_async_engine(
+        _db_url,
+        connect_args=_connect_args,
+        poolclass=NullPool,
+        **{"echo": _engine_kwargs["echo"]},
+    )
+
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=_sql_echo,
+    _db_url,
+    connect_args=_connect_args,
+    **_engine_kwargs,
 )
 
 AsyncLocalSession = async_sessionmaker(

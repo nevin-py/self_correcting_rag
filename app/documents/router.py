@@ -11,6 +11,7 @@ from app.core.usage import enforce_ingest_budget, record_usage
 from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats
+from app.agent.message_models import ChatMessage
 from app.documents.models import IngestionLog
 from app.documents.service import (
     full_pipeline,
@@ -24,6 +25,47 @@ from app.documents.schemas import IngestionLogResponse, IngestionStatusResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
+
+
+async def _record_ingest_message(session: AsyncSession, chat_id: uuid.UUID, filename: str) -> None:
+    """Persist an ingest event so later turns can scope to this file without keyword lists."""
+    from sqlalchemy import func
+
+    result = await session.execute(
+        select(func.coalesce(func.max(ChatMessage.sequence), 0)).where(ChatMessage.chat_id == chat_id)
+    )
+    next_seq = int(result.scalar_one() or 0) + 1
+    session.add(
+        ChatMessage(
+            chat_id=chat_id,
+            role="system",
+            content=f"Document ingested: {filename}",
+            sequence=next_seq,
+        )
+    )
+    await session.commit()
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+
+        with open("/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-287b18.log", "a") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "287b18",
+                        "hypothesisId": "H3",
+                        "location": "documents/router.py:_record_ingest_message",
+                        "message": "ingest notice persisted",
+                        "data": {"filename": filename, "sequence": next_seq},
+                        "timestamp": int(_time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
 
 
 async def _run_ingestion(
@@ -55,6 +97,8 @@ async def _run_ingestion(
                 log.status = "completed"
                 log.ingest_token_count = token_estimate
                 await session.commit()
+        async with AsyncLocalSession() as session:
+            await _record_ingest_message(session, chat_id, filename)
         async with AsyncLocalSession() as session:
             await record_usage(session, uid, "ingest_tokens", amount=token_estimate)
         logger.info("Ingestion completed: id=%s file=%s tokens=%s", ingestion_id, filename, token_estimate)

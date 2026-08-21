@@ -633,33 +633,48 @@ async def _embed_text_rate_limited(
 # ── Retrieval (scope-filtered, rate-limited) ─────────────────────────────────
 
 def _get_user_collection(user_id: uuid.UUID):
-    """Get the user's ChromaDB collection, trying new then old naming."""
+    """A1: Get the user's ChromaDB collection. Fail closed on lookup failure.
+
+    No implicit fallback to a different scope. If the user's collection doesn't
+    exist, return None — the caller must handle this as "no documents available".
+    """
     client = get_chroma_client()
     if client is None:
         return None
     user_hex = user_id.hex[:16]
-    new_name = f"user_{user_hex}"
+    collection_name = f"user_{user_hex}"
     try:
-        return client.get_collection(name=new_name)
+        return client.get_collection(name=collection_name)
     except Exception:
-        pass
-    old_name = f"chat_{user_hex[:12]}"
-    try:
-        return client.get_collection(name=old_name)
-    except Exception:
+        # A1: Fail closed — no fallback to chat-scoped or other collection
         return None
 
 
 def _build_scope_filter(
-    scope: str, chat_id: uuid.UUID | None = None
+    scope: str, chat_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None,
 ) -> dict | None:
-    """Build a ChromaDB where filter for scope-based retrieval."""
+    """A2: Build a ChromaDB where filter with owner predicate for defense-in-depth.
+
+    Every filter includes an explicit owner_user_id clause sourced from the
+    authenticated session, never from client-controlled input. This ensures
+    isolation even if collection naming assumptions break.
+    """
+    owner_clause = {"user_id": str(user_id)} if user_id else {}
     if scope == "permanent":
-        return {"scope": "permanent"}
+        permanent_filter = {"scope": "permanent"}
+        if owner_clause:
+            return {"$and": [permanent_filter, owner_clause]}
+        return permanent_filter
     if chat_id is not None:
-        return {"$and": [{"scope": "chat"}, {"chat_id": str(chat_id)}]}
-    # Cross-chat: all chat-scoped chunks, no chat_id filter
-    return {"scope": "chat"}
+        chat_filter = {"$and": [{"scope": "chat"}, {"chat_id": str(chat_id)}]}
+        if owner_clause:
+            return {"$and": [chat_filter, owner_clause]}
+        return chat_filter
+    # Cross-chat: all chat-scoped chunks with owner verification
+    chat_all = {"scope": "chat"}
+    if owner_clause:
+        return {"$and": [chat_all, owner_clause]}
+    return chat_all
 
 
 async def retrieve_chunks(
@@ -670,13 +685,18 @@ async def retrieve_chunks(
     chat_id: uuid.UUID | None = None,
     use_hybrid: bool = True,
 ) -> list[dict]:
-    """Retrieve chunks with hybrid (vector + BM25) or vector-only search."""
+    """Retrieve chunks with hybrid (vector + BM25) or vector-only search.
+
+    A1+A2: Collection resolved from user_id (fail closed). Filter includes
+    owner_user_id predicate for defense-in-depth isolation.
+    """
     collection = _get_user_collection(user_id)
     if collection is None:
         return []
 
     query_embedding = await _embed_text_rate_limited([query], task_type="search_query")
-    where_filter = _build_scope_filter(scope, chat_id)
+    # A2: Pass user_id for owner predicate in filter
+    where_filter = _build_scope_filter(scope, chat_id, user_id=user_id)
 
     # Use hybrid search (vector + BM25 fusion)
     if use_hybrid:
