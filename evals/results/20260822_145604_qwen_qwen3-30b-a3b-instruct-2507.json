@@ -1,0 +1,158 @@
+{
+ "results": [
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "The most recent FIFA World Cup, held in 2026, was won by France, who defeated Spain in the final on July 19, 2026 [E5]. The final score was France 2\u20131 Spain [E5]. This result is consistent with a Reuters survey of economists conducted in June 2026, which predicted a French victory [E5]. \n\nNote: While some evidence mentions a brawl after the final involving Argentina and Spain players [E2][E3][E4], this appears to be a fictional or speculative event, as the actual 2026 final was between France and Spain [E5]. The mention of Argentina and Spain in the context of a final is inconsistent with the confirmed outcome.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- Note: While some evidence mentions a brawl after the final involving Argentina and Spain players, this appears to be a fictional or speculative event, as the actual 2026 final was between France and Spain\n- The final score was France 2\u20131 Spain",
+   "final_status": "answered_with_caveats",
+   "latency_s": 15.4,
+   "claims_total": 9,
+   "claims_verified": 7,
+   "claims_unverified": 1,
+   "judge_score": 1,
+   "judge_reason": "The answer attempts to answer the question and includes citation placeholders, but provides likely incorrect information and contains internal inconsistencies."
+  },
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra [E1].",
+   "final_status": "answered",
+   "latency_s": 9.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct capital, Canberra, directly and completely."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India does not have an officially designated \"financial capital,\" but Mumbai is widely recognized as the country's primary financial and commercial hub. It hosts key institutions such as the Reserve Bank of India, the Bombay Stock Exchange, and the Securities and Exchange Board of India.\n\nIndia's nominal GDP was approximately USD 3.92 trillion in the fiscal year 2025\u201326 [E1]. This figure places India as the world's sixth-largest economy by nominal GDP, according to the IMF's April 2026 World Economic Outlook [E2].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- India does not have an officially designated \"financial capital,\" but Mumbai is widely recognized as the country's primary financial and commercial hub.\n- It hosts key institutions such as the Reserve Bank of India, the Bombay Stock Exchange, and the Securities and Exchange Board of India.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 10.0,
+   "claims_total": 6,
+   "claims_verified": 4,
+   "claims_unverified": 2,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Mumbai as the financial capital and gives a GDP estimate (~3.9\u202ftrillion USD) within the 3.5\u20114\u202ftrillion range."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize was awarded to Venezuelan opposition leader Maria Corina Machado, who was recognized for her role in reviving Venezuela's opposition movement [E4]. This award was announced in October 2025 [E7].",
+   "final_status": "answered",
+   "latency_s": 5.5,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 0,
+   "judge_reason": "The answer is incorrect about the winner and lacks proper source citations, failing to address the question accurately."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum in 1989 [E1]. It was first publicly released in February 1991 as version 0.9.0 [E2].",
+   "final_status": "answered",
+   "latency_s": 10.7,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 0,
+   "judge_reason": "The answer correctly identifies Guido\u00a0van\u00a0Ross\u2011\u00a0\u2026"
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "As of 2026, the European Union has 27 member states [E1]. This number has remained consistent since the United Kingdom's departure in 2020 [E1].",
+   "final_status": "answered",
+   "latency_s": 12.0,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states the EU has 27 member states, matching the ground truth, and provides a citation."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "NASA's Viking 1 spacecraft was the first to successfully land on Mars. It touched down on July 20, 1976 [E1]. Although the Soviet Mars 3 lander achieved a landing first, it lost contact almost immediately, making Viking 1 the first truly successful Mars lander [E2].",
+   "final_status": "answered",
+   "latency_s": 29.5,
+   "claims_total": 6,
+   "claims_verified": 6,
+   "claims_unverified": 0,
+   "judge_score": 1,
+   "judge_reason": "The answer incorrectly names NASA (USA) as the first, ignoring the Soviet Union's Mars\u202f3 which was the first successful landing per the reference."
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "The most recent Summer Olympic Games were hosted by Paris, France, in 2024 [E3].",
+   "final_status": "answered",
+   "latency_s": 18.3,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 3,
+   "judge_reason": "The answer correctly names Paris, France (2024) and is internally consistent, but the citation is a vague placeholder rather than a specific source."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "Google first claimed quantum supremacy in 2019 with its 53-qubit Sycamore quantum processor [E1].",
+   "final_status": "answered",
+   "latency_s": 5.3,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Google, the 53-qubit Sycamore processor, and the 2019 claim, fully matching the reference."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "The deepest known point in the ocean is Challenger Deep, located within the Mariana Trench in the western Pacific Ocean [E2]. Its depth has been measured multiple times, with various estimates ranging from approximately 10,900 meters to 11,034 meters [E8]. More precise measurements place it at 10,935 meters (35,843 feet) [E5], or 10,984 meters \u00b1 25 meters as recorded in 2014 [E8]. This depth is more than 1,000 times greater than sea level pressure and exceeds the height of Mount Everest by over a mile [E1][E11].",
+   "final_status": "answered",
+   "latency_s": 26.4,
+   "claims_total": 10,
+   "claims_verified": 10,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct location and depth range matching the reference answer, with additional accurate details."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "As of 2026, approximately 6 billion people worldwide use the internet [E1]. This figure represents 73.2 percent of the global population, according to Kepios' analysis of data from the ITU and GSMA Intelligence [E1].",
+   "final_status": "answered",
+   "latency_s": 12.0,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 4,
+   "judge_reason": "The answer gives a plausible approximate figure but overstates the reference estimate (6\u202fbillion vs roughly 5\u202fbillion+)."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "The Pfizer-BioNTech COVID-19 vaccine is an mRNA (messenger RNA) vaccine [E2].",
+   "final_status": "answered",
+   "latency_s": 6.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies the Pfizer-BioNTech vaccine as an mRNA vaccine, fully addressing the question."
+  }
+ ],
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 1,
+   "avg_lat": 2168.3,
+   "pt": 505,
+   "ct": 96
+  }
+ ]
+}

@@ -85,3 +85,8 @@ docker-compose.override.yml
 # Misc
 # ==============================================================================
 backups/
+
+# Eval/tooling artifacts
+.deepeval/
+.cursor/
+frontend/tsconfig.tsbuildinfo

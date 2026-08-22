@@ -55,7 +55,12 @@ logs:
 	$(COMPOSE) logs -f api
 
 test:
-	$(PY) -m pytest tests/ -q
+
+eval-live:
+	@echo "Usage: make eval-live MODELS='modelA,modelB' (judge: gpt-oss-120b)"
+	$(PY) -m evals.harness --models "$(MODELS)"
+
+test:
 
 eval:
 	$(PY) -m evals.run_eval

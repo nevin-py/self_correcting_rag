@@ -50,6 +50,7 @@ from app.agent.state import (
     utc_now,
 )
 from app.core.config import settings
+from app.observability import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ def _response_text(response: Any) -> str:
     return ""
 
 
-def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: int = 45):
+def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: int = 30):
     """Invoke with structured output; fall back to raw JSON parsing. Bounded by timeout."""
     import concurrent.futures
 
@@ -258,28 +259,48 @@ def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: in
         except Exception as exc:
             raise ValueError(f"LLM call failed: {exc}")
 
+def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_schema: Any, role: str = ""):
+    """Call primary LLM; on failure walk fallbacks with structured output.
 
-def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_schema: Any):
-    """Call primary LLM; on failure walk fallbacks with structured output."""
+    Every attempt is traced (model, latency, size, outcome) for observability.
+    """
     chain = [primary]
     if isinstance(fallbacks, (list, tuple)):
         chain.extend(fallbacks)
     elif fallbacks is not None:
         chain.append(fallbacks)
+    prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
     last_exc: Exception | None = None
     for idx, llm in enumerate(chain):
         if llm is None:
             continue
+        t0 = time.perf_counter()
         try:
-            return _structured_invoke(llm, messages, output_schema)
+            result = _structured_invoke(llm, messages, output_schema)
         except Exception as exc:
+            status = "timeout" if "timed out" in str(exc).lower() else "error"
+            tracing.record_llm_call(
+                role=role, llm=llm, attempt=idx + 1, status=status,
+                started_at=t0, ended_at=time.perf_counter(),
+                prompt_chars=prompt_chars, completion_chars=0,
+                error=str(exc)[:300],
+            )
             last_exc = exc
             logger.warning(
                 "LLM call failed (%s)%s", exc,
                 ", trying next" if idx < len(chain) - 1 else "",
             )
+            continue
+        completion_chars = len(result.model_dump_json()) if isinstance(result, BaseModel) else len(str(result))
+        tracing.record_llm_call(
+            role=role, llm=llm, attempt=idx + 1, status="ok",
+            started_at=t0, ended_at=time.perf_counter(),
+            prompt_chars=prompt_chars, completion_chars=completion_chars,
+        )
+        return result
     if last_exc:
         raise last_exc
+    raise RuntimeError("No LLM clients available")
 
 
 def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: int = 30):
@@ -338,21 +359,37 @@ def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: in
             raise ValueError(f"LLM call failed: {exc}")
 
 
+def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages: list, role: str = "generator") -> tuple[str, str]:
+    """Invoke chat models with multi-fallback. Returns (text, used_label_suffix).
 
-def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages: list) -> tuple[str, str]:
-    """Invoke chat models with multi-fallback. Returns (text, used_label_suffix)."""
+    Every attempt is traced for observability.
+    """
     chain = [primary, *list(fallbacks or ())]
+    prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
     last_exc: Exception | None = None
     for idx, llm in enumerate(chain):
         if llm is None:
             continue
+        t0 = time.perf_counter()
         try:
             response = llm.invoke(_prepare_messages(llm, messages))
             text = _response_text(response)
             if not text:
                 raise ValueError("Model returned empty response")
+            tracing.record_llm_call(
+                role=role, llm=llm, attempt=idx + 1, status="ok",
+                started_at=t0, ended_at=time.perf_counter(),
+                prompt_chars=prompt_chars, completion_chars=len(text),
+            )
             return text, ("primary" if idx == 0 else f"fallback-{idx}")
         except Exception as exc:
+            status = "timeout" if "timed out" in str(exc).lower() else "error"
+            tracing.record_llm_call(
+                role=role, llm=llm, attempt=idx + 1, status=status,
+                started_at=t0, ended_at=time.perf_counter(),
+                prompt_chars=prompt_chars, completion_chars=0,
+                error=str(exc)[:300],
+            )
             last_exc = exc
             logger.warning(
                 "Chat call failed (%s)%s", exc,
@@ -527,6 +564,8 @@ def classify_and_plan(state: dict) -> dict:
     (current date injected; temporal_focus extracted).
     """
     t0 = time.perf_counter()
+    tracing.set_trace_context(node="classify_and_plan", chat_id=state.get("chat_id"), user_id=state.get("user_id"))
+    tracing.set_trace_context(node="conversational_response", chat_id=state.get("chat_id"), user_id=state.get("user_id"))
     query = state.get("query_original") or state.get("query", "")
     temporal_context = _temporal_context(state)
 
@@ -553,7 +592,7 @@ def classify_and_plan(state: dict) -> dict:
     used = llms.label
     try:
         u: QueryUnderstanding = _llm_with_fallback(
-            llms.planner, llms.planner_fallbacks, messages, QueryUnderstanding
+            llms.planner, llms.planner_fallbacks, messages, QueryUnderstanding, role="planner"
         )
     except Exception as exc:
         # Honest safe default: treat as research, search everything with the raw query.
@@ -606,6 +645,7 @@ def route_after_classify(state: dict) -> str:
 
 def conversational_response(state: dict) -> dict:
     """Reply to small talk / meta questions directly (one small LLM call)."""
+    tracing.set_trace_context(node="conversational_response", chat_id=state.get("chat_id"), user_id=state.get("user_id"))
     query = state.get("query_original") or state.get("query", "")
     temporal_context = _temporal_context(state)
 
@@ -627,7 +667,7 @@ def conversational_response(state: dict) -> dict:
     ]
     llms = _resolve_llms(state)
     try:
-        answer, suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages)
+        answer, suffix = _invoke_chat(llms.generator, llms.generator_fallbacks, messages, role="conversational")
         used = f"{llms.label}+{suffix}"
     except Exception as exc:
         logger.warning("conversational_response LLM failed: %s", exc)
@@ -862,6 +902,7 @@ async def gather_evidence(state: dict) -> dict:
 def generate_answer(state: dict) -> dict:
     """Generate a cited answer from assembled evidence (chat history included)."""
     t0 = time.perf_counter()
+    tracing.set_trace_context(node="generate_answer", chat_id=state.get("chat_id"), user_id=state.get("user_id"))
     context = state.get("assembled_context", "")
     u = state.get("understanding")
 
@@ -946,6 +987,7 @@ def _verify_context(evidence: list[Evidence], cite_map: dict[str, str], max_char
 def verify_answer(state: dict) -> dict:
     """Mechanical citation check + one LLM judge call over the whole answer."""
     t0 = time.perf_counter()
+    tracing.set_trace_context(node="verify_answer", chat_id=state.get("chat_id"), user_id=state.get("user_id"))
     answer = state.get("answer", "")
     evidence: list[Evidence] = state.get("evidence", [])
     cite_map: dict[str, str] = state.get("cite_map") or {}
@@ -978,7 +1020,7 @@ def verify_answer(state: dict) -> dict:
             HumanMessage(content="Verify the answer now. Respond with the JSON verdict."),
         ]
         verdict = _llm_with_fallback(
-            llms.verifier, llms.verifier_fallbacks, messages, Verdict
+            llms.verifier, llms.verifier_fallbacks, messages, Verdict, role="verifier"
         )
         used = llms.label
     except Exception as exc:

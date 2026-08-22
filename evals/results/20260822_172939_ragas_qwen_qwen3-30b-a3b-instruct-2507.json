@@ -1,0 +1,95 @@
+{
+ "model": "qwen/qwen3-30b-a3b-instruct-2507",
+ "means": {
+  "faithfulness": 0.0,
+  "answer_relevancy": 0.772,
+  "context_precision": NaN,
+  "answer_correctness": NaN
+ },
+ "per_case": [
+  {
+   "id": "world-cup-latest",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9269146919250488,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "capital-australia",
+   "faithfulness": 0.0,
+   "answer_relevancy": 0.9999999403953552,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "india-capital-gdp",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.8348267674446106,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "nobel-peace-recent",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.0,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "python-creator",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9922425150871277,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "eu-members-count",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9779593348503113,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "mars-mission",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.8901287317276001,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "olympics-host",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9208669662475586,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "quantum-supremacy",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.0,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "deepest-ocean",
+   "faithfulness": NaN,
+   "answer_relevancy": 1.0,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "internet-users",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.8097477555274963,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "covid-vaccine-type",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9084717035293579,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  }
+ ]
+}

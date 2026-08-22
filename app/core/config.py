@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     # Soft context window for UI meter (tokens)
     CONTEXT_WINDOW_TOKENS: int = 128_000
 
+    # ── Observability (optional Langfuse export) ──
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

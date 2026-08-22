@@ -1,0 +1,159 @@
+{
+  "description": "Live eval cases: web-answerable questions run through the full pipeline. Grading = LLM judge (0-5) against expected_answer + required_elements, plus mechanical citation/claim stats from the pipeline itself.",
+  "cases": [
+    {
+      "id": "world-cup-latest",
+      "query": "Who won the most recent FIFA World Cup and what was the score?",
+      "expected_answer": "Argentina won the 2022 FIFA World Cup, beating France on penalties after a 3-3 final.",
+      "required_elements": [
+        "argentina",
+        "france"
+      ],
+      "tags": [
+        "current-events",
+        "sports"
+      ],
+      "grading": "evidence_faithful"
+    },
+    {
+      "id": "capital-australia",
+      "query": "What is the capital of Australia?",
+      "expected_answer": "Canberra.",
+      "required_elements": [
+        "canberra"
+      ],
+      "tags": [
+        "simple-fact"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "india-capital-gdp",
+      "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+      "expected_answer": "Mumbai is the financial capital; India's GDP is roughly 3.5-4 trillion USD.",
+      "required_elements": [
+        "mumbai"
+      ],
+      "tags": [
+        "economics",
+        "two-part"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "nobel-peace-recent",
+      "query": "What organization or person won the most recent Nobel Peace Prize?",
+      "expected_answer": "Varies by year; answer must name a real recent laureate consistent with search results.",
+      "required_elements": [],
+      "tags": [
+        "current-events",
+        "temporal"
+      ],
+      "grading": "evidence_faithful"
+    },
+    {
+      "id": "python-creator",
+      "query": "Who created the Python programming language and in what year was it first released?",
+      "expected_answer": "Guido van Rossum, first released in 1991.",
+      "required_elements": [
+        "guido van rossum",
+        "1991"
+      ],
+      "tags": [
+        "tech",
+        "simple-fact"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "eu-members-count",
+      "query": "How many member states are in the European Union?",
+      "expected_answer": "27 member states.",
+      "required_elements": [
+        "27"
+      ],
+      "tags": [
+        "politics",
+        "simple-fact"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "mars-mission",
+      "query": "Which country's spacecraft was the first to successfully land on Mars?",
+      "expected_answer": "The Soviet Union's Mars 3 in 1971 (first soft landing), though NASA's Viking 1 was the first fully successful mission in 1976.",
+      "required_elements": [
+        "mars"
+      ],
+      "tags": [
+        "space",
+        "nuanced"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "olympics-host",
+      "query": "Which city hosted the most recent Summer Olympic Games?",
+      "expected_answer": "Paris hosted the 2024 Summer Olympics.",
+      "required_elements": [
+        "paris"
+      ],
+      "tags": [
+        "current-events",
+        "temporal"
+      ],
+      "grading": "evidence_faithful"
+    },
+    {
+      "id": "quantum-supremacy",
+      "query": "Which company first claimed quantum supremacy and with what processor?",
+      "expected_answer": "Google, with the 53-qubit Sycamore processor, in 2019.",
+      "required_elements": [
+        "google",
+        "sycamore"
+      ],
+      "tags": [
+        "tech"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "deepest-ocean",
+      "query": "What is the deepest known point in the ocean and how deep is it?",
+      "expected_answer": "Challenger Deep in the Mariana Trench, about 10,900-11,000 meters deep.",
+      "required_elements": [
+        "challenger deep",
+        "mariana"
+      ],
+      "tags": [
+        "geography"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "internet-users",
+      "query": "Approximately how many people worldwide use the internet today?",
+      "expected_answer": "Roughly 5 billion+ internet users as of recent years.",
+      "required_elements": [
+        "billion"
+      ],
+      "tags": [
+        "statistics",
+        "approximate"
+      ],
+      "grading": "reference"
+    },
+    {
+      "id": "covid-vaccine-type",
+      "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+      "expected_answer": "An mRNA vaccine.",
+      "required_elements": [
+        "mrna"
+      ],
+      "tags": [
+        "health"
+      ],
+      "grading": "reference"
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+ "results": [
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "Spain won the most recent FIFA World Cup, defeating Argentina 1\u20110 after extra time in the 2026 final[E2][E4][E8].",
+   "final_status": "answered",
+   "latency_s": 50.9,
+   "claims_total": 3,
+   "claims_verified": 3,
+   "claims_unverified": 0,
+   "judge_score": 0,
+   "judge_reason": "The answer incorrectly names Spain as the winner and gives a fictional 2026 result, contradicting the factual 2022 Argentina victory."
+  },
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra. [E2]",
+   "final_status": "answered",
+   "latency_s": 39.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states Canberra as the capital, fully addressing the question."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "The financial capital is not specified in the given sources.  \nIndia's approximate GDP size is about $3.96 trillion USD as of 2025 [E2].",
+   "final_status": "answered_with_caveats",
+   "latency_s": 82.6,
+   "claims_total": 3,
+   "claims_verified": 3,
+   "claims_unverified": 0,
+   "judge_score": 2,
+   "judge_reason": "Provided a correct GDP estimate but failed to name Mumbai as India's financial capital, omitting a core part of the answer."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "- According to E1 (2025-10-07), the winner of the 2025 Nobel Peace Prize will be announced on Friday in Oslo. [E1]  \n- According to E2 (2026-01-30), the Norwegian Nobel Committee said digital espionage was likely behind the early uncovering of the 2025 Nobel Peace Prize winner's name. [E2]  \n- The evidence does not provide the actual name of the person or organization that won the 2025 Nobel Peace Prize. [E1][E2]  \n\nBecause the sources only reference the upcoming announcement and a possible leak, they do not identify the winner, so the most recent Nobel Peace Prize laureate cannot be determined from the given evidence.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- Because the sources only reference the upcoming announcement and a possible leak, they do not identify the winner, so the most recent Nobel Peace Prize laureate cannot be determined from the given evidence.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 36.9,
+   "claims_total": 7,
+   "claims_verified": 6,
+   "claims_unverified": 1,
+   "judge_score": 1,
+   "judge_reason": "The answer fails to provide the name of the most recent Nobel Peace Prize laureate, offering only speculation about lack of evidence, thus not answering the core question."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "Guido van Rossum created the Python programming language. [E1]  \nIt was first released in 1991. [E1]",
+   "final_status": "answered",
+   "latency_s": 74.6,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states Guido van Rossum as the creator and 1991 as the release year, fully addressing the question."
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "As of 2026, the European Union has 27 member states. [E1]",
+   "final_status": "answered",
+   "latency_s": 35.5,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states the EU has 27 member states, matching the ground truth."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "The Soviet Union's Mars\u202f3 spacecraft achieved the first soft landing on Mars on December\u202f2,\u202f1971, returning data for about\u202f20\u202fseconds before contact was lost. [E4][E5]  \nNASA's Viking\u202f1 lander made the first truly successful landing on Mars on July\u202f20,\u202f1976, operating for an extended period after touchdown. [E3][E8]",
+   "final_status": "answered",
+   "latency_s": 59.2,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies the Soviet Union's Mars\u202f3 as the first soft landing and notes Viking\u202f1 as the first fully successful mission, matching the reference."
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "Paris, France hosted the most recent Summer Olympic Games in 2024.[E6][E10]",
+   "final_status": "answered",
+   "latency_s": 24.2,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Paris as the host of the most recent Summer Olympics in 2024."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "Google first claimed quantum supremacy in October 2019 with its 53\u2011qubit Sycamore processor, stating it completed a task in 200 seconds that would take classical supercomputers about 10,000 years.[E4][E5]",
+   "final_status": "answered",
+   "latency_s": 36.1,
+   "claims_total": 5,
+   "claims_verified": 5,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Google and its 53-qubit Sycamore processor as the first claim of quantum supremacy."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "The deepest known point in the ocean is the Challenger Deep in the Mariana Trench, reaching a depth of 10,935\u202fmeters (35,876\u202ffeet) below sea level. [E1]",
+   "final_status": "answered",
+   "latency_s": 30.6,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct location and a precise depth within the accepted range."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "As of 2026, estimates range from about 5.6\u202fbillion to 6.12\u202fbillion internet users worldwide [E3][E4]. These figures refer to the 2026 period.",
+   "final_status": "answered",
+   "latency_s": 37.0,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides an accurate, up-to-date estimate (5.6\u20116.1\u202fbillion) that aligns with the reference\u2019s ~5\u202fbillion+ figure, directly answering the question."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "Pfizer\u2011BioNTech developed an mRNA vaccine for COVID\u201119. [E3]",
+   "final_status": "answered",
+   "latency_s": 50.9,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies the vaccine as an mRNA vaccine, directly answering the question."
+  }
+ ],
+ "traces": [
+  {
+   "model": "nvidia/nemotron-3-super-120b-a12b:free",
+   "status": "ok",
+   "n": 1,
+   "avg_lat": 24824.2,
+   "pt": 505,
+   "ct": 73
+  }
+ ]
+}

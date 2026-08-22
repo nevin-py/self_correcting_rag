@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import delete as sql_delete
+from sqlalchemy import case as sql_case, delete as sql_delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -1123,6 +1123,69 @@ async def get_chat_usage(
         interaction_count=int(count or 0),
         chat_id=chat_id,
     )
+
+
+@router.get("/llm-traces")
+async def get_llm_traces(
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recent LLM call traces + per-model aggregates (latency, tokens, error rate)."""
+    from app.observability.models import LLMCallTrace
+
+    recent = (await db.execute(
+        select(LLMCallTrace)
+        .order_by(LLMCallTrace.created_at.desc())
+        .limit(limit)
+    )).scalars().all()
+
+    agg_rows = (await db.execute(
+        select(
+            LLMCallTrace.role,
+            LLMCallTrace.model,
+            func.count().label("calls"),
+            func.sum(func.cast(LLMCallTrace.status == "ok", sa.Integer)).label("ok"),
+            func.avg(LLMCallTrace.latency_ms).label("avg_latency"),
+            func.sum(LLMCallTrace.prompt_tokens_est).label("prompt_tokens"),
+            func.sum(LLMCallTrace.completion_tokens_est).label("completion_tokens"),
+            func.sum(sql_case((LLMCallTrace.status == "ok", 1), else_=0)).label("ok"),
+        )
+        .group_by(LLMCallTrace.role, LLMCallTrace.model)
+        .order_by(func.count().desc())
+    )).all()
+
+    return {
+        "aggregates": [
+            {
+                "role": r.role,
+                "model": r.model,
+                "calls": int(r.calls),
+                "ok": int(r.ok or 0),
+                "error_rate": round(1 - (int(r.ok or 0) / int(r.calls)), 3) if r.calls else 0,
+                "avg_latency_ms": round(float(r.avg_latency or 0), 1),
+                "prompt_tokens_est": int(r.prompt_tokens or 0),
+                "completion_tokens_est": int(r.completion_tokens or 0),
+            }
+            for r in agg_rows
+        ],
+        "recent": [
+            {
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "role": t.role,
+                "node": t.node,
+                "provider": t.provider,
+                "model": t.model,
+                "attempt": t.attempt,
+                "status": t.status,
+                "latency_ms": t.latency_ms,
+                "prompt_tokens_est": t.prompt_tokens_est,
+                "completion_tokens_est": t.completion_tokens_est,
+                "error": (t.error or "")[:160],
+            }
+            for t in recent
+        ],
+    }
 
 
 @router.get("/context-window")

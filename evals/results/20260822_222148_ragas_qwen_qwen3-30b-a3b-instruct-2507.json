@@ -1,0 +1,95 @@
+{
+ "model": "qwen/qwen3-30b-a3b-instruct-2507",
+ "means": {
+  "faithfulness": NaN,
+  "answer_relevancy": 0.905,
+  "context_precision": NaN,
+  "answer_correctness": NaN
+ },
+ "per_case": [
+  {
+   "id": "world-cup-latest",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "capital-australia",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9539934992790222,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "india-capital-gdp",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "nobel-peace-recent",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "python-creator",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "eu-members-count",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "mars-mission",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "olympics-host",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9325340390205383,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "quantum-supremacy",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.8301246166229248,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "deepest-ocean",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "internet-users",
+   "faithfulness": NaN,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "covid-vaccine-type",
+   "faithfulness": NaN,
+   "answer_relevancy": 0.9040132761001587,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  }
+ ]
+}

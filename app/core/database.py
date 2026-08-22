@@ -12,6 +12,7 @@ class Base(DeclarativeBase):
 import app.auth.models  # noqa: E402, F401
 import app.agent.models  # noqa: E402, F401
 import app.agent.message_models  # noqa: E402, F401
+import app.observability.models  # noqa: E402, F401
 import app.documents.models  # noqa: E402, F401
 
 

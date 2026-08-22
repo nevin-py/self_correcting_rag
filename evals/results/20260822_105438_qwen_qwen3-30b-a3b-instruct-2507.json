@@ -1,0 +1,158 @@
+{
+ "results": [
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "Spain won the most recent FIFA World Cup, defeating Argentina 1\u20130 after extra time in the final on July 19, 2026 [E1]. The winning goal was scored by substitute Ferran Torres in extra time [E1]. The match took place at MetLife Stadium in New Jersey [E5]. Spain dominated possession, outshooting Argentina 20\u20133, but the game remained goalless until Torres' decisive strike [E10].",
+   "final_status": "answered",
+   "latency_s": 53.5,
+   "claims_total": 8,
+   "claims_verified": 8,
+   "claims_unverified": 0,
+   "judge_score": 0,
+   "judge_reason": "The answer incorrectly states Spain won a future 2026 World Cup, whereas the correct winner is Argentina in 2022, making the response entirely wrong."
+  },
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra [E1]. It was specifically chosen as a compromise between Sydney and Melbourne, which were competing to be the national capital after Australia's federation in 1901 [E5]. Canberra became the official seat of government in 1913, and Parliament House was opened in 1927, marking the official transfer of the capital from Melbourne [E7]. Canberra is located in the Australian Capital Territory (ACT) and is the largest inland city in Australia [E3].",
+   "final_status": "answered",
+   "latency_s": 25.1,
+   "claims_total": 8,
+   "claims_verified": 8,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct capital (Canberra) and includes accurate supporting details."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai [E10].  \n\nIndia's nominal GDP was approximately USD 3.92 trillion in the fiscal year 2025\u201326 [E2]. Some sources project India's GDP at USD 4.1 trillion in 2026 [E7], while another estimates it at USD 4.2 trillion by the end of 2026 [E3]. These figures reflect different projections and reporting periods, with the most recent official data citing USD 3.92 trillion for 2025\u201326 [E2].",
+   "final_status": "answered",
+   "latency_s": 25.2,
+   "claims_total": 9,
+   "claims_verified": 9,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Correctly identifies Mumbai and provides a GDP figure (~3.9\u202ftrillion USD) that falls within the 3.5\u20114\u202ftrillion USD range."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize, awarded in 2025, was won by Venezuelan opposition leader Mar\u00eda Corina Machado [E12]. She received the prize for her tireless work promoting democratic rights in Venezuela and her struggle to achieve a peaceful transition from dictatorship to democracy [E7]. The announcement was made on 10 October 2025 [E12], and she traveled to Oslo to receive the award despite threats from Venezuelan leaders [E12].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The most recent Nobel Peace Prize, awarded in 2025, was won by Venezuelan opposition leader Mar\u00eda Corina Machado\n- She received the prize for her tireless work promoting democratic rights in Venezuela and her struggle to achieve a peaceful transition from dictatorship to democracy\n- The announcement was made on 10 October 2025\n- she traveled to Oslo to receive the award despite threats from Venezuelan leaders",
+   "final_status": "answered_with_caveats",
+   "latency_s": 35.8,
+   "claims_total": 7,
+   "claims_verified": 3,
+   "claims_unverified": 0,
+   "judge_score": 0,
+   "judge_reason": "The assistant fabricated a 2025 laureate (Mar\u00eda Corina Machado) which is not the actual most recent Nobel Peace Prize winner, making the answer incorrect."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum [E1]. It was first released on February 20, 1991 [E4].",
+   "final_status": "answered",
+   "latency_s": 21.7,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Guido van Rossum as the creator and states the correct release year (1991)."
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "As of 2026, the European Union has 27 member states [E1]. This number has remained unchanged since the United Kingdom's departure on 31 January 2020 [E2].",
+   "final_status": "answered",
+   "latency_s": 16.3,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states the EU has 27 member states, directly matching the ground truth."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "The first spacecraft to successfully land on Mars was the Soviet Union's Mars 3, which achieved a soft landing on December 2, 1971 [E4]. However, it transmitted data for only about 14.5 seconds before failing, sending back a blank, featureless grey image [E8]. \n\nThe first successful Mars lander to operate for a significant duration and return meaningful scientific data was NASA's Viking 1, which landed on July 20, 1976 [E4].",
+   "final_status": "answered",
+   "latency_s": 26.2,
+   "claims_total": 6,
+   "claims_verified": 6,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Accurately identifies the Soviet Union's Mars 3 as the first successful Mars landing and notes Viking 1's later full success, matching the reference."
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "The most recent Summer Olympic Games were hosted by Paris, France [E1]. The Games took place from 26 July to 11 August 2024 [E4].",
+   "final_status": "answered",
+   "latency_s": 15.4,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Paris as the host of the most recent Summer Olympics and provides supporting details."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "Google first claimed quantum supremacy in 2019 with its 53-qubit superconducting Sycamore processor [E1]. The company reported that the Sycamore processor completed a random circuit sampling task in 200 seconds, a computation they estimated would take the world\u2019s most powerful classical supercomputer, Summit, about 10,000 years [E7]. This claim was published in the journal Nature [E7].",
+   "final_status": "answered",
+   "latency_s": 29.3,
+   "claims_total": 6,
+   "claims_verified": 6,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct company, processor, and year, fully answering the question."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "The deepest known point in the ocean is Challenger Deep, located within the Mariana Trench in the western Pacific Ocean [E3]. The depth of Challenger Deep has been measured with varying results over time:\n\n- A 2010 sonar survey by the University of New Hampshire, reported by NOAA, measured the depth at 10,994 meters (36,070 feet) with an estimated vertical accuracy of \u00b140 meters [E5].\n- A 2021 analysis based on submersible dives conducted in June 2020 recorded the deepest observed seafloor depth at 10,935 meters, plus or minus six meters [E12].\n- Other measurements, such as 10,973 meters (36,000 feet) and 10,984 meters (36,037 feet), have also been cited in various sources [E1][E10].\n\nThese discrepancies reflect differences in measurement methods and the dynamic nature of the ocean floor, which can change over time due to tectonic activity and sedimentation [E7]. The most recent direct observation places the depth at approximately 10,935 meters [E12].",
+   "final_status": "answered",
+   "latency_s": 31.7,
+   "claims_total": 13,
+   "claims_verified": 13,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Correctly identifies Challenger Deep and provides depth within the accepted 10,900\u201111,000\u202fm range."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "As of April 2026, approximately 6.12 billion people worldwide use the internet, representing 73.8% of the global population [E2]. This figure is supported by multiple sources, including DataReportal and Axis Intelligence, which report similar numbers for the same period [E3][E4].",
+   "final_status": "answered",
+   "latency_s": 20.8,
+   "claims_total": 5,
+   "claims_verified": 5,
+   "claims_unverified": 0,
+   "judge_score": 1,
+   "judge_reason": "The answer gives an inflated figure (6.12\u202fbillion) that deviates substantially from the reference estimate of roughly 5\u202fbillion+ users."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "Pfizer-BioNTech developed an mRNA-based vaccine for COVID-19, known as Comirnaty (BNT162b2) [E2]. This vaccine uses nucleoside-modified mRNA (modRNA) that encodes a mutated form of the SARS-CoV-2 spike protein, encapsulated in lipid nanoparticles [E2]. It delivers genetic instructions to human cells to temporarily produce the spike protein, triggering an immune response [E5].",
+   "final_status": "answered",
+   "latency_s": 19.7,
+   "claims_total": 6,
+   "claims_verified": 6,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Correctly identifies the vaccine as mRNA-based and provides accurate supporting details."
+  }
+ ],
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 1,
+   "avg_lat": 9617.5,
+   "pt": 505,
+   "ct": 98
+  }
+ ]
+}
