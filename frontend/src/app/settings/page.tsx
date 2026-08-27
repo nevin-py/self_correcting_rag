@@ -11,6 +11,21 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/utils";
 
+// Narrow an axios/exception error to its API `detail` string without trusting
+// the error's shape via an unchecked inline cast.
+function errDetail(err: unknown): string | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const r = (err as { response?: unknown }).response;
+  if (!r || typeof r !== "object") return undefined;
+  const data = (r as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return undefined;
+  if ("detail" in data) {
+    const d = (data as { detail: unknown }).detail;
+    return typeof d === "string" ? d : undefined;
+  }
+  return undefined;
+}
+
 const ROUTING_PROVIDERS = [
   { id: "auto", label: "AUTO", desc: "Uses whichever user or server keys exist (Groq → Google → OpenRouter)" },
   { id: "groq", label: "GROQ", desc: "Require Groq key (user Settings or server env)" },
@@ -40,9 +55,12 @@ export default function SettingsPage() {
     return localStorage.getItem("llm_provider") || "auto";
   });
   const [providerRows, setProviderRows] = useState<ProviderSettings[]>([]);
-  const [editProvider, setEditProvider] = useState<(typeof KEY_PROVIDERS)[number]>("openrouter");
+  const [editProvider, setEditProvider] = useState<string>("openrouter");
   const [apiKey, setApiKey] = useState("");
   const [fallbackKey, setFallbackKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [clientFamily, setClientFamily] = useState("openai");
+  const [newProviderName, setNewProviderName] = useState("");
   const [plannerModel, setPlannerModel] = useState("");
   const [generatorModel, setGeneratorModel] = useState("");
   const [verifierModel, setVerifierModel] = useState("");
@@ -77,6 +95,8 @@ export default function SettingsPage() {
     setPlannerModel(row.planner_model || row.default_planner_model);
     setGeneratorModel(row.generator_model || row.default_generator_model);
     setVerifierModel(row.verifier_model || row.default_verifier_model);
+    setBaseUrl(row.base_url || "");
+    setClientFamily(row.client_family || "openai");
     setApiKey("");
     setFallbackKey("");
   }, [editProvider, providerRows]);
@@ -94,7 +114,9 @@ export default function SettingsPage() {
         planner_model: plannerModel,
         generator_model: generatorModel,
         verifier_model: verifierModel,
+        client_family: clientFamily,
       };
+      if (baseUrl.trim()) body.base_url = baseUrl.trim();
       if (apiKey.trim()) body.api_key = apiKey.trim();
       if (fallbackKey.trim()) body.fallback_api_key = fallbackKey.trim();
       const res = await settingsApi.upsertProvider(editProvider, body);
@@ -105,11 +127,37 @@ export default function SettingsPage() {
       setFallbackKey("");
       setProviderMsg("Saved (keys stored encrypted; only masked values are shown).");
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err.response as { data?: { detail?: string } })?.data?.detail
-          : undefined;
+      const detail = errDetail(err);
       setProviderErr(detail || "Save failed");
+    }
+  };
+
+  const addProvider = () => {
+    const name = newProviderName.trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "");
+    if (!name) return;
+    setEditProvider(name);
+    setApiKey("");
+    setFallbackKey("");
+    setBaseUrl("");
+    setClientFamily("openai");
+    setPlannerModel("");
+    setGeneratorModel("");
+    setVerifierModel("");
+    setNewProviderName("");
+  };
+
+  const clearFallback = async () => {
+    setProviderMsg("");
+    setProviderErr("");
+    try {
+      await settingsApi.upsertProvider(editProvider, { clear_fallback: true });
+      const res = await settingsApi.listProviders();
+      setProviderRows(res.data.providers);
+      setFallbackKey("");
+      setProviderMsg("Fallback key cleared.");
+    } catch (err) {
+      const detail = errDetail(err);
+      setProviderErr(detail || "Clear fallback failed");
     }
   };
 
@@ -122,10 +170,7 @@ export default function SettingsPage() {
       setProviderRows(res.data.providers);
       setProviderMsg("Provider keys cleared.");
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err.response as { data?: { detail?: string } })?.data?.detail
-          : undefined;
+      const detail = errDetail(err);
       setProviderErr(detail || "Clear failed");
     }
   };
@@ -266,8 +311,8 @@ export default function SettingsPage() {
                   OpenRouter, Google, and Groq keys are encrypted at rest. Tavily and Nomic remain
                   system-configured.
                 </p>
-                <div className="flex gap-2">
-                  {KEY_PROVIDERS.map((p) => (
+                <div className="flex gap-2 flex-wrap">
+                  {Array.from(new Set([...KEY_PROVIDERS, ...providerRows.map((p) => p.provider)])).map((p) => (
                     <button
                       key={p}
                       onClick={() => setEditProvider(p)}
@@ -279,6 +324,16 @@ export default function SettingsPage() {
                       {p}
                     </button>
                   ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Add provider id (e.g. deepseek, mistral, anthropic)"
+                    value={newProviderName}
+                    onChange={(e) => setNewProviderName(e.target.value)}
+                  />
+                  <Button variant="ghost" size="md" onClick={addProvider}>
+                    Add
+                  </Button>
                 </div>
                 {selectedRow && (
                   <p className="font-mono text-[10px] text-text-muted">
@@ -298,6 +353,22 @@ export default function SettingsPage() {
                   value={fallbackKey}
                   onChange={(e) => setFallbackKey(e.target.value)}
                 />
+                <div className="flex gap-2">
+                  <select
+                    value={clientFamily}
+                    onChange={(e) => setClientFamily(e.target.value)}
+                    className="border border-border bg-surface px-3 py-2 font-mono text-xs text-text-primary"
+                  >
+                    <option value="openai">openai-compatible</option>
+                    <option value="anthropic">anthropic</option>
+                    <option value="ollama">ollama (local)</option>
+                  </select>
+                  <Input
+                    placeholder="Base URL (custom OpenAI-compatible endpoint)"
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                  />
+                </div>
                 <Input
                   placeholder="Planner model"
                   value={plannerModel}
@@ -318,6 +389,9 @@ export default function SettingsPage() {
                 <div className="flex gap-2">
                   <Button variant="accent" size="md" onClick={saveProviderKeys}>
                     Save
+                  </Button>
+                  <Button variant="ghost" size="md" onClick={clearFallback}>
+                    Clear fallback
                   </Button>
                   <Button variant="ghost" size="md" onClick={clearProvider}>
                     Clear keys

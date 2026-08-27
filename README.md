@@ -10,49 +10,37 @@ An agentic retrieval-augmented generation system with built-in hallucination det
 User Query
     │
     ▼
-┌─────────────────────┐
-│  Initial Retrieval   │  ← ChromaDB vector search (top-k chunks)
-└─────────┬───────────┘
-          ▼
-┌─────────────────────┐
-│      Planner        │  ← LLM decides: evidence sufficient?
-└────┬───────────┬────┘
-     │           │
-  sufficient   not enough
-     │           │
-     │           ▼
-     │  ┌─────────────────┐
-     │  │  Search Tools    │  ← Wikipedia + Tavily + Vector re-retrieval
-     │  └────────┬────────┘
-     │           │
-     │           ▼
-     │     (back to Planner)
-     │
-     ▼
-┌─────────────────────┐
-│  Answer Generation   │  ← LLM generates response from evidence
-└─────────┬───────────┘
-          ▼
-┌─────────────────────────┐
-│  Hallucination Checker   │  ← LLM verifies claims against evidence
-└────┬───────────────┬────┘
-     │               │
-  factual        hallucinated
-     │               │
-     ▼               ▼
-   [END]       (back to Planner)
+classify_and_plan ──► conversational_response ──► END      (small talk / meta)
+    │
+    ├──► ask_clarification ─────────────────────────► END   (genuinely ambiguous)
+    │
+    ▼
+gather_evidence  ◄── Chroma hybrid (per-chat) + web (SearXNG → Wikipedia → Tavily),
+    │                  FlashRank cross-encoder rerank, token-budgeted context
+    ▼
+generate_answer ◄── cited generation from assembled evidence only ([E1..En])
+    │
+    ▼
+verify_answer ◄── deterministic citation validation + support gate (local MiniLM),
+    │             then one structured LLM judge verdict
+    │
+    ├─ unsupported but fixable ──► repair loop: gather ► generate ► verify (bounded)
+    ├─ contradicted / unresolvable ──► answer + Caveats
+    └─ clean ──────────────────────► answered
 ```
 
 ## Tech Stack
-
-- **FastAPI** — async web framework
-- **LangGraph** — stateful agent orchestration
-- **Groq (LLaMA 3)** — fast LLM inference for planning, generation, and verification
-- **ChromaDB** — local vector storage for document embeddings
-- **Nomic Embed** — text embedding API
-- **Tavily** — AI-optimized web search
-- **PostgreSQL + SQLAlchemy** — user auth, chat history, observability logging
-- **Docker** — containerized deployment
+- **FastAPI** — async web framework (SSE + WebSocket streaming)
+- **LangGraph** — stateful agent orchestration (`classify_and_plan → gather_evidence → generate_answer → verify_answer`, bounded repair loop)
+- **OpenRouter / Google AI / Groq** — pluggable LLM providers with per-role models, fallback chains, and per-user encrypted keys; free-tier friendly defaults
+- **ChromaDB** — per-chat vector storage + BM25 hybrid retrieval over uploaded documents
+- **Nomic Embed** — text embedding API for ingestion
+- **FlashRank** — local cross-encoder reranking of assembled evidence
+- **SearXNG (self-hosted) → Wikipedia → Tavily** — layered web search with per-user daily budgets
+- **MiniLM support gate** — local-embedding entailment check demoting cited claims their evidence doesn't support (`app/agent/support.py`)
+- **PostgreSQL + SQLAlchemy + Alembic** — user auth (OTP), chat history, per-LLM-call tracing
+- **Next.js frontend** — streaming chat UI with pipeline tracker and provenance panels
+- **Docker** — containerized deployment (Caddy TLS, Cloud Run / Oracle+Vercel guides)
 
 ## Supported File Types
 
@@ -107,7 +95,8 @@ docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
 **Split deploy (Oracle Cloud API + Vercel frontend):** see [docs/DEPLOY_ORACLE_VERCEL.md](docs/DEPLOY_ORACLE_VERCEL.md).
 
 **Production:** keep personal LLM keys out of git and Docker images; use placeholders in `.env.example`; set `ENVIRONMENT=production` (disables SQL echo, validates CORS/`SECRET_KEY`); lock CORS via `CORS_ORIGINS`. Caddy terminates TLS. Migrations run on API container start.
-## API Endpoints (in progress)
+
+## API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

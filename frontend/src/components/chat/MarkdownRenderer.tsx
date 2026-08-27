@@ -18,7 +18,17 @@ function cleanLLMOutput(text: string): string {
 }
 
 const PROSE =
-  "prose prose-invert prose-sm max-w-none prose-headings:font-display prose-headings:text-text-primary prose-headings:font-semibold prose-headings:tracking-tight prose-p:text-text-primary prose-p:leading-relaxed prose-strong:text-text-primary prose-a:text-accent-bright prose-a:underline prose-a:underline-offset-2 hover:prose-a:text-accent prose-code:font-mono prose-code:text-accent-bright prose-code:bg-surface-inset prose-code:px-1 prose-code:py-0.5 prose-code:text-xs prose-pre:bg-surface-inset prose-pre:border prose-pre:border-border prose-th:border prose-th:border-border prose-th:px-3 prose-th:py-2 prose-th:bg-surface-inset prose-th:text-text-primary prose-td:border prose-td:border-border prose-td:px-3 prose-td:py-2 prose-li:text-text-primary prose-blockquote:border-l-accent prose-blockquote:text-text-secondary prose-blockquote:not-italic";
+  "prose prose-invert max-w-none " +
+  // Readability: body copy 15px/1.7, sans — the gothic display font never
+  // touches message content, including markdown headings inside an answer.
+  "prose-p:text-[15px] prose-p:leading-[1.7] prose-p:text-text-primary " +
+  "prose-headings:font-body prose-headings:text-text-primary prose-headings:font-semibold " +
+  "prose-h1:text-[19px] prose-h2:text-[17px] prose-h3:text-[16px] " +
+  "prose-strong:text-text-primary prose-strong:font-semibold " +
+  "prose-a:text-accent-bright prose-a:no-underline hover:prose-a:underline " +
+  "prose-li:text-[15px] prose-li:leading-[1.65] prose-ul:my-2 prose-ol:my-2 " +
+  "prose-blockquote:border-l-2 prose-blockquote:border-accent prose-blockquote:text-text-secondary ";
+
 
 export default function MarkdownRenderer({
   content,
@@ -54,11 +64,14 @@ export default function MarkdownRenderer({
               );
             }
             return (
-              <pre className="my-3 overflow-x-auto border border-border p-4">
-                <code className="font-mono text-xs text-text-secondary" {...props}>
-                  {children}
-                </code>
-              </pre>
+              <div className="my-3 overflow-hidden rounded-md border border-border bg-surface-inset">
+                <div className="h-px w-full border-t border-accent/70" aria-hidden="true" />
+                <pre className="overflow-x-auto p-3">
+                  <code className="font-mono text-[13.5px] leading-relaxed text-text-secondary" {...props}>
+                    {children}
+                  </code>
+                </pre>
+              </div>
             );
           },
           // Inline citation markers like [1] get styled

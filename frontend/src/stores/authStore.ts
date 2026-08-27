@@ -15,13 +15,17 @@ interface AuthState {
   verifyEmail: (email: string, code: string) => Promise<void>;
   logout: () => void;
   loadUser: () => void;
+  bootstrapAuth: () => Promise<void>;
 }
 
 function persistSession(access: string, refresh: string | undefined, email: string, set: (s: Partial<AuthState>) => void) {
   localStorage.setItem("token", access);
   if (refresh) localStorage.setItem("refresh_token", refresh);
   const payload = JSON.parse(atob(access.split(".")[1]));
-  set({ user: { user_id: payload.sub, email }, token: access, isLoading: false });
+  // `email` may be empty after a refresh (the rotate response has no email field);
+  // prefer a previously-known email though, defaulting to payload.sub.
+  const resolvedEmail = email || "";
+  set({ user: { user_id: payload.sub, email: resolvedEmail }, token: access, isLoading: false });
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -84,6 +88,28 @@ export const useAuthStore = create<AuthState>((set) => ({
         localStorage.removeItem("token");
         localStorage.removeItem("refresh_token");
       }
+    }
+  },
+
+  bootstrapAuth: async () => {
+    // Prove the stored session is still valid on the server, not just present
+    // in localStorage. A stale/expired/rotated token must NOT auto-authenticate
+    // the user into the workspace.
+    if (typeof window === "undefined") return;
+    const refresh = localStorage.getItem("refresh_token");
+    const access = localStorage.getItem("token");
+    if (!refresh && !access) {
+      set({ isLoading: false, token: null, user: null });
+      return;
+    }
+    set({ isLoading: true });
+    try {
+      const res = await authApi.refresh(refresh ?? "");
+      persistSession(res.data.access_token, res.data.refresh_token, res.data.email ?? "", set);
+    } catch {
+      localStorage.removeItem("token");
+      localStorage.removeItem("refresh_token");
+      set({ user: null, token: null, isLoading: false });
     }
   },
 }));

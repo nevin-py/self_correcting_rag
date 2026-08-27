@@ -1,0 +1,231 @@
+{
+ "results": [
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The capital of Australia is Canberra.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 30.3,
+   "claims_total": 1,
+   "claims_verified": 0.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The answer is correct, complete, and directly answers the question."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 33.6,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "score_stddev": 2.5,
+   "judge_score": 0,
+   "judge_reason": "The assistant refused to answer a well-known factual question about the Pfizer-BioNTech COVID-19 vaccine, which is widely documented public knowledge."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 32.5,
+   "claims_total": 3,
+   "claims_verified": 2.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 2.5,
+   "judge_score": 0,
+   "judge_reason": "The assistant refused to answer a well-known factual question without justification, providing no information at all."
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "As of the current date (2026), the European Union has 27 member states [E1]. This number reflects the membership following the United Kingdom's departure from the EU in 2020.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- This number reflects the membership following the United Kingdom's departure from the EU in 2020.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 116.2,
+   "claims_total": 2,
+   "claims_verified": 1.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 2.5,
+   "judge_score": 5,
+   "judge_reason": "The assistant's answer correctly and directly states that the EU has 27 member states, matching the reference answer and providing relevant context."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai.  \nIndia's nominal GDP was approximately USD 3.92 trillion in the fiscal year 2025\u201326 (FY26), according to the IMF and government sources [E1][E2][E7].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- India's financial capital is Mumbai.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 31.0,
+   "claims_total": 2,
+   "claims_verified": 1,
+   "claims_unverified": 1,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The assistant correctly identifies Mumbai as the financial capital and provides an accurate GDP figure within the reference range, directly answering both parts of the question."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 28.7,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0.5,
+   "score_stddev": 1.5,
+   "judge_score": 0,
+   "judge_reason": "The assistant refused to answer a straightforward, well-known factual question without justification, when the answer (roughly 5 billion+ users) is widely available and commonly known."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 57.5,
+   "claims_total": 4,
+   "claims_verified": 3.5,
+   "claims_unverified": 1,
+   "score_stddev": 2.0,
+   "judge_score": 0,
+   "judge_reason": "The assistant refused to answer a well-known historical fact, which is evasive and unjustified."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize, awarded in 2025, was given to Venezuelan opposition leader Maria Corina Machado for her efforts to bring democracy to Venezuela and challenge the rule of Nicolas Maduro [E3].",
+   "final_status": "answered",
+   "latency_s": 28.3,
+   "claims_total": 1,
+   "claims_verified": 1,
+   "claims_unverified": 0,
+   "score_stddev": 0.0,
+   "judge_score": 1,
+   "judge_reason": "The answer directly addresses the question and provides specific names and details, but it fabricates a 2025 Nobel Peace Prize that has not been awarded, making the core factual claim unreliable."
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 27.4,
+   "claims_total": 1,
+   "claims_verified": 0.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 1.5,
+   "judge_score": 0,
+   "judge_reason": "The assistant failed to answer a straightforward factual question about the most recent Summer Olympic Games (Paris 2024), providing no information whatsoever."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum and was first released in 1991 [E1].",
+   "final_status": "answered",
+   "latency_s": 32.5,
+   "claims_total": 1,
+   "claims_verified": 1,
+   "claims_unverified": 0,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Guido van Rossum as the creator and 1991 as the first release year, fully matching the reference answer."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "I don't have enough reliable information to answer this question.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 29.1,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "score_stddev": 2.5,
+   "judge_score": 0,
+   "judge_reason": "The assistant refused to answer a well-established factual question about Google's 2019 quantum supremacy claim with the Sycamore processor, which is widely documented and not controversial."
+  },
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "The most recent FIFA World Cup was held in 2022 in Qatar [E4]. Argentina won the tournament by defeating France in a dramatic final that ended 3-3 after extra time, with Argentina winning 4-2 in the penalty shootout. The final took place on December 18, 2022.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- Argentina won the tournament by defeating France in a dramatic final that ended 3-3 after extra time, with Argentina winning 4-2 in the penalty shootout.\n- The final took place on December 18, 2022.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 35.4,
+   "claims_total": 3,
+   "claims_verified": 1.5,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.0,
+   "judge_score": 4,
+   "judge_reason": "The answer directly addresses the question with specific names, scores, and dates, and cites a source, though the caveats indicate some details could not be fully verified against the retrieved eviden"
+  }
+ ],
+ "unstable_cases": [
+  {
+   "id": "eu-members-count",
+   "scores": [
+    0,
+    5
+   ]
+  },
+  {
+   "id": "mars-mission",
+   "scores": [
+    0,
+    4
+   ]
+  },
+  {
+   "id": "olympics-host",
+   "scores": [
+    0,
+    3
+   ]
+  },
+  {
+   "id": "quantum-supremacy",
+   "scores": [
+    0,
+    5
+   ]
+  },
+  {
+   "id": "deepest-ocean",
+   "scores": [
+    0,
+    5
+   ]
+  },
+  {
+   "id": "internet-users",
+   "scores": [
+    0,
+    3
+   ]
+  },
+  {
+   "id": "covid-vaccine-type",
+   "scores": [
+    0,
+    5
+   ]
+  }
+ ],
+ "repeats": 2,
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 1,
+   "avg_lat": 2929.2,
+   "pt": 562,
+   "ct": 85
+  },
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "error",
+   "n": 1,
+   "avg_lat": 957.4,
+   "pt": 562,
+   "ct": 0
+  }
+ ],
+ "rejudged": true
+}

@@ -31,7 +31,9 @@ Graph wiring: `app/agent/graph.py`. State schema: `app/agent/state.py`.
 2. **Provenance first.** Every piece of evidence is a typed `Evidence` record with source type, name, URL, and date. Answers must cite `[E#]` keys that resolve to real evidence; the citation validator (`app/agent/citation_validator.py`) enforces this deterministically.
 3. **Honest uncertainty.** Claims the judge cannot verify are listed under *Caveats* in the answer with `final_status = "answered_with_caveats"`. The agent never silently guesses.
 4. **Bounded self-correction.** When verification finds gaps a targeted search could fix, the judge emits `repair_queries` and the graph loops `gather → generate → verify` once (`settings.MAX_REPAIR_PASSES`). Contradictions never loop — they go straight to caveats.
-5. **Cheap checks first.** Deterministic citation validation runs before the LLM judge; only unresolved questions reach the model.
+5. **Cheap checks first.** Deterministic citation validation runs before the LLM judge; only unresolved questions reach the model. A local-embedding
+   support gate (`app/agent/support.py`) additionally demotes cited sentences whose evidence does not semantically support them — id resolution
+   alone does not imply entailment.
 
 ## Chat dynamics & temporal awareness
 
@@ -42,8 +44,8 @@ Graph wiring: `app/agent/graph.py`. State schema: `app/agent/state.py`.
 ## Retrieval & ranking
 
 - **Documents:** `app/documents/service.py` — ChromaDB vector search + BM25 over per-chat collections (Nomic embeddings).
-- **Web:** `app/agent/search_tool.py` — SearXNG (self-hosted) → Wikipedia → Tavily, with a per-user daily Tavily budget.
-- **Ranking:** BM25 pre-filter → FlashRank cross-encoder (`app/agent/reranker.py`, `app/agent/context_assembly.py`), then a token-budgeted fill for the generator context. Recency breaks score ties. No hand-tuned authority weights.
+- **Web:** `app/agent/search_tool.py` — layered search with a Tavily key-rotation fallback (`TAVILY_API_KEY_BACKUP`), SearXNG primary + year-pinned variant without the recency filter, direct Wikipedia article lookup for encyclopedic-topic queries, and full-page enrichment of the top results (`EVIDENCE_FETCH_TOP_N`, default 2). Per-user daily Tavily budget.
+- **Ranking:** BM25 pre-filter → FlashRank cross-encoder (`app/agent/reranker.py`, `app/agent/context_assembly.py`), then a token-budgeted fill for the generator context. Recency breaks score ties; authoritative domains get a small tie-break on temporal queries.
 
 ## LLM providers
 
@@ -92,7 +94,7 @@ With no working SMTP in non-production, registration OTPs are echoed back as
 pytest tests/ -q                      # full suite (LLM calls faked; no network)
 INTEGRATION_TEST=1 pytest tests/m     # live-key integration tests
 python -m evals.run_eval              # golden-set citation checks
-python evaluation/test_rag.py         # live RAG quality harness
+python -m evals.ragas_eval            # RAGAS quality metrics (paid judge, ~$0.04/run)
+python -m evals.harness --models <model> --ab-repair --repeat 2   # repair A/B + lift report
 ```
-
 Pipeline tests live in `tests/test_agent_pipeline.py`; citation validator tests in `tests/test_citation_and_golden.py`.

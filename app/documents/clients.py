@@ -52,7 +52,49 @@ if valid_key(settings.GROQ_KEY):
     )
     groq_client = Groq(api_key=settings.GROQ_KEY)
 
-tavily_client = TavilyClient(api_key=settings.TAVILY_API_KEY)
+class RotatingTavily:
+    """Duck-typed TavilyClient that rotates across primary + backup keys.
+
+    On quota/auth errors ("usage limit", 429, 401) the next key is tried
+    immediately; other errors propagate. With one key this behaves exactly
+    like the raw client.
+    """
+
+    _ROTATE_ON = ("usage limit", "quota", "exceed", "rate limit", "429", "unauthorized", "401")
+
+    def __init__(self, keys: list[str]):
+        self._clients = [TavilyClient(api_key=k) for k in keys if valid_key(k)]
+        self._index = 0
+        import threading
+
+        self._lock = threading.Lock()
+
+    @property
+    def available(self) -> int:
+        return len(self._clients)
+
+    def search(self, **kwargs):
+        if not self._clients:
+            raise RuntimeError("no valid Tavily API key configured")
+        last: Exception | None = None
+        for _ in range(len(self._clients)):
+            with self._lock:
+                client = self._clients[self._index]
+            try:
+                return client.search(**kwargs)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if len(self._clients) > 1 and any(t in msg for t in self._ROTATE_ON):
+                    last = exc
+                    with self._lock:
+                        self._index = (self._index + 1) % len(self._clients)
+                    logger.warning("Tavily key exhausted (%s); rotating to backup key", str(exc)[:80])
+                    continue
+                raise
+        raise last  # type: ignore[misc]
+
+
+tavily_client = RotatingTavily([settings.TAVILY_API_KEY, settings.TAVILY_API_KEY_BACKUP])
 
 # ── OpenRouter (Xiaomi MiMo-V2.5 — all roles) ────────────────────────────────
 #   Planner / Generator / Hallucination: xiaomi/mimo-v2.5
@@ -284,6 +326,63 @@ def _build_groq_bundle(api_key: str, planner: str, generator: str, verifier: str
     return p, g, v
 
 
+_DEFAULT_CUSTOM_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-haiku-20241022",
+    "ollama": "llama3",
+}
+
+
+def _make_custom_llm(family: str, api_key: str | None, base_url: str | None, model: str):
+    """Build a client for an arbitrary provider.
+
+    openai = any OpenAI-compatible endpoint (OpenAI, DeepSeek, Mistral, Together,
+             xAI, Cerebras, LM Studio, OpenRouter-own, Ollama /v1, ...)
+    anthropic = Anthropic's native API (not OpenAI-compatible)
+    ollama = local, no key
+    """
+    fam = (family or "openai").lower()
+    if fam == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError:
+            raise RuntimeError("langchain-anthropic not installed; cannot use an Anthropic key")
+        return ChatAnthropic(model=model, api_key=api_key, temperature=0, max_tokens=4096)
+
+    if fam == "ollama":
+        from langchain_community.chat_models import ChatOllama
+
+        return ChatOllama(model=model, base_url=base_url or settings.OLLAMA_BASE_URL, temperature=0)
+
+    # OpenAI-compatible
+    from langchain_openai import ChatOpenAI
+
+    base = base_url or "https://api.openai.com/v1"
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key or "ollama-local-dummy",  # some endpoints (LM Studio) need any non-blank
+        base_url=base,
+        temperature=0,
+        max_tokens=4096,
+        max_retries=1,
+    )
+
+
+def _build_custom_bundle(
+    family: str,
+    api_key: str | None,
+    base_url: str | None,
+    planner: str | None,
+    generator: str | None,
+    verifier: str | None,
+) -> tuple[Any, Any, Any]:
+    default = _DEFAULT_CUSTOM_MODELS.get((family or "openai").lower(), "gpt-4o-mini")
+    p = _make_custom_llm(family, api_key, base_url, planner or default)
+    g = _make_custom_llm(family, api_key, base_url, generator or default)
+    v = _make_custom_llm(family, api_key, base_url, verifier or default)
+    return p, g, v
+
+
 def resolve_llms(
     provider: str = "auto",
     user_credentials: dict[str, dict] | None = None,
@@ -369,12 +468,43 @@ def resolve_llms(
     elif not gq_key:
         gq_planner = gq_generator = gq_verifier = None
 
+    # Generic provider: any name that isn't a known family and has a user key.
+    # Client family + endpoint come from the stored provider row; models default
+    # per-family unless the user chose explicit ones.
+    if pref not in ("auto", "google", "openrouter", "groq", "global"):
+        entry = creds.get(pref)
+        key = _pick_key(entry, None)
+        if not key and (entry or {}).get("client_family") != "ollama":
+            logger.warning(
+                "Provider '%s' requested but no user key stored; falling back to auto", pref
+            )
+            return resolve_llms("auto", user_credentials=creds)
+        if not entry:
+            logger.warning("Provider '%s' requested but has no settings; falling back to auto", pref)
+            return resolve_llms("auto", user_credentials=creds)
+        family = (entry.get("client_family") or "openai")
+        base_url = entry.get("base_url")
+        pm, gm, vm = _user_models(entry)
+        try:
+            p, g, v = _build_custom_bundle(family, key, base_url, pm, gm, vm)
+        except Exception:
+            logger.exception("Failed to build custom provider '%s'", pref)
+            return resolve_llms("auto", user_credentials=creds)
+        return ProviderLLMs(
+            planner=p,
+            planner_fallbacks=_uniq_llms(or_planner, go_planner, gq_planner),
+            generator=g,
+            generator_fallbacks=_uniq_llms(or_generator, go_generator, gq_generator),
+            verifier=v,
+            verifier_fallbacks=_uniq_llms(or_verifier, go_verifier, gq_verifier),
+            label=pref,
+        )
+
     if pref == "google":
         if not go_generator:
             logger.warning("Google AI requested but no key available; falling back to auto")
             return resolve_llms("auto", user_credentials=creds)
         return ProviderLLMs(
-            planner=go_planner or go_generator,
             planner_fallbacks=_uniq_llms(*go_alts, gq_planner, or_planner, *or_alts),
             generator=go_generator,
             generator_fallbacks=_uniq_llms(*go_alts, gq_generator, or_generator, *or_alts),

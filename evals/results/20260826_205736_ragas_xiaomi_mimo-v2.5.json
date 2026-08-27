@@ -1,0 +1,103 @@
+{
+ "judge": "xiaomi/mimo-v2.5",
+ "cases": 12,
+ "means": {
+  "faithfulness": 0.946,
+  "answer_relevancy": 0.871,
+  "context_precision": 0.832,
+  "answer_correctness": 0.45
+ },
+ "nan_counts": {
+  "faithfulness": 0,
+  "answer_relevancy": 1,
+  "context_precision": 7,
+  "answer_correctness": 0
+ },
+ "missing_metrics": [],
+ "per_case": [
+  {
+   "id": "world-cup-latest",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.6340430974960327,
+   "context_precision": 0.19999999998,
+   "answer_correctness": 0.1730080395936966
+  },
+  {
+   "id": "capital-australia",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.9999999403953552,
+   "context_precision": 0.968253968240136,
+   "answer_correctness": 0.34368880093097687
+  },
+  {
+   "id": "india-capital-gdp",
+   "faithfulness": 0.7142857142857143,
+   "answer_relevancy": NaN,
+   "context_precision": NaN,
+   "answer_correctness": 0.5565153864713815
+  },
+  {
+   "id": "nobel-peace-recent",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.8366490006446838,
+   "context_precision": NaN,
+   "answer_correctness": 0.07736128568649292
+  },
+  {
+   "id": "python-creator",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.9922425150871277,
+   "context_precision": 0.99999999999,
+   "answer_correctness": 0.8665755093097687
+  },
+  {
+   "id": "eu-members-count",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.895161509513855,
+   "context_precision": NaN,
+   "answer_correctness": 0.5107729882001877
+  },
+  {
+   "id": "mars-mission",
+   "faithfulness": 0.8,
+   "answer_relevancy": 0.9408115148544312,
+   "context_precision": NaN,
+   "answer_correctness": 0.5891704857349396
+  },
+  {
+   "id": "olympics-host",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.9325340390205383,
+   "context_precision": NaN,
+   "answer_correctness": 0.5525104701519012
+  },
+  {
+   "id": "quantum-supremacy",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.680091381072998,
+   "context_precision": NaN,
+   "answer_correctness": 0.6263410724126375
+  },
+  {
+   "id": "deepest-ocean",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.9666213989257812,
+   "context_precision": 0.9999999999916667,
+   "answer_correctness": 0.44759559631347656
+  },
+  {
+   "id": "internet-users",
+   "faithfulness": 0.8333333333333334,
+   "answer_relevancy": 0.8033733367919922,
+   "context_precision": NaN,
+   "answer_correctness": 0.20998579263687134
+  },
+  {
+   "id": "covid-vaccine-type",
+   "faithfulness": 1.0,
+   "answer_relevancy": 0.8996484279632568,
+   "context_precision": 0.9924242424152203,
+   "answer_correctness": 0.45199738740921025
+  }
+ ]
+}

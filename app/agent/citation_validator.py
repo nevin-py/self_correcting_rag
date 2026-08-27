@@ -3,9 +3,11 @@
 Deterministic and cheap — no LLM, no domain knowledge. Catches:
   - citations that do not resolve to assembled evidence
   - factual-looking assertions with no citation at all
+  - (optional support gate) citations whose evidence does not semantically
+    support the sentence citing it — embedding similarity via app.agent.support
 
-Semantic support checking (does the evidence actually back the claim?) is the
-LLM judge's job in nodes.verify_answer.
+Full semantic checking (contradictions, numeric mismatches) remains the LLM
+judge's job in nodes.verify_answer; this gate is a cheap deterministic filter.
 """
 
 from __future__ import annotations
@@ -54,6 +56,10 @@ class CitationValidationResult:
     invalid_citation_ids: list[str] = field(default_factory=list)
     cited_ids: list[str] = field(default_factory=list)
     claims: list[Claim] = field(default_factory=list)
+    # Sentences whose cited evidence does not semantically support them:
+    # (sentence_text_with_markers, [cite_tokens]). verify_answer strips these
+    # markers from the prose so unsupported claims never carry citations.
+    unsupported_citations: list[tuple[str, list[str]]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -168,8 +174,14 @@ def validate_answer_citations(
     *,
     require_citations: bool = True,
     cite_map: dict[str, str] | None = None,
+    entailment_gate: bool = False,
 ) -> CitationValidationResult:
-    """Validate that factual assertions in ``answer`` cite real evidence IDs / E# keys."""
+    """Validate that factual assertions in ``answer`` cite real evidence IDs / E# keys.
+
+    With ``entailment_gate=True`` each cited sentence is additionally embedded
+    against its cited evidence texts; below CITATION_SUPPORT_MIN_SIM the claim
+    is demoted to UNVERIFIED and its markers are recorded for stripping.
+    """
     known = {ev.evidence_id for ev in evidence or []}
     cite_map = dict(cite_map or {})
     for ev in evidence or []:
@@ -235,7 +247,81 @@ def validate_answer_citations(
             )
         )
 
+    if entailment_gate:
+        _apply_support_gate(result, evidence)
+
     return result
+
+
+def _apply_support_gate(result: CitationValidationResult, evidence: list[Evidence]) -> None:
+    """Demote cited claims whose evidence does not semantically support them.
+
+    Uses local MiniLM embeddings (no network). A demoted claim keeps its text,
+    becomes UNVERIFIED, and is registered in ``unsupported_citations`` so the
+    caller can strip its markers from the prose.
+    """
+    from app.agent import support as support_gate
+
+    if not support_gate.gate_enabled() or not result.claims:
+        return
+    text_by_id = {ev.evidence_id: ev.text for ev in evidence or []}
+    for claim in result.claims:
+        if not claim.evidence_ids or claim.status != ClaimStatus.VERIFIED:
+            continue
+        cited_texts = [text_by_id[eid] for eid in claim.evidence_ids if eid in text_by_id]
+        if not cited_texts:
+            continue
+        score = support_gate.max_support(claim.text, cited_texts)
+        if score >= support_gate.min_sim():
+            continue
+        tokens = extract_citation_tokens(claim.text)
+        claim.status = ClaimStatus.UNVERIFIED
+        claim.reasoning = (
+            f"Cited evidence does not semantically support this sentence "
+            f"(best similarity {score:.2f} < {support_gate.min_sim():.2f})"
+        )
+        result.unsupported_citations.append((claim.text, tokens))
+        result.errors.append(
+            CitationError(
+                claim_id=claim.claim_id,
+                issue="WEAK_SUPPORT",
+                severity="medium",
+                detail=(
+                    f"Cited evidence similarity {score:.2f} below "
+                    f"{support_gate.min_sim():.2f}: {claim.text[:140]}"
+                ),
+            )
+        )
+
+
+def strip_weak_markers(answer: str, result: CitationValidationResult) -> str:
+    """Remove citation markers from sentences the support gate rejected.
+
+    Unsupported claims must not keep citations in the prose — a marker implies
+    the evidence backs the statement, which the gate just determined it does
+    not. Sentences that cannot be located verbatim are left untouched (the
+    claim still lands in Caveats via its UNVERIFIED status).
+    """
+    out = answer
+    for sentence, _tokens in result.unsupported_citations:
+        core = re.sub(r"\[[^\]]+\]", "", sentence)
+        probe = re.sub(r"\s+", " ", core).strip()[:60]
+        # Removing "[E6]" leaves "4-2 ." — trailing orphan punctuation would
+        # break the verbatim lookup, so trim to the last word boundary.
+        probe = probe.rstrip(" .,;:!?")
+        if len(probe) < 20:
+            continue
+        idx = out.find(probe)
+        if idx < 0:
+            continue
+        span_end = out.find("\n", idx)
+        end = span_end if span_end > idx else min(idx + len(sentence) + 40, len(out))
+        segment = out[idx:end]
+        cleaned = CITATION_TOKEN_RE.sub("", segment)
+        cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned)  # "4-2 ." -> "4-2."
+        out = out[:idx] + cleaned + out[end:]
+    return out
+
 
 
 def flag_uncited_in_answer(answer: str, result: CitationValidationResult) -> str:

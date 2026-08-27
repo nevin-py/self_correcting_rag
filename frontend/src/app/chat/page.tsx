@@ -9,17 +9,19 @@ import { Button } from "@/components/ui/Button";
 
 export default function ChatPage() {
   const router = useRouter();
-  const { token, loadUser } = useAuthStore();
+  const { token, isLoading, bootstrapAuth } = useAuthStore();
   const { fetchChats } = useChatStore();
 
   useEffect(() => {
-    loadUser();
-    fetchChats();
-  }, [loadUser, fetchChats]);
+    bootstrapAuth().finally(() => {
+      fetchChats();
+    });
+  }, [bootstrapAuth, fetchChats]);
 
   useEffect(() => {
+    if (isLoading) return; // still validating the stored session — don't flash
     if (!token) router.replace("/login");
-  }, [token, router]);
+  }, [token, isLoading, router]);
 
   const handleNewChat = async () => {
     const title = nextSessionTitle(useChatStore.getState().chats);
@@ -40,7 +42,11 @@ export default function ChatPage() {
       <div className="flex h-full flex-col items-center justify-center grid-bg">
         <div className="border border-border bg-surface p-8 text-center">
           <p className="label-caps mb-2">Workspace</p>
-          <h2 className="font-display text-xl font-semibold text-text-primary">No Active Session</h2>
+          <h2 className="font-display text-3xl font-bold tracking-wide text-text-primary">No Active Session</h2>
+          <p className="mt-2 max-w-sm text-sm leading-relaxed text-text-secondary">
+            Every answer is retrieved, cited, and verified before you see it.
+            Start a session to begin.
+          </p>
           <p className="mt-2 text-sm text-text-secondary">Initialize a new knowledge session to begin.</p>
           <Button variant="accent" onClick={handleNewChat} className="mt-6">
             New Session

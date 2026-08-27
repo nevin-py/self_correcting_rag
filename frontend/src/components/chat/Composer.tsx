@@ -155,7 +155,7 @@ export default function Composer({ sessionId, disabled }: ComposerProps) {
               placeholder="Enter query — retrieval and verification will commence..."
               rows={1}
               disabled={isStreaming || disabled}
-              className="max-h-32 min-h-[2.5rem] flex-1 resize-none bg-transparent py-2 font-mono text-sm text-text-primary placeholder:text-text-muted focus:outline-none disabled:opacity-40"
+              className="max-h-40 min-h-[2.75rem] flex-1 resize-none bg-transparent py-2.5 text-base leading-relaxed text-text-primary placeholder:text-text-muted focus:outline-none disabled:opacity-40"
             />
 
             <div className="flex flex-col items-end gap-1 pb-0.5">
@@ -167,10 +167,10 @@ export default function Composer({ sessionId, disabled }: ComposerProps) {
               onClick={handleSend}
               disabled={!input.trim() || isStreaming || disabled}
               className={cn(
-                "border p-2 transition-colors",
+                "send-active rounded-md border p-2.5",
                 input.trim() && !isStreaming
-                  ? "border-accent bg-accent text-text-primary hover:border-accent-bright hover:bg-accent-bright"
-                  : "border-border text-text-muted"
+                  ? "send-ready border-transparent text-white"
+                  : "border-border bg-surface-inset text-text-muted"
               )}
               title="Submit query"
             >

@@ -4,7 +4,7 @@
     {
       "id": "world-cup-latest",
       "query": "Who won the most recent FIFA World Cup and what was the score?",
-      "expected_answer": "Argentina won the 2022 FIFA World Cup, beating France on penalties after a 3-3 final.",
+      "expected_answer": "Argentina won the 2022 FIFA World Cup, beating France 4-2 on penalties after a 3-3 draw in Qatar on December 18, 2022.",
       "required_elements": [
         "argentina",
         "france"

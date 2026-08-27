@@ -117,17 +117,33 @@ def _provider_of(llm: Any) -> str:
 
 
 def _persist(row: dict) -> None:
+    """Write one trace row. Hard-bounded to 15s: these run on module-level
+    ThreadPoolExecutor threads that the interpreter JOINS at exit — an
+    unbounded DB connect/commit here hangs pytest (and any CLI shutdown)
+    indefinitely when the database is slow or unreachable."""
+    from sqlalchemy.ext.asyncio import AsyncSession
     from app.auth.models import UsageEvent  # noqa: F401  (ensures models imported)
-    from app.core.database import AsyncLocalSession
+    from app.core.database import make_engine
     from app.observability.models import LLMCallTrace
     import asyncio
 
+    # Must use a fresh NullPool engine: these run on executor threads with
+    # their own event loops, and pooled asyncpg connections are bound to the
+    # loop that created them — reusing the global engine here deadlocks the
+    # await forever (the pre-existing pytest exit hang).
     async def _write():
-        async with AsyncLocalSession() as session:
-            session.add(LLMCallTrace(**row))
-            await session.commit()
+        eng = make_engine()
+        try:
+            async with AsyncSession(eng) as session:
+                session.add(LLMCallTrace(**row))
+                await session.commit()
+        finally:
+            await eng.dispose()
 
-    asyncio.run(_write())
+    try:
+        asyncio.run(asyncio.wait_for(_write(), timeout=15))
+    except Exception:
+        logger.debug("trace persist failed/slow; dropping row", exc_info=True)
 
 
 # ── Optional Langfuse export ─────────────────────────────────────────────────

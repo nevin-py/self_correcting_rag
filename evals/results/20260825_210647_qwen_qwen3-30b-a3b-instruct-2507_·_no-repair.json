@@ -1,0 +1,158 @@
+{
+ "results": [
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "The most recent FIFA World Cup was held in 2026, and Spain won the tournament. Ferran Torres scored the only goal in the final, which was a nail-biter [E2]. The final score was Spain 1\u20130 [E1].",
+   "final_status": "answered",
+   "latency_s": 29.1,
+   "claims_total": 7,
+   "claims_verified": 7,
+   "claims_unverified": 0,
+   "judge_score": 1,
+   "judge_reason": "The answer attempts to answer but provides incorrect information, lacks real source citations, and is not reliable."
+  },
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra [E1].",
+   "final_status": "answered",
+   "latency_s": 11.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly and directly states that the capital of Australia is Canberra."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai [E6].  \n\nIndia's nominal GDP was approximately USD 3.92 trillion in the fiscal year 2025\u201326 [E1]. This makes India the world's sixth-largest economy by nominal GDP [E2].  \n\nNote: Some sources project India's GDP to reach USD 7.3 trillion by 2030 [E8], and the IMF projects it to reach around USD 5.1 trillion by 2028\u201329 [E5], but the most directly cited figure for 2025\u201326 is USD 3.92 trillion [E1].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- India's financial capital is Mumbai",
+   "final_status": "answered_with_caveats",
+   "latency_s": 15.5,
+   "claims_total": 7,
+   "claims_verified": 6,
+   "claims_unverified": 1,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Mumbai as the financial capital and provides a GDP figure (\u22483.92\u202ftrillion USD) that falls within the 3.5\u20114\u202ftrillion USD range."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize was awarded to Mar\u00eda Corina Machado of Venezuela [E4]. The prize was announced on 10 October 2025 by the Norwegian Nobel Committee in Oslo, Norway [E4]. She was recognized for her tireless work promoting democratic rights for the people of Venezuela and her struggle to restore democracy in the country [E5]. The award was presented on 10 December 2025, with her daughter accepting it on her behalf, as Machado was in hiding in Venezuela at the time due to fears of government repression [E4].",
+   "final_status": "answered",
+   "latency_s": 29.4,
+   "claims_total": 8,
+   "claims_verified": 8,
+   "claims_unverified": 0,
+   "judge_score": 3,
+   "judge_reason": "The answer directly names a person and gives details, but it lacks real source citations and relies on placeholder references, reducing its credibility."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum. It was first released in 1991 [E1]. The implementation was started in December 1989 [E2], and the first public version, Python 0.9.0, was released in February 1991 [E4].",
+   "final_status": "answered",
+   "latency_s": 20.8,
+   "claims_total": 7,
+   "claims_verified": 7,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct creator and year of first release, directly answering the question."
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "As of the current date (2026), the European Union has 27 member states [E1]. This number has remained unchanged since Croatia joined in July 2013, and no new member states have acceded since then [E1].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- As of the current date (2026), the European Union has 27 member states\n- This number has remained unchanged since Croatia joined in July 2013, and no new member states have acceded since then",
+   "final_status": "answered_with_caveats",
+   "latency_s": 49.0,
+   "claims_total": 4,
+   "claims_verified": 2,
+   "claims_unverified": 2,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly states that the EU has 27 member states, directly matching the ground truth."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "The first spacecraft to successfully land on Mars was the Soviet Union's Mars 3, which achieved a soft landing on December 2, 1971 [E1].",
+   "final_status": "answered",
+   "latency_s": 15.7,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Correctly identifies the Soviet Union's Mars 3 as the first successful Mars landing, directly answering the question."
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "The most recent Summer Olympic Games were hosted by Paris, France, in 2024 [E1].",
+   "final_status": "answered",
+   "latency_s": 11.9,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 3,
+   "judge_reason": "It answers the question with correct city and year, but provides only a placeholder citation without a real source."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "Google first claimed quantum supremacy in 2019 using its Sycamore processor [E1].",
+   "final_status": "answered",
+   "latency_s": 23.4,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Correctly identifies Google and its Sycamore processor as the first claim of quantum supremacy."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "The deepest known point in the ocean is the Challenger Deep, located within the Mariana Trench in the western Pacific Ocean [E4]. It reaches a depth of approximately 10,984 meters (about 36,037 feet) below sea level [E9]. This depth is so great that Mount Everest, if placed at this location, would be completely submerged under more than a mile of water [E9].",
+   "final_status": "answered",
+   "latency_s": 20.2,
+   "claims_total": 6,
+   "claims_verified": 6,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "Provides the correct deepest point (Challenger Deep) and an accurate depth within the accepted range."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "The provided evidence does not contain a figure for the total number of people worldwide using the internet today (2026). While several sources discuss internet usage trends, adoption rates in specific countries (e.g., Kenya at 97.5% of online adults using AI [E2], 97% of Americans accessing 100/20 Mbps broadband [E4]), and digital labor [E12], none offer a global total for internet users as of 2026. Therefore, based on the evidence, the current global number of internet users cannot be determined.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The provided evidence does not contain a figure for the total number of people worldwide using the internet today (2026).\n- While several sources discuss internet usage trends, adoption rates in specific countries (e.g., Kenya at 97.5% of online adults using AI [E2], 97% of Americans accessing 100/20 Mbps broadband [E4]), and digital labor [E12], none offer a global total for internet users as of 2026.\n- Therefore, based on the evidence, the current global number of internet users cannot be determined.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 15.6,
+   "claims_total": 5,
+   "claims_verified": 2,
+   "claims_unverified": 3,
+   "judge_score": 0,
+   "judge_reason": "The answer evades the question and does not provide the approximate 5\u202fbillion+ internet users, giving no useful information."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "The Pfizer-BioNTech COVID-19 vaccine is an mRNA (messenger RNA) vaccine [E2].",
+   "final_status": "answered",
+   "latency_s": 9.1,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies the Pfizer-BioNTech COVID-19 vaccine as an mRNA vaccine, fully addressing the question."
+  }
+ ],
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 1,
+   "avg_lat": 3762.2,
+   "pt": 505,
+   "ct": 97
+  }
+ ]
+}

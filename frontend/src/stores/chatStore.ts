@@ -45,6 +45,7 @@ export interface GraphStatus {
   label: string;
   detail?: string;
   status: "running" | "done" | "error";
+  elapsedMs?: number;
 }
 
 export interface PipelineEvent {
@@ -54,6 +55,8 @@ export interface PipelineEvent {
   detail?: string;
   phase: PipelinePhase;
   status: "running" | "done" | "error";
+  elapsedMs?: number;
+  nodeMs?: number;
   timestamp: Date;
 }
 
@@ -271,24 +274,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
               if (currentEvent === "status") {
                 const node = String(data.node);
+                const status = data.status === "done" ? "done" : "running";
+                const elapsedMs = typeof data.elapsed_ms === "number" ? data.elapsed_ms : undefined;
+                const nodeMs = typeof data.node_ms === "number" ? data.node_ms : undefined;
+                const detail = data.detail ? String(data.detail) : undefined;
                 const event: PipelineEvent = {
-                  id: `evt-${Date.now()}-${node}`,
+                  id: `evt-${Date.now()}-${node}-${status}`,
                   node,
                   label: String(data.label),
-                  detail: data.detail ? String(data.detail) : undefined,
+                  detail,
                   phase: nodeToPhase(node),
-                  status: "running",
+                  status,
+                  elapsedMs,
+                  nodeMs,
                   timestamp: new Date(),
                 };
-                set((s) => ({
-                  graphStatus: {
-                    node,
-                    label: event.label,
-                    detail: event.detail,
-                    status: "running",
-                  },
-                  pipelineEvents: [...s.pipelineEvents, event],
-                }));
+                set((s) => {
+                  const pipelineEvents = [...s.pipelineEvents];
+                  // Completion replaces its own running entry; running always appends.
+                  const lastIdx = [...pipelineEvents].reverse().findIndex(
+                    (e) => e.node === node && e.status === "running"
+                  );
+                  if (status === "done" && lastIdx >= 0) {
+                    pipelineEvents[pipelineEvents.length - 1 - lastIdx] = event;
+                  } else {
+                    pipelineEvents.push(event);
+                  }
+                  return {
+                    graphStatus: {
+                      node,
+                      label: event.label,
+                      detail: event.detail,
+                      status,
+                      elapsedMs,
+                    },
+                    pipelineEvents,
+                  };
+                });
+              } else if (currentEvent === "ping") {
+                const elapsedMs = typeof data.elapsed_ms === "number" ? data.elapsed_ms : undefined;
+                set((s) => (s.graphStatus ? { graphStatus: { ...s.graphStatus, elapsedMs } } : {}));
               } else if (currentEvent === "answer_reset") {
                 // Repair pass: the previously streamed answer is replaced.
                 fullAnswer = "";

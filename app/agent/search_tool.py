@@ -412,16 +412,24 @@ async def _tavily_structured(
     return out
 
 
-async def _searxng_structured(query: str, max_results: int) -> List[Dict[str, Any]]:
+async def _searxng_structured(
+    query: str,
+    max_results: int,
+    time_range: str | None = "year",
+) -> List[Dict[str, Any]]:
+    """``time_range=None`` for queries that already pin a year/event — the
+    default recency filter otherwise buries historical match/event pages under
+    this month's news about the same topic."""
     searxng_url = settings.SEARXNG_URL.rstrip("/")
     url = f"{searxng_url}/search"
     params = {
         "q": query,
         "format": "json",
         "pageno": 1,
-        "time_range": "year",
         "categories": "general,news",
     }
+    if time_range:
+        params["time_range"] = time_range
     async with httpx.AsyncClient(timeout=12.0) as client:
         response = await client.get(url, params=params)
         response.raise_for_status()
@@ -442,7 +450,10 @@ async def _searxng_structured(query: str, max_results: int) -> List[Dict[str, An
     return out[:max_results]
 
 
-async def search_structured(
+_QUESTIONY_RE = re.compile(r"\b(who|what|when|where|why|how|which|list of)\b|\?", re.I)
+
+
+async def search_structured(  # noqa: C901
     query: str,
     max_results: int = 10,
     *,
@@ -450,10 +461,9 @@ async def search_structured(
     allow_tavily: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Multi-source OSINT-style web search with recency bias and cleaned snippets.
-
-    Runs Tavily (general + news) and SearXNG in parallel, merges/dedupes, then
-    falls back to Wikipedia only if nothing else returned.
+    Multi-source web search: Tavily (general+news), SearXNG (primary + year
+    variant without recency filter), direct Wikipedia article lookup for
+    encyclopedic-topic queries, plus full-page enrichment of top results.
     """
     start = time.perf_counter()
     variants = _osint_query_variants(query)
@@ -465,6 +475,13 @@ async def search_structured(
         except Exception as exc:
             logger.warning("Structured %s search failed for '%s': %s", label, primary[:60], exc)
             return []
+
+    # Encyclopedic-topic queries map 1:1 onto Wikipedia article titles ("2022
+    # FIFA World Cup final") whose body states the fact outright — far stronger
+    # evidence than news snippets. Question-shaped queries don't.
+    wiki_direct = None
+    if not _QUESTIONY_RE.search(query):
+        wiki_direct = asyncio.ensure_future(_safe(search_wiki(query), "wikipedia-direct"))
 
     tasks = []
     if allow_tavily:
@@ -485,6 +502,13 @@ async def search_structured(
                 )
             )
     tasks.append(_safe(_searxng_structured(primary, max_results), "searxng"))
+    if len(variants) > 1:
+        # Year-appended variant WITHOUT the recency filter: the variant pins its
+        # own date, and time_range=year buries historical event pages under this
+        # month's news about the same topic.
+        tasks.append(
+            _safe(_searxng_structured(variants[1], max(4, max_results // 2), time_range=None), "searxng-variant")
+        )
 
     batches = await asyncio.gather(*tasks)
     if allow_tavily and user_id is not None:
@@ -496,12 +520,63 @@ async def search_structured(
                 await record_usage(session, user_id, "tavily", amount=1)
         except Exception:
             logger.exception("Failed to record Tavily usage")
-
     merged: List[Dict[str, Any]] = []
     for batch in batches:
         merged.extend(batch)
 
+    # Direct Wikipedia article (when fetched) outranks snippets: its body
+    # states the event/fact outright instead of referencing it.
+    if wiki_direct is not None:
+        wiki_text = wiki_direct.result()
+        if wiki_text and len(wiki_text) > 200:
+            item = _normalize_result(
+                content=wiki_text,
+                title=f"Wikipedia: {query}",
+                url=f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
+                source="wikipedia.org",
+                published_date=None,
+                score=0.85,
+            )
+            if item:
+                merged.insert(0, item)
+
     results = _dedupe_results(merged)[:max_results]
+
+    # Full-page enrichment: search snippets are thin (~1-2 KB); faithfulness
+    # needs the actual page. Fetch readable text of the top N URLs in parallel
+    # and keep it when meaningfully longer than the snippet.
+    fetch_n = max(0, int(getattr(settings, "EVIDENCE_FETCH_TOP_N", 2)))
+    if results and fetch_n:
+        targets = [r for r in results if r.get("url")][:fetch_n]
+
+        async def _fetch(url: str) -> str:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=float(getattr(settings, "EVIDENCE_FETCH_TIMEOUT", 8.0)),
+                    follow_redirects=True,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; SelfCorrectingRAG/1.0)"},
+                ) as client:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                    tag.decompose()
+                paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+                return _clean_search_text("\n\n".join(p for p in paragraphs if len(p) > 40), max_chars=4000)
+            except Exception as exc:
+                logger.debug("page fetch failed for %s: %s", url, exc)
+                return ""
+
+        fetched = await asyncio.gather(*(_fetch(r["url"]) for r in targets))
+        enriched = 0
+        for r, txt in zip(targets, fetched):
+            if txt and len(txt) > len(r.get("content") or "") * 1.3:
+                r["content"] = txt
+                r["score"] = min(1.0, float(r.get("score") or 0.5) + 0.05)
+                enriched += 1
+        if enriched:
+            logger.info("[enrich] fetched %d/%d full pages for '%s'", enriched, len(targets), primary[:50])
+            results = _dedupe_results(results)[:max_results]
 
     if not results:
         try:

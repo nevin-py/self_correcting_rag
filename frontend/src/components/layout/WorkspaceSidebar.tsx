@@ -61,7 +61,7 @@ export default function WorkspaceSidebar() {
       <div className="flex h-[var(--header-height)] items-center justify-between border-b border-border px-3">
         {!sidebarCollapsed && (
           <div>
-            <p className="font-display text-sm font-semibold tracking-tight text-text-primary">SCRAG</p>
+            <p className="font-display text-base font-bold tracking-[0.18em] text-text-primary">SCRAG</p>
             <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-text-muted">Knowledge Terminal</p>
           </div>
         )}
@@ -83,10 +83,10 @@ export default function WorkspaceSidebar() {
               key={item.href}
               href={item.href}
               className={cn(
-                "mb-px flex items-center gap-3 border px-3 py-2 text-xs transition-colors",
+                "mb-px flex items-center gap-3 rounded-md px-3 py-2 text-xs transition-colors",
                 active
-                  ? "border-accent bg-accent-glow text-text-primary"
-                  : "border-transparent text-text-secondary hover:border-border hover:bg-surface-raised hover:text-text-primary"
+                  ? "sidebar-item-active border border-transparent bg-surface-raised text-text-primary"
+                  : "border border-transparent text-text-secondary hover:border-border hover:bg-surface-raised hover:text-text-primary"
               )}
             >
               <item.icon size={14} strokeWidth={1.5} />

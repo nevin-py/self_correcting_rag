@@ -50,7 +50,7 @@ export default function ChatSessionPage() {
   const params = useParams();
   const router = useRouter();
   const sessionId = params.sessionId as string;
-  const { token, loadUser } = useAuthStore();
+  const { token, isLoading, bootstrapAuth } = useAuthStore();
   const {
     messages,
     isStreaming,
@@ -62,19 +62,38 @@ export default function ChatSessionPage() {
   const messagesEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    loadUser();
-  }, [loadUser]);
+    bootstrapAuth();
+  }, [bootstrapAuth]);
 
   useEffect(() => {
+    if (isLoading) return; // still validating the stored session — don't flash
     if (!token) router.replace("/login");
-  }, [token, router]);
+  }, [token, isLoading, router]);
 
   useEffect(() => {
     if (sessionId) selectChat(sessionId);
   }, [sessionId, selectChat]);
 
+  // Scroll only when the user is already at/near the bottom — never fight
+  // someone reading history. Smooth while pinned; instant if they scrolled away.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const pinnedToBottom = useRef(true);
+
   useEffect(() => {
-    messagesEnd.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!pinnedToBottom.current) return;
+    messagesEnd.current?.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
   }, [messages, isStreaming]);
 
   const header = (
@@ -106,7 +125,7 @@ export default function ChatSessionPage() {
   return (
     <AppShell header={header} rightPanel={<ContextPanel />}>
       <div className="flex flex-1 flex-col min-h-0">
-        <div className="flex-1 overflow-y-auto">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
           {messages.length === 0 ? (
             <EmptyWorkspace />
           ) : (

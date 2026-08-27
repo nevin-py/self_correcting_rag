@@ -46,6 +46,30 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
+# Split out of this module (routes stay here, logic lives there):
+from app.agent.chat_service import (  # noqa: F401
+    _delete_chroma_for_chat,
+    _delete_chat_children,
+    _verify_chat_ownership,
+    MAX_HISTORY_MESSAGES,
+    MAX_PRIOR_EVIDENCE,
+    _load_history,
+    _load_prior_evidence_state,
+    _finalize_evidence_state,
+    _load_prior_evidence_summary,
+    _store_messages,
+    _log_interaction,
+)
+from app.agent.streaming import (  # noqa: F401
+    NODE_LABELS,
+    _build_initial_state,
+    _normalize_verification_errors,
+    _stream_query,
+    _citations_payload,
+    _claims_payload,
+    _build_trajectory,
+)
+
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 # Heavy endpoint — 10 queries/min per user (each triggers multiple LLM calls)
@@ -71,25 +95,6 @@ _query_limiter = Limiter(key_func=_user_key_func)
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_initial_state(
-    query: str,
-    user_id: _uuid.UUID,
-    chat_id: _uuid.UUID,
-    provider: str = "auto",
-    history: list | None = None,
-    prior_evidence_state: EvidenceState | None = None,
-    user_credentials: dict | None = None,
-) -> dict:
-    """Build the initial LangGraph state via the graph's canonical factory."""
-    return create_initial_state(
-        query=query,
-        user_id=user_id,
-        chat_id=chat_id,
-        provider=provider,
-        messages=history or [],
-        user_credentials=user_credentials or {},
-        prior_evidence_state=prior_evidence_state,
-    )
 
 
 
@@ -200,31 +205,8 @@ async def get_chat(
     return chat
 
 
-def _delete_chroma_for_chat(user_id: _uuid.UUID, chat_id: _uuid.UUID | None = None) -> None:
-    """Best-effort vector cleanup: one chat or the whole user collection."""
-    try:
-        from app.documents.clients import get_chroma_client
-
-        client = get_chroma_client()
-        if client is None:
-            return
-        name = f"user_{user_id.hex[:16]}"
-        collection = client.get_or_create_collection(name=name)
-        if chat_id is None:
-            client.delete_collection(name)
-        else:
-            collection.delete(where={"chat_id": str(chat_id)})
-    except Exception:
-        logger.warning("Chroma cleanup failed for user=%s chat=%s", user_id, chat_id, exc_info=True)
 
 
-async def _delete_chat_children(db: AsyncSession, chat_id: _uuid.UUID) -> None:
-    """Remove FK children before deleting chats (DB FKs are ON DELETE RESTRICT)."""
-    from app.documents.models import IngestionLog
-
-    await db.execute(sql_delete(ChatMessage).where(ChatMessage.chat_id == chat_id))
-    await db.execute(sql_delete(Agent_interact).where(Agent_interact.chat_id == chat_id))
-    await db.execute(sql_delete(IngestionLog).where(IngestionLog.chat_id == chat_id))
 
 
 @router.post("/chats/purge")
@@ -269,177 +251,22 @@ async def delete_chat(
     logger.info("Chat deleted: chat_id=%s user_id=%s", chat_id, current_user.user_id)
 
 
-async def _verify_chat_ownership(
-    db: AsyncSession,
-    chat_id: _uuid.UUID,
-    user_id: _uuid.UUID,
-) -> None:
-    """Verify chat exists and belongs to user. Raises 404 if not."""
-    result = await db.execute(
-        select(Chats).where(
-            Chats.chat_id == chat_id,
-            Chats.user_id == user_id,
-        )
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Chat not found")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Conversation memory helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-MAX_HISTORY_MESSAGES = 20  # last N message pairs to include in context
-MAX_PRIOR_EVIDENCE = 5     # max evidence items to carry forward from prior turns
 
 
-async def _load_history(session: AsyncSession, chat_id: _uuid.UUID) -> list:
-    """Load recent conversation history as LangChain messages."""
-    result = await session.execute(
-        select(ChatMessage)
-        .where(ChatMessage.chat_id == chat_id)
-        .order_by(ChatMessage.sequence.desc())
-        .limit(MAX_HISTORY_MESSAGES * 2)
-    )
-    rows = list(reversed(result.scalars().all()))  # oldest first
-    messages = []
-    for row in rows:
-        if row.role == "user":
-            messages.append(HumanMessage(content=row.content))
-        elif row.role == "assistant":
-            messages.append(AIMessage(content=row.content))
-        elif row.role == "system":
-            messages.append(SystemMessage(content=row.content))
-    return messages
 
 
-async def _load_prior_evidence_state(session: AsyncSession, chat_id: _uuid.UUID) -> EvidenceState | None:
-    """Load the structured cross-turn evidence state from the last interaction.
-
-    The state is stored as a compact JSON block appended to the interaction's
-    routing_path. Returns None when there is no prior state.
-    """
-    result = await session.execute(
-        select(Agent_interact)
-        .where(Agent_interact.chat_id == chat_id)
-        .order_by(Agent_interact.created_at.desc())
-        .limit(1)
-    )
-    last_interaction = result.scalar_one_or_none()
-    if not last_interaction:
-        return None
-    routing_path = last_interaction.routing_path or ""
-    return load_evidence_state_from_text(routing_path)
 
 
-def _finalize_evidence_state(
-    final_state: dict,
-    prior_state: EvidenceState | None,
-    turn: int,
-) -> EvidenceState:
-    """Build the turn's evidence state and merge it with the prior state."""
-    evidence: list[Evidence] = final_state.get("evidence", [])
-    claims: list[Claim] = final_state.get("claims", [])
-    current = build_evidence_state(evidence, claims, turn=turn)
-    return merge_evidence_state(prior_state, current)
 
 
-async def _load_prior_evidence_summary(session: AsyncSession, chat_id: _uuid.UUID) -> str:
-    """Build a summary of key evidence from prior turns to carry forward.
-
-    This prevents cross-turn evidence state loss by including the most important
-    evidence from the last interaction as context for the current query.
-    """
-    # Get the last interaction to extract its evidence metadata
-    result = await session.execute(
-        select(Agent_interact)
-        .where(Agent_interact.chat_id == chat_id)
-        .order_by(Agent_interact.created_at.desc())
-        .limit(1)
-    )
-    last_interaction = result.scalar_one_or_none()
-    if not last_interaction:
-        return ""
-
-    # Parse routing_path to extract prior evidence if stored
-    # We store evidence metadata in the routing_path as JSON
-    routing_path = last_interaction.routing_path or ""
-    try:
-        import json as _json
-        # Check if routing_path contains evidence metadata (new format)
-        if routing_path.startswith("{"):
-            data = _json.loads(routing_path)
-            prior_evidence = data.get("evidence", [])
-            if prior_evidence:
-                lines = ["PRIOR TURN EVIDENCE (from previous conversation):"]
-                for ev in prior_evidence[:MAX_PRIOR_EVIDENCE]:
-                    line = f"- {ev.get('metric', 'N/A')} | {ev.get('geography', 'N/A')} | {ev.get('period', 'N/A')} | {ev.get('value', 'N/A')}"
-                    if ev.get('temporal'):
-                        line += f" ({ev['temporal']})"
-                    line += f" [{ev.get('source', 'unknown')}]"
-                    lines.append(line)
-                return "\n".join(lines)
-    except (ValueError, KeyError):
-        pass
-
-    return ""
 
 
-async def _store_messages(
-    session: AsyncSession,
-    chat_id: _uuid.UUID,
-    user_msg: str,
-    ai_msg: str,
-    *,
-    provenance: dict | None = None,
-    token_estimate: int | None = None,
-    estimated_cost_usd: float | None = None,
-    is_ingest_notice: bool = False,
-) -> None:
-    """Store a user+assistant message pair (assistant row keeps analysis provenance).
-
-    A5: When is_ingest_notice=True, stores a typed metadata flag on the system
-    message so downstream detection uses the flag, not text sniffing.
-    """
-    from sqlalchemy import text
-    import hashlib
-    import json as _json
-
-    chat_id_hash = hashlib.md5(chat_id.bytes).digest()[:8]
-    chat_id_int = int.from_bytes(chat_id_hash, byteorder="big") % (2**63)
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(:chat_id)"),
-        {"chat_id": chat_id_int},
-    )
-
-    result = await session.execute(
-        select(ChatMessage.sequence)
-        .where(ChatMessage.chat_id == chat_id)
-        .order_by(ChatMessage.sequence.desc())
-        .limit(1)
-    )
-    last_seq = result.scalar()
-    next_seq = (last_seq or 0) + 1
-
-    prov_text = _json.dumps(provenance, default=str) if provenance else None
-    session.add(ChatMessage(chat_id=chat_id, role="user", content=user_msg, sequence=next_seq))
-    # A5: Store typed ingest signal in provenance_json for system messages
-    assistant_prov = dict(provenance) if provenance else {}
-    if is_ingest_notice:
-        assistant_prov["_ingest_chat_id"] = str(chat_id)
-    prov_text_final = _json.dumps(assistant_prov, default=str) if assistant_prov else prov_text
-    session.add(
-        ChatMessage(
-            chat_id=chat_id,
-            role="assistant",
-            content=ai_msg,
-            sequence=next_seq + 1,
-            provenance_json=prov_text_final,
-            token_estimate=token_estimate,
-            estimated_cost_usd=estimated_cost_usd,
-        )
-    )
-    await session.commit()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -620,283 +447,10 @@ async def query_agent(request: Request,
 # Streaming query — SSE for real-time node status
 # ──────────────────────────────────────────────────────────────────────────────
 
-NODE_LABELS = {
-    "classify_and_plan": "Understanding & planning",
-    "gather_evidence": "Gathering evidence",
-    "generate_answer": "Generating answer",
-    "verify_answer": "Verifying facts",
-    "conversational_response": "Responding",
-    "ask_clarification": "Asking for clarification",
-}
 
 
-def _normalize_verification_errors(errors) -> list[dict]:
-    """Accept VerificationError objects or already-serialized dicts."""
-    out: list[dict] = []
-    for e in errors or []:
-        if hasattr(e, "to_dict"):
-            out.append(e.to_dict())
-        elif isinstance(e, dict):
-            out.append(e)
-    return out
 
 
-async def _stream_query(
-    chat_id: _uuid.UUID,
-    user_id: _uuid.UUID,
-    message: str,
-    session_factory,
-    provider: str = "auto",
-    user_credentials: dict | None = None,
-):
-    """SSE generator that yields node-level status events during graph execution."""
-    start_time = time.perf_counter()
-    # Load prior cross-turn evidence state (short-lived session).
-    prior_state: EvidenceState | None = None
-    async with session_factory() as _vs:
-        await _verify_chat_ownership(_vs, chat_id, user_id)
-        prior_state = await _load_prior_evidence_state(_vs, chat_id)
-    turn = (prior_state.turn + 1) if prior_state else 1
-    initial_state = _build_initial_state(
-        query=message,
-        user_id=user_id,
-        chat_id=chat_id,
-        provider=provider,
-        prior_evidence_state=prior_state,
-        user_credentials=user_credentials or {},
-    )
-    answer = ""
-    accumulated_state: dict = {**initial_state}
-    trajectory_nodes = []
-
-    try:
-        # Use stream_mode="updates" which gives {node_name: output} per node
-        async def _run_stream():
-            nonlocal answer, accumulated_state, trajectory_nodes
-            async for event in rag_app.astream(initial_state, stream_mode="updates"):
-                for node_name, node_output in event.items():
-                    if node_name in ("__start__", "__end__"):
-                        continue
-
-                    # Track trajectory
-                    if node_name not in trajectory_nodes:
-                        trajectory_nodes.append(node_name)
-
-                    # Build rich status details based on node
-                    detail = ""
-                    if node_name == "classify_and_plan" and isinstance(node_output, dict):
-                        u = node_output.get("understanding")
-                        if u is not None:
-                            mode = getattr(u, "mode", None)
-                            detail = f"Mode: {getattr(mode, 'value', mode)}"
-                    elif node_name == "gather_evidence" and isinstance(node_output, dict):
-                        ev_count = len(node_output.get("evidence", []) or [])
-                        detail = f"Found {ev_count} evidence items"
-                    elif node_name == "verify_answer" and isinstance(node_output, dict):
-                        claims = node_output.get("claims", []) or []
-                        failed = [
-                            c for c in claims
-                            if (c.status.value if hasattr(c.status, "value") else str(c.status))
-                            in ("unverified", "contradicted", "uncertain")
-                        ]
-                        detail = f"Claims: {len(claims)} total, {len(failed)} need attention"
-
-                    # Send status update
-                    label = NODE_LABELS.get(node_name, node_name)
-                    yield f"event: status\ndata: {json.dumps({'node': node_name, 'label': label, 'detail': detail, 'status': 'running'})}\n\n"
-
-                    # If answer generation completed, stream the answer tokens
-                    if node_name == "generate_answer" and isinstance(node_output, dict):
-                        new_answer = node_output.get("answer", "")
-                        if new_answer and new_answer != answer:
-                            if answer:
-                                # Repair pass produced a replacement — tell the
-                                # client to discard the previously streamed text.
-                                yield "event: answer_reset\ndata: {}\n\n"
-                            answer = new_answer
-                            chunk_size = 100
-                            for i in range(0, len(answer), chunk_size):
-                                yield f"event: token\ndata: {json.dumps({'content': answer[i:i+chunk_size]})}\n\n"
-
-                    # Accumulate node outputs so we can build the provenance payload without re-running the graph.
-                    if isinstance(node_output, dict):
-                        accumulated_state.update(node_output)
-
-                    # Push evidence to the UI as soon as it exists (don't wait for verify/done).
-                    if node_name in ("gather_evidence", "generate_answer") and isinstance(node_output, dict):
-                        ev = accumulated_state.get("evidence") or []
-                        if ev:
-                            yield (
-                                "event: provenance\ndata: "
-                                + json.dumps({"citations": _citations_payload(ev), "conflicts": []})
-                                + "\n\n"
-                            )
-
-        # Overall query timeout (0 / unset = disabled for slow OpenRouter / networks)
-        deadline = None
-        if settings.QUERY_TIMEOUT_SECONDS and settings.QUERY_TIMEOUT_SECONDS > 0:
-            deadline = start_time + settings.QUERY_TIMEOUT_SECONDS
-        async for chunk in _run_stream():
-            if deadline is not None and time.perf_counter() > deadline:
-                raise asyncio.TimeoutError()
-            yield chunk
-
-        final_state = accumulated_state
-        answer = answer or final_state.get("answer", "") or ""
-        if not answer.strip():
-            answer = "I was unable to generate an answer. Please try rephrasing your question."
-
-        elapsed = time.perf_counter() - start_time
-        trajectory = " → ".join(trajectory_nodes) if trajectory_nodes else "unknown"
-
-        # Persist the structured cross-turn evidence state for the next turn.
-        merged_state = _finalize_evidence_state(final_state, prior_state, turn)
-        trajectory = trajectory + "\n" + serialize_for_storage(merged_state)
-        verification_errors = _normalize_verification_errors(final_state.get("verification_errors", []))
-
-        # Build structured provenance payload from accumulated node outputs.
-        evidence = final_state.get("evidence", []) if isinstance(final_state, dict) else []
-        claims = final_state.get("claims", []) if isinstance(final_state, dict) else []
-        conflicts: list = []
-        citations = _citations_payload(evidence)
-        claim_payload = _claims_payload(claims)
-
-        provider_used = final_state.get("provider_used")
-        latency_ms = round(elapsed * 1000, 2)
-        provenance = {
-            "citations": citations,
-            "claims": claim_payload,
-            "conflicts": conflicts,
-            "final_status": final_state.get("final_status"),
-            "latency_ms": latency_ms,
-            "provider_used": provider_used,
-            "verification_errors": verification_errors,
-            "trajectory": trajectory,
-        }
-
-        meta: dict = {}
-        # Persist interaction + assistant provenance for Analysis panel restore
-        async with session_factory() as log_session:
-            meta = await _log_interaction(
-                db=log_session,
-                chat_id=chat_id,
-                user_input=message,
-                agent_output=answer,
-                routing_path=trajectory,
-                latency=elapsed,
-                provenance=provenance,
-                provider_used=provider_used,
-            )
-            await _store_messages(
-                log_session,
-                chat_id,
-                message,
-                answer,
-                provenance=provenance,
-                token_estimate=meta.get("token_metric"),
-                estimated_cost_usd=meta.get("estimated_cost_usd"),
-            )
-
-        yield (
-            "event: done\ndata: "
-            + json.dumps(
-                {
-                    "answer": answer,
-                    "chat_id": str(chat_id),
-                    "latency_ms": latency_ms,
-                    "provider_used": provider_used,
-                    "final_status": final_state.get("final_status"),
-                    "claims": claim_payload,
-                    "citations": citations,
-                    "conflicts": conflicts,
-                    "verification_errors": verification_errors,
-                    "trajectory": trajectory,
-                    "token_estimate": meta.get("token_metric"),
-                    "estimated_cost_usd": meta.get("estimated_cost_usd"),
-                }
-            )
-            + "\n\n"
-        )
-    except Exception as e:
-        # Timeout, GraphRecursionError, or any mid-pipeline failure: keep answer + evidence.
-        is_timeout = isinstance(e, asyncio.TimeoutError)
-        status = "timeout" if is_timeout else "partial"
-        if is_timeout:
-            logger.error("Streaming query timeout for chat %s after %ds", chat_id, settings.QUERY_TIMEOUT_SECONDS)
-        else:
-            logger.exception("Streaming query failed for chat %s", chat_id)
-
-        if answer:
-            elapsed = time.perf_counter() - start_time
-            evidence = accumulated_state.get("evidence", []) if isinstance(accumulated_state, dict) else []
-            claims = accumulated_state.get("claims", []) if isinstance(accumulated_state, dict) else []
-            if not claims:
-                from app.agent.citation_validator import validate_answer_citations
-                try:
-                    claims = validate_answer_citations(
-                        answer, evidence, cite_map=accumulated_state.get("cite_map") or {}
-                    ).claims
-                except Exception:
-                    claims = []
-            citations = _citations_payload(evidence)
-            claim_payload = _claims_payload(claims)
-            suffix = f" ({status})"
-            try:
-                provenance = {
-                    "citations": citations,
-                    "claims": claim_payload,
-                    "conflicts": [],
-                    "final_status": status,
-                    "latency_ms": round(elapsed * 1000, 2),
-                    "provider_used": accumulated_state.get("provider_used") if isinstance(accumulated_state, dict) else None,
-                }
-                async with session_factory() as log_session:
-                    meta = await _log_interaction(
-                        db=log_session,
-                        chat_id=chat_id,
-                        user_input=message,
-                        agent_output=answer,
-                        routing_path=" → ".join(trajectory_nodes) + suffix,
-                        latency=elapsed,
-                        provenance=provenance,
-                        provider_used=provenance.get("provider_used"),
-                    )
-                    await _store_messages(
-                        log_session,
-                        chat_id,
-                        message,
-                        answer,
-                        provenance=provenance,
-                        token_estimate=meta.get("token_metric"),
-                        estimated_cost_usd=meta.get("estimated_cost_usd"),
-                    )
-            except Exception:
-                logger.exception("Failed to persist partial answer after %s for chat %s", status, chat_id)
-            yield (
-                "event: done\ndata: "
-                + json.dumps(
-                    {
-                        "answer": answer,
-                        "chat_id": str(chat_id),
-                        "latency_ms": round(elapsed * 1000, 2),
-                        "provider_used": accumulated_state.get("provider_used"),
-                        "final_status": status,
-                        "claims": claim_payload,
-                        "citations": citations,
-                        "conflicts": [],
-                        "verification_errors": [],
-                        "trajectory": " → ".join(trajectory_nodes) + suffix,
-                    }
-                )
-                + "\n\n"
-            )
-        else:
-            detail = (
-                f"Request timed out after {settings.QUERY_TIMEOUT_SECONDS}s"
-                if is_timeout
-                else str(e)
-            )
-            yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
 
 
 @_query_limiter.limit("10/minute")
@@ -935,107 +489,12 @@ async def query_agent_stream(
     )
 
 
-async def _log_interaction(
-    db: AsyncSession,
-    chat_id: _uuid.UUID,
-    user_input: str,
-    agent_output: str,
-    routing_path: str,
-    latency: float,
-    *,
-    provenance: dict | None = None,
-    provider_used: str | None = None,
-) -> dict:
-    """Write one interaction row. Returns token/cost metrics for message storage."""
-    import json as _json
-    from app.core.costing import estimate_cost_usd
-
-    tokens = estimate_tokens(user_input) + estimate_tokens(agent_output)
-    cost = estimate_cost_usd(tokens, provider_used)
-    meta = {
-        "token_metric": tokens,
-        "estimated_cost_usd": cost,
-        "provider_used": provider_used,
-    }
-    try:
-        interaction = Agent_interact(
-            chat_id=chat_id,
-            user_input=user_input,
-            agent_output=agent_output,
-            routing_path=routing_path,
-            token_metric=tokens,
-            latency=round(latency, 4),
-            provenance_json=_json.dumps(provenance, default=str) if provenance else None,
-            estimated_cost_usd=cost,
-            provider_used=provider_used,
-        )
-        db.add(interaction)
-        await db.commit()
-    except Exception:
-        logger.exception("Failed to log interaction for chat %s", chat_id)
-    return meta
 
 
-def _citations_payload(evidence: list, limit: int = 15) -> list[dict]:
-    """Serialize evidence for SSE/API provenance panels."""
-    out: list[dict] = []
-    for ev in (evidence or [])[:limit]:
-        out.append(
-            {
-                "evidence_id": ev.evidence_id,
-                "text": (ev.text or "")[:500],
-                "source_type": ev.source_type.value if hasattr(ev.source_type, "value") else str(ev.source_type),
-                "source_name": ev.source_name,
-                "source_url": ev.source_url,
-                "source_date": ev.source_date.isoformat() if ev.source_date else None,
-                "metric_type": "unknown",
-                "metric_value": "",
-                "geographic_scope": "unknown",
-                "geography": "",
-                "year_period": "",
-                "temporal_qualifier": "unknown",
-                "source_quality": "unknown",
-            }
-        )
-    return out
 
 
-def _claims_payload(claims: list) -> list[dict]:
-    out: list[dict] = []
-    for c in claims or []:
-        out.append(
-            {
-                "claim_id": c.claim_id,
-                "text": c.text,
-                "status": c.status.value if hasattr(c.status, "value") else str(c.status),
-                "claim_type": "fact",
-                "evidence_ids": c.evidence_ids,
-                "contradicting_evidence_ids": [],
-                "reasoning": c.reasoning,
-            }
-        )
-    return out
 
 
-def _build_trajectory(state: dict) -> str:
-    """
-    Reconstruct which nodes were visited based on the final state.
-    Also stores key evidence metadata for cross-turn carry-forward.
-    """
-    steps = ["classify_and_plan"]
-
-    if state.get("retrieval_count", 0) > 0:
-        steps.append("retrieve_documents")
-    if state.get("search_count", 0) > 0:
-        steps.append("search_web")
-
-    steps.extend(["generate_answer", "verify_answer"])
-
-    if state.get("repair_count", 0) > 0:
-        steps.append(f"repair×{state['repair_count']}")
-
-    trajectory = " → ".join(steps)
-    return trajectory
 
 
 # ──────────────────────────────────────────────────────────────────────────────

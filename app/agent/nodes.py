@@ -30,9 +30,11 @@ from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 
 from app.agent.citation_validator import (
+    CITATION_TOKEN_RE,
     CitationValidationResult,
     flag_uncited_in_answer,
     split_checkable_sentences,
+    strip_weak_markers,
     validate_answer_citations,
 )
 from app.agent.context_assembly import GENERATOR_BUDGET
@@ -461,13 +463,26 @@ def _parse_date(text: str | None) -> datetime | None:
         return datetime(int(m.group(1)), 1, 1, tzinfo=timezone.utc)
     return None
 
+_TEMPORAL_AUTHORITY_HOSTS = (
+    "wikipedia.org", "britannica.com", "reuters.com", "apnews.com", "bbc.com",
+)
 
-def _evidence_sort_key(ev: Evidence) -> float:
-    """Rank by rerank score when available, else retrieval score. Recency breaks ties."""
+
+def _evidence_sort_key(ev: Evidence, *, temporal: bool = False) -> float:
+    """Rank by rerank score when available, else retrieval score. Recency breaks ties.
+
+    With ``temporal=True`` (current-events question), stable event/encyclopedic
+    sources get a small tie-break nudge — live-news feeds return tangential
+    articles that outrank the actual event page on raw keyword overlap.
+    """
     base = ev.rerank_score if ev.rerank_score is not None else ev.retrieval_score
     if ev.source_date:
         age_days = max((utc_now() - ev.source_date).days, 0)
         base += min(age_days, 3650) / 365000  # tiny, bounded nudge toward fresher sources
+    if temporal:
+        host = (urlparse(ev.source_url or "").netloc or "").lower()
+        if any(host == h or host.endswith("." + h) for h in _TEMPORAL_AUTHORITY_HOSTS):
+            base += 0.02
     return float(base or 0.0)
 
 
@@ -493,6 +508,8 @@ Decide:
 3. needs_documents: true if the user's own uploaded documents might be relevant.
 4. needs_web: true if public/web knowledge is needed. Default true for factual questions about the world.
 5. search_queries: 1-3 precise web/document search queries derived from rewritten_query. Each query must be self-contained.
+   If temporal_focus is set, make at least one query a bare encyclopedic topic phrase (no question words), e.g.
+   "who won the most recent World Cup final" -> "2026 FIFA World Cup final" — event/encyclopedia pages answer these.
 6. temporal_focus: the time frame the question is about ("latest", "2023", "Q1 2025", ...). Empty string if no time dimension.
 7. geography: the place the question is about, exactly as the user framed it. Empty string if none.
 
@@ -847,7 +864,8 @@ async def gather_evidence(state: dict) -> dict:
         for ev in unique:
             rs = score_by_text.get(ev.text)
             ev.rerank_score = float(rs) if rs is not None else None
-        unique.sort(key=_evidence_sort_key, reverse=True)
+        temporal = bool(getattr(u, "temporal_focus", ""))
+        unique.sort(key=lambda ev: _evidence_sort_key(ev, temporal=temporal), reverse=True)
         selected = unique[:MAX_EVIDENCE]
 
         # Enforce the generator token budget in ranked order.
@@ -1004,8 +1022,12 @@ def verify_answer(state: dict) -> dict:
         }
 
     mechanical: CitationValidationResult = validate_answer_citations(
-        answer, evidence, cite_map=cite_map
+        answer, evidence, cite_map=cite_map,
+        entailment_gate=True,
     )
+    # Unsupported claims must not keep citations in the prose: a marker asserts
+    # the evidence backs the statement, which the gate just refuted.
+    answer = strip_weak_markers(answer, mechanical)
     claims_by_text = {c.text: c for c in mechanical.claims}
 
     llms = _resolve_llms(state)
@@ -1099,7 +1121,11 @@ def _append_caveats(answer: str, failed: list[Claim]) -> str:
     lines = ["", "Caveats:", "The following points could not be fully verified against the retrieved evidence:"]
     seen: set[str] = set()
     for c in failed:
-        t = c.text.strip()[:300]
+        # Caveat bullets quote claims whose markers may already have been
+        # stripped (support gate) or not (judge-only demotions); either way a
+        # dangling [E#] in an "unverified" bullet is noise.
+        t = CITATION_TOKEN_RE.sub("", c.text).strip()[:300]
+        t = re.sub(r"\s+([.,;:])", r"\1", t)
         if t in seen:
             continue
         seen.add(t)

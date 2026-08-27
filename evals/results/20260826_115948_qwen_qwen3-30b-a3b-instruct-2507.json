@@ -1,0 +1,181 @@
+{
+ "results": [
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The capital of Australia is Canberra.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 17.1,
+   "claims_total": 2,
+   "claims_verified": 1,
+   "claims_unverified": 1,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The answer is correct, complete, and directly answers the question."
+  },
+  {
+   "id": "covid-vaccine-type",
+   "query": "What type of vaccine did Pfizer-BioNTech develop for COVID-19?",
+   "answer": "Pfizer and BioNTech developed an mRNA-based COVID-19 vaccine that was adapted to target the XFG variant for the 2026-2027 vaccination season [E1]. This vaccine has been authorized by the European Commission and is designed to induce a strong immune response against contemporary and emerging SARS-CoV-2 lineages.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- This vaccine has been authorized by the European Commission and is designed to induce a strong immune response against contemporary and emerging SARS-CoV-2 lineages.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 20.2,
+   "claims_total": 4,
+   "claims_verified": 4,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0,
+   "judge_score": 3,
+   "judge_reason": "The assistant correctly identifies the vaccine as mRNA-based, but includes unverified and potentially inaccurate details about the XFG variant and 2026-2027 season that go beyond the question."
+  },
+  {
+   "id": "deepest-ocean",
+   "query": "What is the deepest known point in the ocean and how deep is it?",
+   "answer": "The deepest known point in the ocean is the Challenger Deep, located within the Mariana Trench in the western Pacific Ocean [E1]. It reaches a depth of approximately 10,984 meters (about 36,037 feet) below sea level. This depth is so great that Mount Everest, if placed at this location, would be completely submerged under water with more than a mile of water above its peak [E7].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- It reaches a depth of approximately 10,984 meters (about 36,037 feet) below sea level.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 40.3,
+   "claims_total": 6,
+   "claims_verified": 4.5,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The assistant's answer correctly identifies Challenger Deep in the Mariana Trench and provides a depth within the reference range, directly and completely answering the question."
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "The European Union currently has 27 member states. This number reflects the current membership following the United Kingdom's departure from the EU.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The European Union currently has 27 member states.\n- This number reflects the current membership following the United Kingdom's departure from the EU.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 16.4,
+   "claims_total": 3,
+   "claims_verified": 1.5,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The assistant's answer correctly states the number of EU member states and provides relevant context, fully addressing the question."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai.  \n\nIndia's approximate GDP size is USD 3.92 trillion for the period 2025\u201326 [E1]. This figure places India as the sixth-largest economy in the world [E2].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- India's financial capital is Mumbai.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 35.6,
+   "claims_total": 5,
+   "claims_verified": 3,
+   "claims_unverified": 2,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The assistant correctly identifies Mumbai as the financial capital and provides an approximate GDP size within the reference range, directly answering both parts of the question."
+  },
+  {
+   "id": "internet-users",
+   "query": "Approximately how many people worldwide use the internet today?",
+   "answer": "As of 2026, nearly three-quarters of the world\u2019s population is now online [E3]. This equates to approximately 5.6 billion people, based on a global population of around 8 billion.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- This equates to approximately 5.6 billion people, based on a global population of around 8 billion.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 19.5,
+   "claims_total": 5,
+   "claims_verified": 3,
+   "claims_unverified": 2,
+   "score_stddev": 2.0,
+   "judge_score": 4,
+   "judge_reason": "The assistant's answer correctly provides a number around 5 billion, aligning with the reference answer, though the year 2026 may introduce minor imprecision."
+  },
+  {
+   "id": "mars-mission",
+   "query": "Which country's spacecraft was the first to successfully land on Mars?",
+   "answer": "The first successful and sustained Mars landing by a spacecraft was achieved by NASA's Viking 1 mission, which landed on Mars in 1976.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The first successful and sustained Mars landing by a spacecraft was achieved by NASA's Viking 1 mission, which landed on Mars in 1976.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 44.0,
+   "claims_total": 2,
+   "claims_verified": 1,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.5,
+   "judge_score": 3,
+   "judge_reason": "The assistant's answer correctly identifies Viking 1 as a successful landing but omits the Soviet Union's Mars 3, which was the first soft landing, making it incomplete."
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize, awarded in 2025, was given to Venezuelan opposition leader Maria Corina Machado for her efforts to bring democracy to Venezuela and challenge the rule of Nicolas Maduro [E2]. This award was announced on October 10, 2025.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The most recent Nobel Peace Prize, awarded in 2025, was given to Venezuelan opposition leader Maria Corina Machado for her efforts to bring democracy to Venezuela and challenge the rule of Nicolas Maduro\n- This award was announced on October 10, 2025\n- This award was announced on October 10, 2025.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 11.9,
+   "claims_total": 3,
+   "claims_verified": 1,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0,
+   "judge_score": 2,
+   "judge_reason": "The answer directly addresses the question with specific names and dates, but the caveats explicitly state the key claims could not be verified against retrieved evidence, raising serious concerns abo"
+  },
+  {
+   "id": "olympics-host",
+   "query": "Which city hosted the most recent Summer Olympic Games?",
+   "answer": "The most recent Summer Olympic Games were hosted by Paris, France, in 2024.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The most recent Summer Olympic Games were hosted by Paris, France, in 2024.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 11.9,
+   "claims_total": 2,
+   "claims_verified": 1,
+   "claims_unverified": 1,
+   "score_stddev": 0.0,
+   "judge_score": 3,
+   "judge_reason": "The answer directly addresses the question with specific details (Paris, France, 2024) but fails to cite any sources."
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum [E1]. It was first released in 1991.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- It was first released in 1991.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 52.8,
+   "claims_total": 3,
+   "claims_verified": 2.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The assistant's answer correctly identifies Guido van Rossum as the creator and 1991 as the release year, matching the ground truth exactly."
+  },
+  {
+   "id": "quantum-supremacy",
+   "query": "Which company first claimed quantum supremacy and with what processor?",
+   "answer": "Google first claimed quantum supremacy in 2019 with its 53-qubit processor named Sycamore [E5].",
+   "final_status": "answered",
+   "latency_s": 21.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "score_stddev": 0.0,
+   "judge_score": 5,
+   "judge_reason": "The answer correctly identifies Google, the Sycamore processor, and the year 2019, fully matching the reference answer."
+  },
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "The most recent FIFA World Cup was held in 2022 in Qatar [E2]. Argentina won the tournament by defeating France in the final [E2]. The match ended in a 3-3 draw after extra time, and Argentina won 4-2 in the penalty shootout. The final took place on December 18, 2022 [E2].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The match ended in a 3-3 draw after extra time, and Argentina won 4-2 in the penalty shootout.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 16.9,
+   "claims_total": 7,
+   "claims_verified": 5.5,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.5,
+   "judge_score": 4,
+   "judge_reason": "The answer directly addresses the question with specific details (Argentina, France, 3-3 draw, 4-2 penalties, December 18, 2022) and cites a source, though the caveat about unverified score details pr"
+  }
+ ],
+ "unstable_cases": [
+  {
+   "id": "internet-users",
+   "scores": [
+    4,
+    0
+   ]
+  }
+ ],
+ "repeats": 2,
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 2,
+   "avg_lat": 2128.05,
+   "pt": 1124,
+   "ct": 170
+  }
+ ],
+ "rejudged": true
+}

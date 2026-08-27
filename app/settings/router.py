@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +15,13 @@ from app.core.secrets import decrypt_secret, encrypt_secret, mask_key
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
-ProviderName = Literal["openrouter", "google", "groq"]
+ProviderName = str  # any id works; known families get env defaults + special clients
 PROVIDERS: tuple[str, ...] = ("openrouter", "google", "groq")
+CLIENT_FAMILIES: tuple[str, ...] = ("openai", "anthropic", "ollama")
+
+
+def _is_known(provider: str) -> bool:
+    return provider in PROVIDERS
 
 
 def _env_defaults(provider: str) -> dict:
@@ -50,19 +53,24 @@ class ProviderSettingsOut(BaseModel):
     masked_key: str | None = None
     has_fallback_key: bool = False
     masked_fallback_key: str | None = None
+    client_family: str = "openai"          # openai-compatible | anthropic | ollama
+    base_url: str | None = None            # custom OpenAI-compatible endpoint (not secret)
     planner_model: str | None = None
     generator_model: str | None = None
     verifier_model: str | None = None
-    default_planner_model: str
-    default_generator_model: str
-    default_verifier_model: str
-    has_server_key: bool
+    default_planner_model: str = ""
+    default_generator_model: str = ""
+    default_verifier_model: str = ""
+    has_server_key: bool = False
 
 
 class ProviderSettingsUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=8)
     fallback_api_key: str | None = None
+    clear_key: bool = False
     clear_fallback: bool = False
+    client_family: str | None = None        # openai | anthropic | ollama
+    base_url: str | None = None             # custom endpoint (OpenAI-compatible)
     planner_model: str | None = None
     generator_model: str | None = None
     verifier_model: str | None = None
@@ -70,6 +78,25 @@ class ProviderSettingsUpdate(BaseModel):
 
 class ProviderListResponse(BaseModel):
     providers: list[ProviderSettingsOut]
+
+
+def _provider_out(name: str, row, defaults: dict) -> ProviderSettingsOut:
+    return ProviderSettingsOut(
+        provider=name,
+        has_key=bool(row and row.api_key_enc),
+        masked_key=row.masked_key if row else None,
+        has_fallback_key=bool(row and row.fallback_api_key_enc),
+        masked_fallback_key=row.masked_fallback_key if row else None,
+        client_family=(row.client_family if row else "openai") or "openai",
+        base_url=row.base_url if row else None,
+        planner_model=row.planner_model if row else None,
+        generator_model=row.generator_model if row else None,
+        verifier_model=row.verifier_model if row else None,
+        default_planner_model=defaults["planner_model"],
+        default_generator_model=defaults["generator_model"],
+        default_verifier_model=defaults["verifier_model"],
+        has_server_key=defaults["has_server_key"],
+    )
 
 
 @router.get("/providers", response_model=ProviderListResponse)
@@ -83,26 +110,14 @@ async def list_providers(
         )
     )
     by_provider = {row.provider: row for row in result.scalars().all()}
+
     out: list[ProviderSettingsOut] = []
     for name in PROVIDERS:
-        defaults = _env_defaults(name)
-        row = by_provider.get(name)
-        out.append(
-            ProviderSettingsOut(
-                provider=name,
-                has_key=bool(row and row.api_key_enc),
-                masked_key=row.masked_key if row else None,
-                has_fallback_key=bool(row and row.fallback_api_key_enc),
-                masked_fallback_key=row.masked_fallback_key if row else None,
-                planner_model=row.planner_model if row else None,
-                generator_model=row.generator_model if row else None,
-                verifier_model=row.verifier_model if row else None,
-                default_planner_model=defaults["planner_model"],
-                default_generator_model=defaults["generator_model"],
-                default_verifier_model=defaults["verifier_model"],
-                has_server_key=defaults["has_server_key"],
-            )
-        )
+        out.append(_provider_out(name, by_provider.get(name), _env_defaults(name)))
+    # Any stored custom provider that isn't one of the known families is listed
+    # too, so a user-added key is always visible/editable.
+    for name in sorted(set(by_provider) - set(PROVIDERS)):
+        out.append(_provider_out(name, by_provider[name], _env_defaults(name)))
     return ProviderListResponse(providers=out)
 
 
@@ -127,12 +142,23 @@ async def upsert_provider(
     if body.api_key:
         row.api_key_enc = encrypt_secret(body.api_key.strip())
         row.masked_key = mask_key(body.api_key.strip())
+    if body.clear_key:
+        row.api_key_enc = None
+        row.masked_key = None
     if body.fallback_api_key:
         row.fallback_api_key_enc = encrypt_secret(body.fallback_api_key.strip())
         row.masked_fallback_key = mask_key(body.fallback_api_key.strip())
     if body.clear_fallback:
         row.fallback_api_key_enc = None
         row.masked_fallback_key = None
+
+    if body.client_family:
+        family = body.client_family.strip().lower()
+        if family not in CLIENT_FAMILIES:
+            family = "openai"
+        row.client_family = family
+    if body.base_url is not None:
+        row.base_url = body.base_url.strip() or None
 
     if body.planner_model is not None:
         row.planner_model = body.planner_model.strip() or None
@@ -144,20 +170,7 @@ async def upsert_provider(
     await db.commit()
     await db.refresh(row)
     defaults = _env_defaults(provider)
-    return ProviderSettingsOut(
-        provider=provider,
-        has_key=bool(row.api_key_enc),
-        masked_key=row.masked_key,
-        has_fallback_key=bool(row.fallback_api_key_enc),
-        masked_fallback_key=row.masked_fallback_key,
-        planner_model=row.planner_model,
-        generator_model=row.generator_model,
-        verifier_model=row.verifier_model,
-        default_planner_model=defaults["planner_model"],
-        default_generator_model=defaults["generator_model"],
-        default_verifier_model=defaults["verifier_model"],
-        has_server_key=defaults["has_server_key"],
-    )
+    return _provider_out(provider, row, defaults)
 
 
 @router.delete("/providers/{provider}", response_model=dict)
@@ -174,10 +187,13 @@ async def delete_provider(
     )
     row = result.scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="Provider settings not found")
+        # Idempotent: deleting an already-absent provider is a no-op success,
+        # not a 404 — the frontend "Clear keys" button must never error on an
+        # empty provider.
+        return {"detail": "Provider settings cleared", "cleared": False}
     await db.delete(row)
     await db.commit()
-    return {"detail": "Provider settings cleared"}
+    return {"detail": "Provider settings cleared", "cleared": True}
 
 
 async def load_user_provider_credentials(
@@ -193,6 +209,8 @@ async def load_user_provider_credentials(
             "planner_model": row.planner_model,
             "generator_model": row.generator_model,
             "verifier_model": row.verifier_model,
+            "client_family": (row.client_family or "openai"),
+            "base_url": row.base_url,
             "api_key": None,
             "fallback_api_key": None,
         }

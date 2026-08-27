@@ -49,7 +49,9 @@ class UserProviderSettings(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.user_id", ondelete="CASCADE"), index=True)
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # openrouter | google | groq
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)  # openrouter | google | groq | <any custom>
+    client_family: Mapped[str] = mapped_column(String(16), nullable=False, server_default="openai")  # openai | anthropic | ollama
+    base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)  # custom OpenAI-compatible endpoint
     api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     fallback_api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     masked_key: Mapped[str | None] = mapped_column(String(64), nullable=True)

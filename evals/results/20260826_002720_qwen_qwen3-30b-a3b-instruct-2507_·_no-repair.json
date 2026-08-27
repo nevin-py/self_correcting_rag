@@ -1,0 +1,88 @@
+{
+ "results": [
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra [E8].",
+   "final_status": "answered",
+   "latency_s": 7.7,
+   "judge_score": 5,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "The European Union currently has 27 member states [E10]. This number reflects the membership following the United Kingdom's departure from the EU.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The European Union currently has 27 member states\n- This number reflects the membership following the United Kingdom's departure from the EU",
+   "final_status": "answered_with_caveats",
+   "latency_s": 10.8,
+   "judge_score": 5,
+   "claims_total": 5,
+   "claims_verified": 2.5,
+   "claims_unverified": 2.5,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai [E11].  \nIndia's approximate GDP size in USD is USD 3.92 trillion for the fiscal year 2025-26 [E1].",
+   "final_status": "answered",
+   "latency_s": 6.5,
+   "judge_score": 5,
+   "claims_total": 4,
+   "claims_verified": 3.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize was awarded in 2025. The laureate is not explicitly named in the provided evidence. However, it is noted that Donald Trump was nominated for the Nobel Peace Prize from 2018 to the present [E1], but this does not confirm he won. No other specific winner of the 2025 Nobel Peace Prize is mentioned in the evidence. Therefore, based on the provided information, the winner of the 2025 Nobel Peace Prize cannot be identified.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The most recent Nobel Peace Prize was awarded in 2025.",
+   "final_status": "answered_with_caveats",
+   "latency_s": 20.2,
+   "judge_score": 0.5,
+   "claims_total": 7,
+   "claims_verified": 5.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.5
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum and was first released in 1991 [E8].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- The Python programming language was created by Guido van Rossum and was first released in 1991",
+   "final_status": "answered_with_caveats",
+   "latency_s": 9.2,
+   "judge_score": 5,
+   "claims_total": 2,
+   "claims_verified": 1,
+   "claims_unverified": 1.5,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "Spain won the most recent FIFA World Cup, defeating Argentina in the final. The match ended with a score of 1\u20130, with Ferran Torres scoring the only goal [E3]. The final took place in 2026 [E1].",
+   "final_status": "answered",
+   "latency_s": 18.8,
+   "judge_score": 0.5,
+   "claims_total": 6,
+   "claims_verified": 5.5,
+   "claims_unverified": 1,
+   "score_stddev": 0.5
+  }
+ ],
+ "unstable_cases": [],
+ "repeats": 2,
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 2,
+   "avg_lat": 1955.5,
+   "pt": 1010,
+   "ct": 199
+  }
+ ]
+}

@@ -32,12 +32,44 @@ function VerificationSummary({ claims, conflicts }: { claims?: Claim[]; conflict
 
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-2">
-      {hasConflicts && <Badge variant="accent">Conflict Resolved</Badge>}
-      {failed.length === 0 ? (
-        <Badge variant="success">Verified</Badge>
-      ) : (
-        <Badge variant="warning">{failed.length} claim{failed.length > 1 ? "s" : ""} flagged</Badge>
-      )}
+      <Badge variant="mono">{claims?.filter((c) => c.status === "verified").length ?? 0} verified</Badge>
+      {failed.length > 0 && <Badge variant="mono">{failed.length} unverified</Badge>}
+      {hasConflicts && <Badge variant="mono">conflict detected</Badge>}
+    </div>
+  );
+}
+
+function SourceChips({ citations }: { citations: Citation[] }) {
+  if (!citations.length) return null;
+  return (
+    <div className="mt-3 flex flex-wrap gap-1.5">
+      <span className="label-caps mr-1 self-center">Sources</span>
+      {citations.slice(0, 8).map((c, i) => {
+        const chip = (
+          <>
+            <span className="text-accent-bright/90">[{i + 1}]</span>
+            <span className="max-w-[220px] truncate">{c.source_name}</span>
+          </>
+        );
+        const cls =
+          "citation-chip max-w-[260px] gap-1.5 aria-[current=true]:border-accent-bright";
+        return c.source_url ? (
+          <a
+            key={c.evidence_id}
+            href={c.source_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cls}
+            title={c.source_name}
+          >
+            {chip}
+          </a>
+        ) : (
+          <span key={c.evidence_id} className={cls} title={c.source_name}>
+            {chip}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -80,13 +112,14 @@ export default function ChatMessage({
   };
 
   if (isSystem) {
+    const failed = meta?.status === "failed";
     return (
-      <div className="flex justify-center py-2">
+      <div className="flex justify-center py-2 animate-msg-in">
         <div
           className={cn(
-            "border px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider",
-            meta?.status === "failed"
-              ? "border-error bg-accent-glow text-error"
+            "rounded-md border px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider",
+            failed
+              ? "border-warning/60 bg-warning/10 text-warning"
               : "border-border bg-surface-raised text-text-secondary"
           )}
         >
@@ -97,6 +130,8 @@ export default function ChatMessage({
   }
 
   const timeStr = timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // Before the first streamed token arrives we show a calm pulse, not a spinner.
+  const awaitingFirstToken = isStreaming && content.length === 0;
 
   return (
     <article
@@ -104,117 +139,107 @@ export default function ChatMessage({
         if (!isUser) openMessageAnalysis(id);
       }}
       className={cn(
-        "group relative border transition-colors",
-        isUser
-          ? "ml-8 border-border bg-surface-raised"
-          : cn(
-              "mr-0 border-border bg-surface cursor-pointer hover:border-border-strong",
-              isSelected && "border-accent bg-accent-glow/30",
-              isStreaming && "border-accent-bright"
-            )
+        "animate-msg-in group relative w-full",
+        isUser ? "flex justify-end" : ""
       )}
     >
-      <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
-        <div className="flex items-center gap-3">
-          <span className="font-mono text-[9px] uppercase tracking-[0.15em] text-text-muted">
-            {isUser ? "Operator" : "System Response"}
-          </span>
-          <span className="font-mono text-[9px] text-text-muted">{timeStr}</span>
-        </div>
-        {!isUser && (
-          <div className="flex items-center gap-2">
-            {finalStatus && <Badge variant="mono">{finalStatus}</Badge>}
-            {typeof latencyMs === "number" && (
-              <span className="font-mono text-[9px] text-text-muted">{latencyMs.toFixed(0)}ms</span>
-            )}
-            {typeof estimatedCostUsd === "number" && estimatedCostUsd > 0 && (
-              <span className="font-mono text-[9px] text-text-muted">~${estimatedCostUsd.toFixed(4)}</span>
-            )}
-            <div className="relative" ref={menuRef}>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMenuOpen((o) => !o);
-                }}
-                className="opacity-0 transition-opacity group-hover:opacity-100 p-1 text-text-muted hover:text-text-primary"
-                title="Message actions"
-                aria-label="Message actions"
-              >
-                <MoreHorizontal size={14} />
-              </button>
-              {menuOpen && (
-                <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] border border-border bg-surface shadow-lg">
-                  <button
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openMessageAnalysis(id);
-                      setMenuOpen(false);
-                    }}
-                  >
-                    <PanelRightOpen size={12} />
-                    Show analysis
-                  </button>
-                  <button
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleCopy();
-                      setMenuOpen(false);
-                    }}
-                  >
-                    {copied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
-                    Copy response
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+      <div
+        className={cn(
+          "bubble min-w-0 px-4 py-3 select-text",
+          "max-w-[min(100%,var(--bubble-max))]",
+          isUser
+            ? "bubble-user bg-surface-raised lg:ml-auto"
+            : cn(
+                "bg-surface border transition-colors cursor-pointer hover:border-accent/70",
+                isSelected && "border-strong shadow-[0_0_10px_var(--accent-glow)]",
+                isStreaming && !awaitingFirstToken && "border-accent-bright/60"
+              )
         )}
-      </div>
+      >
+        {/* Meta header */}
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="flex items-baseline gap-2.5">
+            <span className="font-mono text-[9px] uppercase tracking-[0.15em] text-text-secondary">
+              {isUser ? "You" : "SCRAG"}
+            </span>
+            <span className="font-mono text-[9px] text-text-muted">{timeStr}</span>
+            {meta?.filename && (
+              <span className="truncate font-mono text-[9px] text-text-muted" title={meta.filename}>
+                {meta.filename}
+              </span>
+            )}
+          </div>
+          {!isUser && (
+            <div className="flex items-center gap-2">
+              {finalStatus && <Badge variant="mono">{finalStatus}</Badge>}
+              {typeof latencyMs === "number" && (
+                <span className="font-mono text-[9px] text-text-muted">{(latencyMs / 1000).toFixed(1)}s</span>
+              )}
+              {typeof estimatedCostUsd === "number" && estimatedCostUsd > 0 && (
+                <span className="font-mono text-[9px] text-text-muted">~${estimatedCostUsd.toFixed(4)}</span>
+              )}
+              <div className="relative" ref={menuRef}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen((o) => !o);
+                  }}
+                  className="p-1 text-text-muted opacity-0 transition-opacity hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+                  title="Message actions"
+                  aria-label="Message actions"
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+                {menuOpen && (
+                  <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border bg-surface py-1 shadow-xl">
+                    <button
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openMessageAnalysis(id);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <PanelRightOpen size={12} />
+                      Show analysis
+                    </button>
+                    <button
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCopy();
+                        setMenuOpen(false);
+                      }}
+                    >
+                      {copied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
+                      Copy response
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
-      <div className={cn("px-4 py-3 select-text", isUser ? "text-sm text-text-primary" : "")}>
+        {/* Body — plain #F1EDEF while streaming, never glowing */}
         {isUser ? (
-          <p className="leading-relaxed">{content}</p>
+          <p className="text-[15px] leading-[1.65] text-text-primary">{content}</p>
+        ) : awaitingFirstToken ? (
+          /* Calm three-dot pulse during retrieval/generation warm-up */
+          <div className="dot-pulse flex items-center gap-1.5 py-1" aria-label="Working on your answer">
+            <span />
+            <span />
+            <span />
+          </div>
         ) : (
           <>
             <MarkdownRenderer content={content} citations={citations} />
+            {isStreaming && <span className="streaming-cursor" aria-hidden="true" />}
             <VerificationSummary claims={claims} conflicts={conflicts} />
-            {citations && citations.length > 0 && (
-              <div className="mt-3 space-y-1 border-t border-border pt-2">
-                <p className="label-caps text-text-muted">Sources</p>
-                <div className="flex flex-col gap-1">
-                  {citations.slice(0, 8).map((c, i) => (
-                    <div key={c.evidence_id} className="flex items-start gap-2 font-mono text-[10px]">
-                      <span className="shrink-0 text-accent-bright">[{i + 1}]</span>
-                      {c.source_url ? (
-                        <a
-                          href={c.source_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="truncate text-text-secondary hover:text-accent-bright"
-                        >
-                          {c.source_name}
-                        </a>
-                      ) : (
-                        <span className="truncate text-text-secondary">{c.source_name}</span>
-                      )}
-                      <span className="shrink-0 text-text-muted">{c.source_type}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            {citations && citations.length > 0 && <SourceChips citations={citations} />}
           </>
         )}
       </div>
-
-      {isStreaming && (
-        <div className="flex items-center gap-1 border-t border-accent px-3 py-1">
-          <span className="inline-block h-1 w-1 bg-accent-bright pipeline-active" />
-          <span className="font-mono text-[9px] uppercase tracking-wider text-accent-bright">Transmitting</span>
-        </div>
-      )}
     </article>
   );
 }

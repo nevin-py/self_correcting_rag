@@ -32,6 +32,11 @@ function StageBlock({ stage, state, isLast }: { stage: typeof PIPELINE_STAGES[0]
         {state.status === "active" && state.label && (
           <span className="mt-0.5 truncate font-mono text-[8px] text-text-muted">{state.label}</span>
         )}
+        {typeof state.elapsedMs === "number" && state.elapsedMs > 0 && (
+          <span className="mt-0.5 font-mono text-[8px] text-text-muted">
+            {(state.elapsedMs / 1000).toFixed(1)}s
+          </span>
+        )}
         {state.status === "conflict" && (
           <span className="mt-0.5 font-mono text-[8px] text-accent-bright">DETECTED</span>
         )}

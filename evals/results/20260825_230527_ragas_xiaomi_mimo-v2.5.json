@@ -1,0 +1,27 @@
+{
+ "judge": "xiaomi/mimo-v2.5",
+ "cases": 3,
+ "per_case": [
+  {
+   "id": "world-cup-latest",
+   "faithfulness": 0.8,
+   "answer_relevancy": 0.8992516994476318,
+   "context_precision": NaN,
+   "answer_correctness": NaN
+  },
+  {
+   "id": "capital-australia",
+   "faithfulness": 0.0,
+   "answer_relevancy": 0.9999999403953552,
+   "context_precision": NaN,
+   "answer_correctness": 0.6781015545129776
+  },
+  {
+   "id": "india-capital-gdp",
+   "faithfulness": 0.0,
+   "answer_relevancy": 0.8947762846946716,
+   "context_precision": 0.0,
+   "answer_correctness": NaN
+  }
+ ]
+}

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     MAX_INGEST_TOKENS_PER_DAY: int = 500_000
     MAX_TAVILY_CALLS_PER_DAY: int = 50
     MAX_FILE_TOKENS: int = 200_000
+    # Full-page enrichment: fetch readable text of the top N search-result URLs
+    # so evidence carries whole pages, not just snippets (0 disables).
+    EVIDENCE_FETCH_TOP_N: int = 2
+    EVIDENCE_FETCH_TIMEOUT: float = 8.0
     MAX_CHUNKS_PER_FILE: int = 500
 
     # AI agent keys (system defaults; users may override LLM keys in Settings)
@@ -53,6 +57,9 @@ class Settings(BaseSettings):
 
     # Tooling (system-only — not user-configurable)
     TAVILY_API_KEY: str
+    # Optional second key: rotated in automatically when the primary hits its
+    # quota ("usage limit" / 429), so evals and production survive free-tier caps.
+    TAVILY_API_KEY_BACKUP: str = ""
     SEARXNG_URL: str = "http://localhost:8888"
     CHUNK_SIZE: int
     CHUNK_OVERLAP: int
@@ -84,7 +91,11 @@ class Settings(BaseSettings):
     NLI_ENTAIL_THRESHOLD: float = 0.7
     NLI_CONTRADICT_THRESHOLD: float = 0.7
     # C5: Near-duplicate similarity threshold for evidence dedup (0-1)
-    DEDUP_SIMILARITY_THRESHOLD: float = 0.70
+    # Claim↔evidence support gate: a cited sentence whose embedding similarity
+    # to ALL of its cited evidence chunks falls below this is demoted to a caveat
+    # (citation id resolution alone does not imply the evidence supports the claim).
+    CITATION_SUPPORT_GATE: bool = True
+    CITATION_SUPPORT_MIN_SIM: float = 0.55
     # C9: Numeric contradiction penalty multiplier (lower = harsher penalty)
     NUMERIC_CONTRADICTION_PENALTY: float = 0.5
 

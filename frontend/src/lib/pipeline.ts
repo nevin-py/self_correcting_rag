@@ -71,10 +71,11 @@ export interface PhaseState {
   status: StageStatus;
   label?: string;
   detail?: string;
+  elapsedMs?: number;
 }
 
 export function buildPhaseStates(
-  events: Array<{ node: string; label: string; detail?: string; status: string }>,
+  events: Array<{ node: string; label: string; detail?: string; status: string; elapsedMs?: number; nodeMs?: number }>,
   hasConflicts = false,
   isComplete = false
 ): PhaseState[] {
@@ -99,11 +100,19 @@ export function buildPhaseStates(
         status: "active" as StageStatus,
         label: lastEvent?.label,
         detail: lastEvent?.detail,
+        elapsedMs: lastEvent?.elapsedMs,
       };
     }
 
     if (touched || (isComplete && stage.id === "answer")) {
-      return { phase: stage.id, status: "done" as StageStatus };
+      const doneEv = [...events].reverse().find(
+        (e) => stage.nodes.includes(e.node) && e.status === "done" && typeof e.nodeMs === "number"
+      );
+      return {
+        phase: stage.id,
+        status: "done" as StageStatus,
+        elapsedMs: doneEv?.nodeMs,
+      };
     }
 
     return { phase: stage.id, status: "idle" as StageStatus };

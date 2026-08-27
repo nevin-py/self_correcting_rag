@@ -22,6 +22,7 @@ from tenacity import (
 )
 
 import hashlib
+from collections import OrderedDict
 import re
 
 from app.core.config import settings
@@ -616,18 +617,49 @@ def _embed_text_sync_with_retry(texts: list[str], task_type: str) -> list[list[f
     return _embed_text_sync(texts, task_type)
 
 
+_EMBED_CACHE_MAX = 4096
+_embed_cache: "OrderedDict[tuple[str, str], list[float]]" = OrderedDict()
+
+
+def _cache_key(task_type: str, text: str) -> tuple[str, str]:
+    return (task_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
 async def _embed_text_rate_limited(
     texts: list[str], task_type: str = "search_query"
 ) -> list[list[float]]:
-    """Async embedding: rate-limited + retries + off the event loop."""
+    """Async embedding: content-hash cached first (identical text = zero API
+    calls — repeated queries re-embed the same strings constantly), then
+    rate-limited + retries + off the event loop for the rest."""
+    results: dict[int, list[float]] = {}
+    misses: list[int] = []
+    miss_texts: list[str] = []
+    for i, t in enumerate(texts):
+        key = _cache_key(task_type, t)
+        cached = _embed_cache.get(key)
+        if cached is not None:
+            _embed_cache.move_to_end(key)
+            results[i] = cached
+        else:
+            misses.append(i)
+            miss_texts.append(t)
 
-    async def _call():
-        async with _rate_limiter.acquire():
-            return await asyncio.to_thread(
-                _embed_text_sync_with_retry, texts, task_type
-            )
+    if miss_texts:
+        async def _call():
+            async with _rate_limiter.acquire():
+                return await asyncio.to_thread(
+                    _embed_text_sync_with_retry, miss_texts, task_type
+                )
 
-    return await _call()
+        vectors = await _call()
+        for i, vec in zip(misses, vectors):
+            results[i] = vec
+            key = _cache_key(task_type, texts[i])
+            _embed_cache[key] = vec
+            while len(_embed_cache) > _EMBED_CACHE_MAX:
+                _embed_cache.popitem(last=False)  # FIFO-evict oldest
+
+    return [results[i] for i in range(len(texts))]
 
 
 # ── Retrieval (scope-filtered, rate-limited) ─────────────────────────────────

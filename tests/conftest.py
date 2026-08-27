@@ -69,6 +69,15 @@ def _enable_fixed_otp() -> None:
 
 _enable_fixed_otp()
 
+# The claim↔evidence support gate loads a local ONNX encoder on first use; keep
+# the offline suite network-free by default. tests/test_support_gate.py opts in
+# with injected fake embeddings and re-enables the gate explicitly.
+@pytest.fixture(autouse=True)
+def _support_gate_off(monkeypatch):
+    from app.agent import support as support_gate
+
+    monkeypatch.setattr(support_gate, "gate_enabled", lambda: False)
+
 
 async def _register_verified(client: httpx.AsyncClient, email: str, password: str) -> dict:
     """Register, verify via the fixed OTP, log in, and return identity + headers."""

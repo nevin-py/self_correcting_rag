@@ -304,7 +304,8 @@ failure modes don't overlap:
 |---|---|---|---|
 | Deterministic citation validator (`make eval`, 22-case golden set) | citation integrity — every factual sentence resolves to real evidence | none (pure code) | highest; regression gate |
 | Live multi-model harness (`evals/harness.py`) | end-to-end correctness (LLM judge 0–5), caveat rate, verified-claim %, latency, tokens | live web result drift + judge variance | medium; coarse signal |
-| RAGAS (`evals/ragas_eval.py`) | industry-standard faithfulness / relevancy / precision | the judge layer itself | currently low — see lessons |
+| RAGAS (`evals/ragas_eval.py`, paid non-reasoning judge) | industry-standard faithfulness / relevancy / context precision / correctness | judge quality + stale references on temporal cases | medium; complements the harness |
+| Repair A/B (`evals/harness.py --ab-repair`) | does the self-correction loop actually help? Δ judge score + Δ verified-claim share vs `MAX_REPAIR_PASSES=0` | same-judge paired runs reduce drift noise; still small-n | direct measure of the core feature |
 
 ### What the numbers say
 
@@ -321,14 +322,19 @@ failure modes don't overlap:
    with an earlier training cutoff scored it 0/5 from a stale prior. Temporal
    cases now use `evidence_faithful` grading (consistency with cited sources)
    instead of reference comparison.
-2. **LLM-judge frameworks fail silently.** RAGAS scored an objectively correct
-   answer ("EU has 27 members") at faithfulness 0.00 because its
-   claim-decomposition call failed and unparseable claims count as unsupported.
-   Rule: never trust a metric that gives perfect zeros to verified-perfect
-   answers — audit per-case rows before believing aggregates.
-3. **Reasoning models break structured eval prompts.** Hidden reasoning tokens
-   blow past timeouts and wrap JSON output. Use fast non-reasoning judges for
-   framework sub-calls; save reasoning models for generation work.
+2. **Citation-id resolution is not entailment.** The answer once cited [E3] for
+   "Argentina won 2–1" while E3's text never mentioned the result — the
+   mechanical validator only checked that E3 exists. Fix: a local-MiniLM
+   support gate (`app/agent/support.py`, `CITATION_SUPPORT_MIN_SIM=0.55`)
+   demotes cited sentences whose evidence does not semantically support them;
+   markers are stripped from prose and the claim moves to Caveats.
+3. **LLM-judge frameworks fail silently.** RAGAS (since removed) scored an
+   objectively correct answer ("EU has 27 members") at faithfulness 0.00 because
+   its claim-decomposition call failed and unparseable claims count as
+   unsupported — and its per-sample fan-out tripped every free-tier judge's rate
+   limits into silent NaN. Rule: never trust a metric that gives perfect zeros
+   to verified-perfect answers — audit per-case rows before believing
+   aggregates.
 4. **Run-to-run variance is real.** Live-web evals re-sample search results each
    run; differences under ±0.4 score / ±15pp on 12 cases are noise. Grow the
    case set or average multiple runs before concluding anything small.
@@ -351,10 +357,9 @@ MODELS=...` (real-world check) → compare against `evals/results/*_comparison.m
 - **Rollback:** redeploy a previous commit (image tag is `:latest`; pin version tags
   for instant revision rollbacks).
 - **Tests:** 100 offline tests (LLMs faked — no network in CI) + integration-marked
-  live tests + golden-set citation evals (`python -m evals.run_eval`) + RAGAS
-  industry-metric runs (`python -m evals.ragas_eval`) + live multi-model harness
-  (`evals/harness.py`); every LLM call traced to `llm_call_traces`
-  (see `GET /api/v1/agent/llm-traces`, optional Langfuse export).
+  live tests + golden-set citation evals (`python -m evals.run_eval`) +
+  live multi-model harness with repair A/B (`evals/harness.py`); every LLM call traced
+  to `llm_call_traces` (see `GET /api/v1/agent/llm-traces`, optional Langfuse export).
 
 ---
 

@@ -1,0 +1,110 @@
+{
+ "results": [
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra [E4].",
+   "final_status": "answered",
+   "latency_s": 11.7,
+   "judge_score": 5,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "eu-members-count",
+   "query": "How many member states are in the European Union?",
+   "answer": "The European Union currently has 27 member states [E4]. This number reflects the current membership following the United Kingdom's departure from the EU.",
+   "final_status": "answered",
+   "latency_s": 13.5,
+   "judge_score": 5,
+   "claims_total": 5,
+   "claims_verified": 5,
+   "claims_unverified": 0,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "India's financial capital is Mumbai [E10].  \n\nIndia's nominal GDP was approximately USD 3.92 trillion in the fiscal year 2025\u201326 (FY26), according to the International Monetary Fund's April 2026 World Economic Outlook [E1][E2]. This figure places India as the world's sixth-largest economy [E1][E2].\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- India's financial capital is Mumbai",
+   "final_status": "answered_with_caveats",
+   "latency_s": 21.7,
+   "judge_score": 5,
+   "claims_total": 5,
+   "claims_verified": 4.5,
+   "claims_unverified": 0.5,
+   "score_stddev": 0.0
+  },
+  {
+   "id": "nobel-peace-recent",
+   "query": "What organization or person won the most recent Nobel Peace Prize?",
+   "answer": "The most recent Nobel Peace Prize, awarded in 2025, was won by Mar\u00eda Corina Machado, a Venezuelan politician and opposition leader, for her efforts to bring democracy to Venezuela and challenge the rule of Nicol\u00e1s Maduro [E4]. She was officially awarded the prize on October 10, 2025 [E2]. The announcement and award ceremony would have occurred in October 2025, with the prize being presented in December 2025. \n\nNote: While some sources mention a 2026 award, the official and consistent evidence identifies Machado as the 2025 laureate [E4]. There is no confirmed 2026 Nobel Peace Prize winner in the provided evidence.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- She was officially awarded the prize on October 10, 2025\n- The announcement and award ceremony would have occurred in October 2025, with the prize being presented in December 2025",
+   "final_status": "answered_with_caveats",
+   "latency_s": 28.0,
+   "judge_score": 2,
+   "claims_total": 7,
+   "claims_verified": 4,
+   "claims_unverified": 2,
+   "score_stddev": 2.0
+  },
+  {
+   "id": "python-creator",
+   "query": "Who created the Python programming language and in what year was it first released?",
+   "answer": "The Python programming language was created by Guido van Rossum in December 1989 [E1].",
+   "final_status": "answered",
+   "latency_s": 34.6,
+   "judge_score": 4,
+   "claims_total": 2,
+   "claims_verified": 2.5,
+   "claims_unverified": 0,
+   "score_stddev": 1.0
+  },
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "Spain won the most recent FIFA World Cup, defeating Argentina in the final. The match took place in 2026, and the score was Spain 1\u20130 Argentina, with Ferran Torres scoring the only goal [E2][E10].",
+   "final_status": "answered",
+   "latency_s": 15.2,
+   "judge_score": 2.5,
+   "claims_total": 7,
+   "claims_verified": 7,
+   "claims_unverified": 0,
+   "score_stddev": 2.5
+  }
+ ],
+ "unstable_cases": [
+  {
+   "id": "world-cup-latest",
+   "scores": [
+    0,
+    5
+   ]
+  },
+  {
+   "id": "nobel-peace-recent",
+   "scores": [
+    0,
+    4
+   ]
+  },
+  {
+   "id": "python-creator",
+   "scores": [
+    3,
+    5
+   ]
+  }
+ ],
+ "repeats": 2,
+ "traces": [
+  {
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "status": "ok",
+   "n": 2,
+   "avg_lat": 3122.3,
+   "pt": 1010,
+   "ct": 199
+  }
+ ]
+}

@@ -100,6 +100,8 @@ export interface ProviderSettings {
   masked_key: string | null;
   has_fallback_key: boolean;
   masked_fallback_key: string | null;
+  client_family: string;
+  base_url: string | null;
   planner_model: string | null;
   generator_model: string | null;
   verifier_model: string | null;
@@ -117,6 +119,8 @@ export const settingsApi = {
       api_key?: string;
       fallback_api_key?: string;
       clear_fallback?: boolean;
+      client_family?: string;
+      base_url?: string | null;
       planner_model?: string | null;
       generator_model?: string | null;
       verifier_model?: string | null;
