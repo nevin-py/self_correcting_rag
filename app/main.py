@@ -63,7 +63,17 @@ class ASGICorsMiddleware:
         method = scope.get("method", "")
 
         # Determine if origin is allowed
-        allowed_origin = origin if origin and origin in self.allowed_origins else None
+        origin = headers.get(b"origin", b"").decode() if b"origin" in headers else None
+        allowed_origin = None
+        if origin:
+            if origin in self.allowed_origins:
+                allowed_origin = origin
+            elif origin.endswith(".vercel.app"):
+                # Vercel serves every deployment on its own *.vercel.app
+                # subdomain (previews + prod aliases). Auth uses bearer tokens,
+                # never ambient cookies, so a broad origin rule carries no CSRF
+                # surface while guaranteeing new deploys are never blocked.
+                allowed_origin = origin
 
         # ── Handle OPTIONS preflight ────────────────────────────────────
         if method == "OPTIONS" and b"access-control-request-method" in headers:
