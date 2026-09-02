@@ -15,6 +15,29 @@ from app.documents.clients import tavily_client
 logger = logging.getLogger(__name__)
 
 
+# ── Memory-safe HTML parsing ───────────────────────────────────────
+
+_MAX_HTML_CHARS = 2_000_000  # ~2 MB of markup is ample for body text
+
+
+def _bs(text: str) -> "BeautifulSoup":
+    """Parse page HTML without ballooning RAM.
+
+    Wikipedia/news pages run 1–5 MB of markup; BeautifulSoup's html.parser
+    builds DOMs ~20–50× input size, and these parses run concurrently across
+    queries — a 3-query web search peaked >400 MB and OOM-killed 512 MB
+    containers. Two mitigations: (1) truncate input at 2 MB (body text is
+    always near the top), (2) prefer lxml whose DOM is several times smaller
+    and 5–10× faster. Falls back to html.parser when lxml is absent.
+    """
+    if text and len(text) > _MAX_HTML_CHARS:
+        text = text[:_MAX_HTML_CHARS]
+    try:
+        return BeautifulSoup(text, "lxml")
+    except Exception:
+        return BeautifulSoup(text, "html.parser")
+
+
 # ── Text cleaning for LLM consumption ────────────────────────────────────────
 
 def _clean_search_text(text: str, max_chars: int = 1800) -> str:
@@ -204,7 +227,7 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
         if not response:
             return None
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = _bs(response.text)
 
         if soup.title and "Search results" in soup.title.text:
             first_res = soup.find("div", class_="mw-search-result-heading") or soup.find("div", id="mw-search-result-heading")
@@ -220,7 +243,7 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
             try:
                 response = await client.get(target_url, headers=headers)
                 response.raise_for_status()
-                soup = BeautifulSoup(response.text, "html.parser")
+                soup = _bs(response.text)
             except httpx.HTTPError as e:
                 logger.error("Failed to fetch article from search result link: %s", str(e))
                 return None
@@ -558,7 +581,7 @@ async def search_structured(  # noqa: C901
                 ) as client:
                     resp = await client.get(url)
                     resp.raise_for_status()
-                soup = BeautifulSoup(resp.text, "html.parser")
+                soup = _bs(resp.text)
                 for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
                     tag.decompose()
                 paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
