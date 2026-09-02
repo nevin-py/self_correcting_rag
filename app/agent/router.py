@@ -5,11 +5,10 @@ import uuid as _uuid
 import logging
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
-from slowapi.util import get_remote_address
-from sqlalchemy import case as sql_case, delete as sql_delete, func
+from sqlalchemy import case as sql_case, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -48,13 +47,14 @@ logger = logging.getLogger(__name__)
 
 # Split out of this module (routes stay here, logic lives there):
 from app.agent.chat_service import (  # noqa: F401
-    _delete_chroma_for_chat,
+    delete_chunks_for_chat,
     _delete_chat_children,
     _verify_chat_ownership,
     MAX_HISTORY_MESSAGES,
     MAX_PRIOR_EVIDENCE,
     _load_history,
     _load_prior_evidence_state,
+    _load_document_inventory,
     _finalize_evidence_state,
     _load_prior_evidence_summary,
     _store_messages,
@@ -74,7 +74,7 @@ router = APIRouter(prefix="/agent", tags=["Agent"])
 
 # Heavy endpoint — 10 queries/min per user (each triggers multiple LLM calls)
 def _user_key_func(request: Request) -> str:
-    """Rate limit by JWT user ID, falling back to IP."""
+    """Rate limit by JWT user ID, falling back to the (proxy-aware) IP."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         try:
@@ -85,7 +85,8 @@ def _user_key_func(request: Request) -> str:
             return f"user:{decoded['sub']}"
         except Exception:
             pass
-    return f"ip:{get_remote_address(request)}"
+    from app.core.limiter import get_rate_limit_key
+    return f"ip:{get_rate_limit_key(request)}"
 
 
 _query_limiter = Limiter(key_func=_user_key_func)
@@ -135,24 +136,12 @@ async def create_chat(
     )
     total_n = int(total.scalar_one() or 0)
     creates = await count_events_in_last(db, current_user.user_id, "chat_create", timedelta(hours=1))
-    recent_chats = await db.execute(
-        select(func.count()).select_from(Chats).where(
-            Chats.user_id == current_user.user_id,
-            Chats.created_at >= func.now() - timedelta(hours=1),
-        )
-    )
-    recent_n = int(recent_chats.scalar_one() or 0)
     if total_n >= settings.MAX_CHATS_PER_USER:
         raise HTTPException(
             status_code=429,
             detail=f"Chat limit reached ({settings.MAX_CHATS_PER_USER} total).",
         )
     if creates >= settings.MAX_CHAT_CREATES_PER_HOUR:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
-        )
-    if recent_n >= settings.MAX_CHAT_CREATES_PER_HOUR:
         raise HTTPException(
             status_code=429,
             detail=f"Chat create limit reached ({settings.MAX_CHAT_CREATES_PER_HOUR}/hour).",
@@ -214,16 +203,19 @@ async def purge_all_chats(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete every chat (messages, interactions, ingest logs) and the user's Chroma collection."""
+    """Delete every chat (messages, interactions, ingest logs) and the user's Chroma collection.
+
+    UsageEvent rows are deliberately KEPT: they are the quota ledger
+    (query/hour, ingest tokens/day, …). Deleting them here would let a user
+    purge their way out of every rate limit.
+    """
     result = await db.execute(select(Chats).where(Chats.user_id == current_user.user_id))
     chats = list(result.scalars().all())
     for chat in chats:
         await _delete_chat_children(db, chat.chat_id)
         await db.delete(chat)
-    from app.auth.models import UsageEvent
-    await db.execute(sql_delete(UsageEvent).where(UsageEvent.user_id == current_user.user_id))
     await db.commit()
-    _delete_chroma_for_chat(current_user.user_id, None)
+    await delete_chunks_for_chat(current_user.user_id, None)
     logger.info("Purged %d chats for user_id=%s", len(chats), current_user.user_id)
     return {"deleted": len(chats)}
 
@@ -247,7 +239,7 @@ async def delete_chat(
     await _delete_chat_children(db, chat_id)
     await db.delete(chat)
     await db.commit()
-    _delete_chroma_for_chat(current_user.user_id, chat_id)
+    await delete_chunks_for_chat(current_user.user_id, chat_id)
     logger.info("Chat deleted: chat_id=%s user_id=%s", chat_id, current_user.user_id)
 
 
@@ -274,8 +266,8 @@ async def delete_chat(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@_query_limiter.limit("10/minute")
 @router.post("/chats/{chat_id}/query", response_model=QueryResponse)
+@_query_limiter.limit("10/minute")
 async def query_agent(request: Request,
     chat_id: _uuid.UUID,
     body: QueryRequest,
@@ -294,6 +286,7 @@ async def query_agent(request: Request,
     history = []
     prior_evidence_state: EvidenceState | None = None
     user_credentials: dict = {}
+    document_inventory: list[str] = []
     async with session_factory() as verify_session:
         from app.core.usage import enforce_query_rate, record_usage
         from app.settings.router import load_user_provider_credentials
@@ -302,6 +295,7 @@ async def query_agent(request: Request,
         await _verify_chat_ownership(verify_session, chat_id, current_user.user_id)
         history = await _load_history(verify_session, chat_id)
         prior_evidence_state = await _load_prior_evidence_state(verify_session, chat_id)
+        document_inventory = await _load_document_inventory(verify_session, chat_id)
         user_credentials = await load_user_provider_credentials(
             verify_session, current_user.user_id
         )
@@ -320,6 +314,7 @@ async def query_agent(request: Request,
         provider=body.provider,
         prior_evidence_state=prior_evidence_state,
         user_credentials=user_credentials,
+        document_inventory=document_inventory,
     )
 
     start_time = time.perf_counter()
@@ -370,6 +365,7 @@ async def query_agent(request: Request,
     citations = [
         CitationResponse(
             evidence_id=ev.evidence_id,
+            cite_key=(ev.metadata or {}).get("cite_key"),
             text=ev.text[:500],
             source_type=ev.source_type.value,
             source_name=ev.source_name,
@@ -453,8 +449,8 @@ async def query_agent(request: Request,
 
 
 
-@_query_limiter.limit("10/minute")
 @router.post("/chats/{chat_id}/query_stream")
+@_query_limiter.limit("10/minute")
 async def query_agent_stream(
     request: Request,
     chat_id: _uuid.UUID,
@@ -590,11 +586,17 @@ async def get_llm_traces(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Recent LLM call traces + per-model aggregates (latency, tokens, error rate)."""
+    """Recent LLM call traces + per-model aggregates (latency, tokens, error rate).
+
+    Scoped to the requesting user — traces carry the caller's user_id. Never
+    expose other users' model usage, errors, or costs.
+    """
     from app.observability.models import LLMCallTrace
 
+    user_scope = LLMCallTrace.user_id == current_user.user_id
     recent = (await db.execute(
         select(LLMCallTrace)
+        .where(user_scope)
         .order_by(LLMCallTrace.created_at.desc())
         .limit(limit)
     )).scalars().all()
@@ -604,12 +606,12 @@ async def get_llm_traces(
             LLMCallTrace.role,
             LLMCallTrace.model,
             func.count().label("calls"),
-            func.sum(func.cast(LLMCallTrace.status == "ok", sa.Integer)).label("ok"),
+            func.sum(sql_case((LLMCallTrace.status == "ok", 1), else_=0)).label("ok"),
             func.avg(LLMCallTrace.latency_ms).label("avg_latency"),
             func.sum(LLMCallTrace.prompt_tokens_est).label("prompt_tokens"),
             func.sum(LLMCallTrace.completion_tokens_est).label("completion_tokens"),
-            func.sum(sql_case((LLMCallTrace.status == "ok", 1), else_=0)).label("ok"),
         )
+        .where(user_scope)
         .group_by(LLMCallTrace.role, LLMCallTrace.model)
         .order_by(func.count().desc())
     )).all()
@@ -680,116 +682,14 @@ async def get_user_usage(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# WebSocket streaming
+# WebSocket streaming — REMOVED (Sprint 1 security fix)
 # ──────────────────────────────────────────────────────────────────────────────
-
-@router.websocket("/ws/{chat_id}")
-async def ws_query(websocket: WebSocket, chat_id: _uuid.UUID):
-    """
-    WebSocket endpoint for streaming query results.
-
-    Protocol:
-      Client sends: {"message": "..."}
-      Server sends: {"type": "status", "node": "...", "detail": "..."}
-                   {"type": "token", "content": "..."}   (partial answer)
-                   {"type": "done", "answer": "...", "latency_ms": ...}
-                   {"type": "error", "detail": "..."}
-    """
-    await websocket.accept()
-
-    try:
-        data = await websocket.receive_json()
-        message = data.get("message", "")
-        if not message:
-            await websocket.send_json({"type": "error", "detail": "Empty message"})
-            return
-
-        # Authenticate via token in first message or query param
-        token = data.get("token", "")
-        if not token:
-            await websocket.send_json({"type": "error", "detail": "Missing token"})
-            return
-
-        # Validate token
-        import jwt as pyjwt
-        from app.core.config import settings as cfg
-        try:
-            decoded = pyjwt.decode(token, cfg.SECRET_KEY, algorithms=[cfg.ALGORITHM])
-            user_id = _uuid.UUID(decoded["sub"])
-        except (pyjwt.PyJWTError, ValueError):
-            await websocket.send_json({"type": "error", "detail": "Invalid token"})
-            return
-
-        # Verify chat ownership
-        async with get_session_factory()() as session:
-            await _verify_chat_ownership(session, chat_id, user_id)
-
-        # Stream graph execution
-        await websocket.send_json({"type": "status", "node": "start", "detail": "Processing started"})
-
-        provider = data.get("provider", "auto")
-        initial_state = _build_initial_state(query=message, user_id=user_id, chat_id=chat_id, provider=provider)
-        start_time = time.perf_counter()
-
-        # Use astream for node-level streaming — accumulate answer, never re-run graph
-        trajectory_nodes = []
-        answer = ""
-        async for event in rag_app.astream(initial_state, stream_mode="updates"):
-            for node_name, node_output in event.items():
-                if node_name in ("__start__", "__end__"):
-                    continue
-                trajectory_nodes.append(node_name)
-                await websocket.send_json({
-                    "type": "status",
-                    "node": node_name,
-                    "detail": f"{node_name} completed",
-                })
-
-                # Stream tokens from answer generation
-                if node_name == "generate_answer" and isinstance(node_output, dict):
-                    new_answer = node_output.get("answer", "")
-                    if new_answer and new_answer != answer:
-                        if answer:
-                            await websocket.send_json({"type": "answer_reset"})
-                        answer = new_answer
-                        chunk_size = 100
-                        for i in range(0, len(answer), chunk_size):
-                            await websocket.send_json({
-                                "type": "token",
-                                "content": answer[i:i + chunk_size],
-                            })
-                elif node_name == "repair_claims" and isinstance(node_output, dict):
-                    # Caveated final answer after max attempts
-                    repaired = node_output.get("answer")
-                    if repaired:
-                        answer = repaired
-
-        elapsed = time.perf_counter() - start_time
-        latency_ms = round(elapsed * 1000, 2)
-
-        if not answer:
-            answer = "I was unable to generate an answer. Please try rephrasing your question."
-
-        # Log interaction using session factory
-        async with session_factory() as log_session:
-            await _log_interaction(
-                db=log_session,
-                chat_id=chat_id, user_input=message, agent_output=answer,
-                routing_path=" → ".join(trajectory_nodes), latency=elapsed,
-            )
-
-        await websocket.send_json({
-            "type": "done",
-            "answer": answer,
-            "latency_ms": latency_ms,
-            "trajectory": trajectory_nodes,
-        })
-
-    except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
-    except Exception as e:
-        logger.exception("WebSocket error")
-        try:
-            await websocket.send_json({"type": "error", "detail": str(e)})
-        except Exception:
-            pass
+# The /ws/{chat_id} endpoint was deleted because it duplicated the SSE path
+# (POST /chats/{id}/query_stream) with none of its safeguards:
+#   - no query rate limit, no usage/Tavily/ingest budget accounting
+#   - no is_active / email_verified check (only JWT signature + ownership)
+#   - never loaded user provider credentials, chat history, or cross-turn
+#     evidence state → silently different answers than the HTTP path
+#   - auth after accept(), and error handlers leaked raw exception text
+# The SSE endpoint is strictly better and is what the frontend uses.
+# ──────────────────────────────────────────────────────────────────────────────

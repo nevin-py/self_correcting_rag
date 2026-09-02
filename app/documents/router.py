@@ -1,7 +1,10 @@
+import asyncio
 import logging
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, UploadFile, File, status, BackgroundTasks, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -13,6 +16,7 @@ from app.auth.router import get_current_user
 from app.agent.models import Chats
 from app.agent.message_models import ChatMessage
 from app.documents.models import IngestionLog
+from app.documents.signing import signed_file_path, verify_file_sig
 from app.documents.service import (
     full_pipeline,
     compute_file_hash,
@@ -44,28 +48,6 @@ async def _record_ingest_message(session: AsyncSession, chat_id: uuid.UUID, file
         )
     )
     await session.commit()
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-
-        with open("/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-287b18.log", "a") as _f:
-            _f.write(
-                _json.dumps(
-                    {
-                        "sessionId": "287b18",
-                        "hypothesisId": "H3",
-                        "location": "documents/router.py:_record_ingest_message",
-                        "message": "ingest notice persisted",
-                        "data": {"filename": filename, "sequence": next_seq},
-                        "timestamp": int(_time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-    # #endregion
 
 
 async def _run_ingestion(
@@ -75,6 +57,7 @@ async def _run_ingestion(
     uid: uuid.UUID,
     chat_id: uuid.UUID,
     token_estimate: int,
+    pre_extracted: tuple[str, dict] | None = None,
 ):
     """Run the full ingestion pipeline (async) with status tracking."""
     async with AsyncLocalSession() as session:
@@ -90,6 +73,7 @@ async def _run_ingestion(
             filename=filename,
             uid=uid,
             chat_id=chat_id,
+            pre_extracted=pre_extracted,
         )
         async with AsyncLocalSession() as session:
             log = await session.get(IngestionLog, ingestion_id)
@@ -114,8 +98,8 @@ async def _run_ingestion(
 
 @router.post("/upload_file", response_model=IngestionLogResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload(
+    background_tasks: BackgroundTasks,
     chat_id: uuid.UUID = Query(..., description="Chat ID to associate the document with"),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     file: UploadFile = File(...),
@@ -142,9 +126,10 @@ async def upload(
     if len(file_content) > max_size:
         raise HTTPException(status_code=413, detail="File too large (max 50MB)")
 
-    # Estimate tokens early (reuse extract for budget checks)
+    # Parsing (PDF/DOCX) is CPU-bound — run it off the event loop so a 50MB
+    # upload doesn't freeze every concurrent request.
     try:
-        text, metadata = ingestion_pipeline(file_content, file.filename)
+        text, metadata = await asyncio.to_thread(ingestion_pipeline, file_content, file.filename)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read file: {exc}") from exc
 
@@ -155,7 +140,7 @@ async def upload(
             detail=f"File too large (~{token_estimate} tokens; max {settings.MAX_FILE_TOKENS}).",
         )
 
-    chunked = chunking(text=text, metadata=metadata)
+    chunked = await asyncio.to_thread(chunking, text, metadata)
     child_chunks = [c for c in chunked if c.get("metadata", {}).get("chunk_type") != "parent"]
     if len(child_chunks) > settings.MAX_CHUNKS_PER_FILE:
         raise HTTPException(
@@ -197,6 +182,23 @@ async def upload(
     await db.commit()
     await db.refresh(log)
 
+    # Persist the original so citations can hyperlink back to the source.
+    # Storage failure is logged but non-fatal: ingestion itself only needs
+    # the extracted text, which we already have in memory.
+    try:
+        upload_dir = Path(settings.UPLOAD_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        ext = Path(file.filename).suffix.lower()[:16] or ".bin"
+        storage_path = upload_dir / f"{log.id}{ext}"
+        storage_path.write_bytes(file_content)
+        log.storage_path = str(storage_path)
+        log.content_type = file.content_type or "application/octet-stream"
+        log.size_bytes = len(file_content)
+        await db.commit()
+        await db.refresh(log)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not persist original file (%s): %s", log.id, exc)
+
     background_tasks.add_task(
         _run_ingestion,
         ingestion_id=log.id,
@@ -205,6 +207,7 @@ async def upload(
         uid=current_user.user_id,
         chat_id=chat_id,
         token_estimate=token_estimate,
+        pre_extracted=(text, metadata),
     )
 
     logger.info(
@@ -216,6 +219,38 @@ async def upload(
         token_estimate,
     )
     return log
+
+
+@router.get("/{ingestion_id}/file")
+async def get_document_file(
+    ingestion_id: uuid.UUID,
+    exp: int | None = None,
+    sig: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve a stored original. Signed-URL auth (no bearer): <a href> links
+    from the chat transcript can't carry headers. Signature is scoped to this
+    ingestion id and expires (see signing.py)."""
+    if not verify_file_sig(str(ingestion_id), exp, sig):
+        raise HTTPException(status_code=403, detail="Invalid or expired link")
+    result = await db.execute(
+        select(IngestionLog).where(
+            IngestionLog.id == ingestion_id,
+            IngestionLog.storage_path.isnot(None),
+        )
+    )
+    log = result.scalar_one_or_none()
+    if not log or not log.storage_path:
+        raise HTTPException(status_code=404, detail="File not stored")
+    path = Path(log.storage_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File missing from storage")
+    return FileResponse(
+        path,
+        media_type=log.content_type or "application/octet-stream",
+        filename=log.filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.get("/ingestions/{ingestion_id}", response_model=IngestionStatusResponse)

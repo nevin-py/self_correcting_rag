@@ -26,7 +26,9 @@ class Token(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=20)
+    # Optional: refresh tokens now live in an httpOnly cookie; a JSON body is
+    # still accepted for API clients that don't do cookies.
+    refresh_token: str | None = Field(default=None, min_length=20)
 
 
 class TokenData(BaseModel):

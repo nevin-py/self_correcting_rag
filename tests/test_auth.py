@@ -172,3 +172,40 @@ class TestTokenValidation:
         """A10: No Authorization header → 401 or 403 (OAuth2 scheme default)."""
         resp = await client.get("/api/v1/agent/chats")
         assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+class TestVerifyEmailNoBypass:
+    """Regression (Sprint 1): /verify-email must NEVER return a token pair
+    without validating the OTP. The old code returned tokens for an already
+    verified email without checking the code at all — full account takeover
+    for anyone who knew a victim's email address."""
+
+    async def test_already_verified_with_wrong_code_gets_no_tokens(
+        self, client: httpx.AsyncClient, registered_user: dict
+    ):
+        resp = await client.post(
+            "/api/v1/auth/verify-email",
+            json={"email": registered_user["email"], "code": "999999"},
+        )
+        assert resp.status_code == 409
+        body = resp.json()
+        assert "access_token" not in body
+        assert "refresh_token" not in body
+
+    async def test_wrong_code_for_unverified_gets_no_tokens(
+        self, client: httpx.AsyncClient
+    ):
+        email = f"noby_{uuid.uuid4().hex[:8]}@example.com"
+        resp = await client.post(
+            "/api/v1/auth/register", json={"email": email, "password": "validpassword123"}
+        )
+        assert resp.status_code == 201
+
+        resp = await client.post(
+            "/api/v1/auth/verify-email", json={"email": email, "code": "000000"}
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert "access_token" not in body
+        assert "refresh_token" not in body

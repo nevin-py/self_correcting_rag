@@ -16,8 +16,46 @@ from app.core.secrets import decrypt_secret, encrypt_secret, mask_key
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
 ProviderName = str  # any id works; known families get env defaults + special clients
-PROVIDERS: tuple[str, ...] = ("openrouter", "google", "groq")
+
+# Major LLM providers out of the box. Anything else can still be added as a
+# custom provider (any OpenAI-compatible base URL).
+PROVIDERS: tuple[str, ...] = (
+    "openrouter", "google", "groq", "openai", "anthropic", "mistral",
+    "deepseek", "xai", "together", "fireworks", "ollama",
+)
 CLIENT_FAMILIES: tuple[str, ...] = ("openai", "anthropic", "ollama")
+
+# Client family a NEW provider row defaults to (user can override).
+PROVIDER_DEFAULT_FAMILY: dict[str, str] = {
+    "anthropic": "anthropic",
+    "ollama": "ollama",
+}
+
+# OpenAI-compatible endpoints used when the user gives a key but no base URL.
+PROVIDER_DEFAULT_BASE_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "xai": "https://api.x.ai/v1",
+    "together": "https://api.together.xyz/v1",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+}
+
+# Server-side env keys + suggested default models per provider.
+# (env setting name, planner, generator, verifier)
+_PROVIDER_ENV_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
+    "openrouter": ("OPENROUTER_API_KEY", settings.OPENROUTER_PLANNER_MODEL, settings.OPENROUTER_GENERATOR_MODEL, settings.OPENROUTER_HALLUCINATION_MODEL),
+    "google": ("GOOGLE_AI_API_KEY", settings.GOOGLE_AI_PLANNER_MODEL, settings.GOOGLE_AI_GENERATOR_MODEL, settings.GOOGLE_AI_HALLUCINATION_MODEL),
+    "groq": ("GROQ_KEY", "qwen/qwen3.6-27b", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"),
+    "openai": ("OPENAI_API_KEY", "gpt-4o-mini", "gpt-4o-mini", "gpt-4o-mini"),
+    "anthropic": ("ANTHROPIC_API_KEY", "claude-3-5-haiku-latest", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"),
+    "mistral": ("MISTRAL_API_KEY", "mistral-small-latest", "mistral-large-latest", "mistral-small-latest"),
+    "deepseek": ("DEEPSEEK_API_KEY", "deepseek-chat", "deepseek-chat", "deepseek-chat"),
+    "xai": ("XAI_API_KEY", "grok-3-mini", "grok-3-mini", "grok-3-mini"),
+    "together": ("TOGETHER_API_KEY", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+    "fireworks": ("FIREWORKS_API_KEY", "accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/llama-v3p3-70b-instruct"),
+    "ollama": ("", "llama3.1", "llama3.1", "llama3.1"),
+}
 
 
 def _is_known(provider: str) -> bool:
@@ -25,25 +63,16 @@ def _is_known(provider: str) -> bool:
 
 
 def _env_defaults(provider: str) -> dict:
-    if provider == "openrouter":
-        return {
-            "planner_model": settings.OPENROUTER_PLANNER_MODEL,
-            "generator_model": settings.OPENROUTER_GENERATOR_MODEL,
-            "verifier_model": settings.OPENROUTER_HALLUCINATION_MODEL,
-            "has_server_key": bool(settings.OPENROUTER_API_KEY),
-        }
-    if provider == "google":
-        return {
-            "planner_model": settings.GOOGLE_AI_PLANNER_MODEL,
-            "generator_model": settings.GOOGLE_AI_GENERATOR_MODEL,
-            "verifier_model": settings.GOOGLE_AI_HALLUCINATION_MODEL,
-            "has_server_key": bool(settings.GOOGLE_AI_API_KEY),
-        }
+    key_setting, planner, generator, verifier = _PROVIDER_ENV_DEFAULTS.get(
+        provider, ("", "", "", "")
+    )
     return {
-        "planner_model": "qwen/qwen3.6-27b",
-        "generator_model": "openai/gpt-oss-120b",
-        "verifier_model": "qwen/qwen3.6-27b",
-        "has_server_key": bool(settings.GROQ_KEY),
+        "planner_model": planner,
+        "generator_model": generator,
+        "verifier_model": verifier,
+        "has_server_key": bool(getattr(settings, key_setting, "")) if key_setting else False,
+        "default_base_url": PROVIDER_DEFAULT_BASE_URLS.get(provider),
+        "default_family": PROVIDER_DEFAULT_FAMILY.get(provider, "openai"),
     }
 
 
@@ -55,6 +84,8 @@ class ProviderSettingsOut(BaseModel):
     masked_fallback_key: str | None = None
     client_family: str = "openai"          # openai-compatible | anthropic | ollama
     base_url: str | None = None            # custom OpenAI-compatible endpoint (not secret)
+    default_base_url: str | None = None    # provider's canonical endpoint (prefill hint)
+    default_family: str = "openai"
     planner_model: str | None = None
     generator_model: str | None = None
     verifier_model: str | None = None
@@ -87,8 +118,10 @@ def _provider_out(name: str, row, defaults: dict) -> ProviderSettingsOut:
         masked_key=row.masked_key if row else None,
         has_fallback_key=bool(row and row.fallback_api_key_enc),
         masked_fallback_key=row.masked_fallback_key if row else None,
-        client_family=(row.client_family if row else "openai") or "openai",
+        client_family=(row.client_family if row else None) or defaults.get("default_family", "openai"),
         base_url=row.base_url if row else None,
+        default_base_url=defaults.get("default_base_url"),
+        default_family=defaults.get("default_family", "openai"),
         planner_model=row.planner_model if row else None,
         generator_model=row.generator_model if row else None,
         verifier_model=row.verifier_model if row else None,
@@ -136,7 +169,11 @@ async def upsert_provider(
     )
     row = result.scalar_one_or_none()
     if not row:
-        row = UserProviderSettings(user_id=current_user.user_id, provider=provider)
+        row = UserProviderSettings(
+            user_id=current_user.user_id,
+            provider=provider,
+            client_family=PROVIDER_DEFAULT_FAMILY.get(provider, "openai"),
+        )
         db.add(row)
 
     if body.api_key:
@@ -159,6 +196,10 @@ async def upsert_provider(
         row.client_family = family
     if body.base_url is not None:
         row.base_url = body.base_url.strip() or None
+    elif not row.base_url and provider in PROVIDER_DEFAULT_BASE_URLS:
+        # Convenience: a known provider with no explicit endpoint gets its
+        # canonical one, so a saved key just works.
+        row.base_url = PROVIDER_DEFAULT_BASE_URLS[provider]
 
     if body.planner_model is not None:
         row.planner_model = body.planner_model.strip() or None
@@ -171,6 +212,39 @@ async def upsert_provider(
     await db.refresh(row)
     defaults = _env_defaults(provider)
     return _provider_out(provider, row, defaults)
+
+
+@router.get("/providers/{provider}/reveal")
+async def reveal_provider_key(
+    provider: ProviderName,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the user's DECRYPTED API key for a provider.
+
+    Explicit product requirement: the owner of the key can view/copy it from
+    the Settings UI. Scoped to the authenticated user's own row — never
+    exposes server env keys or other users' keys.
+    """
+    result = await db.execute(
+        select(UserProviderSettings).where(
+            UserProviderSettings.user_id == current_user.user_id,
+            UserProviderSettings.provider == provider,
+        )
+    )
+    row = result.scalar_one_or_none()
+    out: dict = {"provider": provider, "api_key": None, "fallback_api_key": None}
+    if row and row.api_key_enc:
+        try:
+            out["api_key"] = decrypt_secret(row.api_key_enc)
+        except ValueError:
+            pass
+    if row and row.fallback_api_key_enc:
+        try:
+            out["fallback_api_key"] = decrypt_secret(row.fallback_api_key_enc)
+        except ValueError:
+            pass
+    return out
 
 
 @router.delete("/providers/{provider}", response_model=dict)

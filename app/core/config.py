@@ -5,13 +5,26 @@ from typing import Literal
 class Settings(BaseSettings):
     # Security
     SECRET_KEY: str
+    # Dedicated key for encrypting user API keys at rest (Fernet). Kept separate
+    # from SECRET_KEY so JWT-secret rotation doesn't brick stored user keys.
+    # Empty = legacy mode: derived from SECRET_KEY (backward compatible).
+    ENCRYPTION_KEY: str = ""
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
     ENVIRONMENT: Literal["development", "production"] = "development"
 
     # Comma-separated frontend origins for production CORS
     CORS_ORIGINS: str = ""
+    # Behind Caddy / Cloud Run / a reverse proxy every request arrives from the
+    # proxy IP — IP-keyed rate limits would bucket ALL users together. Enable
+    # only when the proxy overwrites X-Forwarded-For (never trust raw client
+    # headers from direct internet traffic).
+    TRUST_PROXY_HEADERS: bool = False
+    # Rate-limit storage. Default in-memory (per-process). Production with
+    # multiple workers/instances should use Redis:
+    #   RATELIMIT_STORAGE_URI=redis://redis:6379/0
+    RATELIMIT_STORAGE_URI: str = ""
 
     # Database
     DATABASE_URL: str
@@ -35,6 +48,9 @@ class Settings(BaseSettings):
     MAX_INGEST_TOKENS_PER_DAY: int = 500_000
     MAX_TAVILY_CALLS_PER_DAY: int = 50
     MAX_FILE_TOKENS: int = 200_000
+    # Where uploaded originals are persisted (for citation source links).
+    # Ephemeral on containerized deploys unless a volume is mounted.
+    UPLOAD_DIR: str = "data/uploads"
     # Full-page enrichment: fetch readable text of the top N search-result URLs
     # so evidence carries whole pages, not just snippets (0 disables).
     EVIDENCE_FETCH_TOP_N: int = 2
@@ -47,22 +63,30 @@ class Settings(BaseSettings):
 
     # Google AI Studio (Gemini) — https://aistudio.google.com/apikey
     GOOGLE_AI_API_KEY: str = ""
-    GOOGLE_AI_PLANNER_MODEL: str = "gemini-3.5-flash"
-    GOOGLE_AI_GENERATOR_MODEL: str = "gemini-3.5-flash"
-    GOOGLE_AI_HALLUCINATION_MODEL: str = "gemini-3.5-flash"
+    GOOGLE_AI_PLANNER_MODEL: str = "gemini-2.5-flash"
+    GOOGLE_AI_GENERATOR_MODEL: str = "gemini-2.5-flash"
+    GOOGLE_AI_HALLUCINATION_MODEL: str = "gemini-2.5-flash"
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OPENAI_API_KEY: str = ""
+    # Optional server-wide keys for the built-in provider catalog (users may
+    # also add their own per-user keys in Settings).
+    ANTHROPIC_API_KEY: str = ""
+    MISTRAL_API_KEY: str = ""
+    DEEPSEEK_API_KEY: str = ""
+    XAI_API_KEY: str = ""
+    TOGETHER_API_KEY: str = ""
+    FIREWORKS_API_KEY: str = ""
 
     # Tooling (system-only — not user-configurable)
-    TAVILY_API_KEY: str
+    TAVILY_API_KEY: str = ""
     # Optional second key: rotated in automatically when the primary hits its
     # quota ("usage limit" / 429), so evals and production survive free-tier caps.
     TAVILY_API_KEY_BACKUP: str = ""
     SEARXNG_URL: str = "http://localhost:8888"
-    CHUNK_SIZE: int
-    CHUNK_OVERLAP: int
+    CHUNK_SIZE: int = 2048
+    CHUNK_OVERLAP: int = 256
 
     # OpenRouter
     OPENROUTER_API_KEY: str = ""

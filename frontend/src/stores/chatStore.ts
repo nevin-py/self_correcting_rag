@@ -35,6 +35,63 @@ function parseProvenance(raw: string | null | undefined): Partial<Message> {
   }
 }
 
+// ── In-flight stream persistence (page-refresh survival) ────────────────────
+// The SSE stream dies when the tab reloads — the backend never persisted the
+// partial answer. We mirror the streamed text into sessionStorage so a refresh
+// mid-generation RESTORES the partial instead of losing it, marked as
+// interrupted.
+const streamKey = (chatId: string) => `scr-stream-${chatId}`;
+
+function persistStreamProgress(chatId: string, content: string) {
+  try {
+    sessionStorage.setItem(streamKey(chatId), content);
+  } catch {
+    /* storage full / disabled — refresh simply loses the partial */
+  }
+}
+
+function clearStreamProgress(chatId: string) {
+  try {
+    sessionStorage.removeItem(streamKey(chatId));
+  } catch {
+    /* ignore */
+  }
+}
+
+function restoreInterruptedStream(chatId: string) {
+  if (typeof window === "undefined") return;
+  let partial: string | null = null;
+  try {
+    partial = sessionStorage.getItem(streamKey(chatId));
+  } catch {
+    return;
+  }
+  if (!partial?.trim()) return;
+  const { messages } = useChatStore.getState();
+  // Skip restore if the finished answer already arrived from the DB (stream
+  // completed between refresh start and message load).
+  if (messages.some((m) => m.role === "assistant" && m.content === partial)) {
+    clearStreamProgress(chatId);
+    return;
+  }
+  const msgs = [...messages];
+  const last = msgs[msgs.length - 1];
+  if (last && last.role === "assistant") {
+    last.content = partial;
+    last.finalStatus = "interrupted";
+  } else {
+    msgs.push({
+      id: `interrupted-${Date.now()}`,
+      role: "assistant",
+      content: partial,
+      timestamp: new Date(),
+      finalStatus: "interrupted",
+    });
+  }
+  useChatStore.setState({ messages: msgs });
+  clearStreamProgress(chatId);
+}
+
 /** Rough char→token estimate for the context meter. */
 export function estimateLocalTokens(text: string): number {
   return Math.max(0, Math.ceil((text || "").length / 4));
@@ -182,6 +239,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages,
         selectedMessageId: lastAssistant?.id ?? null,
       });
+      restoreInterruptedStream(chatId);
       void get().refreshUsage();
     } catch {
       set({ messages: [] });
@@ -211,8 +269,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: async (content: string) => {
-    const { activeChatId, messages } = get();
+    const { activeChatId } = get();
     if (!activeChatId) return;
+    if (get().isStreaming) return; // one query at a time — double-clicks cost real LLM money
 
     const userMsg: Message = {
       id: `user-${Date.now()}`,
@@ -221,7 +280,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       timestamp: new Date(),
     };
     set({
-      messages: [...messages, userMsg],
+      messages: [...get().messages, userMsg],
       isStreaming: true,
       graphStatus: null,
       pipelineEvents: [],
@@ -328,6 +387,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 });
                } else if (currentEvent === "token") {
                 fullAnswer += String(data.content);
+                persistStreamProgress(activeChatId, fullAnswer);
                 set((s) => {
                   const msgs = [...s.messages];
                   const lastMsg = msgs[msgs.length - 1];
@@ -367,6 +427,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   return s;
                 });
               } else if (currentEvent === "done") {
+                clearStreamProgress(activeChatId);
                 provenance = {
                   citations: ((data.citations as Citation[]) || []).length
                     ? (data.citations as Citation[])
@@ -408,6 +469,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 });
                 void get().refreshUsage();
               } else if (currentEvent === "error") {
+                clearStreamProgress(activeChatId); // the (partial) answer is persisted server-side
                 set((s) => {
                   // Keep streamed answer + evidence; don't replace with a bare error bubble.
                   const msgs = [...s.messages];

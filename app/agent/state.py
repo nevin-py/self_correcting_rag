@@ -164,6 +164,7 @@ class RAGState(TypedDict, total=False):
     user_credentials: dict                    # provider → {api_key, fallback, models}; never log
     messages: Annotated[list, _keep_latest]   # Conversation history (LangChain messages)
     request_context: dict                     # {timezone, location, device} from the client
+    document_inventory: list                  # Filenames of docs ingested into this chat
 
     # ── routing (set by classify_and_plan) ──
     understanding: Annotated[QueryUnderstanding | None, _keep_latest]

@@ -90,3 +90,4 @@ backups/
 .deepeval/
 .cursor/
 frontend/tsconfig.tsbuildinfo
+deploy/hf-space/

@@ -1,8 +1,30 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import ForeignKey, String, DateTime, Text, Integer, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 from app.core.database import Base
+
+
+class DocumentChunk(Base):
+    """Vector store rows (pgvector) — replaces the embedded ChromaDB store so
+    the backend is fully stateless (works on ephemeral hosts like HF Spaces)."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), index=True
+    )
+    chat_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(768), nullable=False)  # nomic-embed-text-v1.5
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class IngestionLog(Base):
@@ -18,6 +40,10 @@ class IngestionLog(Base):
         String(20), nullable=False, default="pending"
     )  # pending | processing | completed | failed
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Original-file persistence (enables citation → source hyperlinks).
+    storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

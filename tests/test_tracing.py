@@ -3,6 +3,8 @@
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from app.observability import tracing
 
 
@@ -59,3 +61,43 @@ def test_model_name_fallbacks():
     assert tracing.current_model_name(ns) == type(ns).__name__
 
 
+
+
+@pytest.mark.asyncio
+async def test_llm_traces_scoped_to_requesting_user(
+    client,
+    registered_user,
+    auth_headers,
+    second_user,
+    second_auth_headers,
+    db_session,
+):
+    """Regression (Sprint 1): /agent/llm-traces previously returned traces for
+    ALL users (and crashed on an undefined `sa`). It must be scoped to the
+    authenticated caller."""
+    import uuid as _uuid
+
+    from app.observability.models import LLMCallTrace
+
+    session, _engine = db_session
+    session.add(LLMCallTrace(
+        user_id=_uuid.UUID(registered_user["user_id"]),
+        role="planner", model="model-A", status="ok",
+    ))
+    session.add(LLMCallTrace(
+        user_id=_uuid.UUID(second_user["user_id"]),
+        role="planner", model="model-B", status="error",
+    ))
+    await session.commit()
+
+    r1 = await client.get("/api/v1/agent/llm-traces", headers=auth_headers)
+    assert r1.status_code == 200
+    agg1 = r1.json()["aggregates"]
+    assert [a["model"] for a in agg1] == ["model-A"]
+    assert agg1[0]["error_rate"] == 0
+
+    r2 = await client.get("/api/v1/agent/llm-traces", headers=second_auth_headers)
+    assert r2.status_code == 200
+    agg2 = r2.json()["aggregates"]
+    assert [a["model"] for a in agg2] == ["model-B"]
+    assert agg2[0]["error_rate"] == 1.0

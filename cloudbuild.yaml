@@ -11,6 +11,6 @@ steps:
 images:
   - ${_IMAGE}
 substitutions:
-  _IMAGE: us-central1-docker.pkg.dev/PROJECT_ID/scrag/api:latest
+  _IMAGE: us-central1-docker.pkg.dev/scrag-api-260814/scrag/api:latest
 options:
   logging: CLOUD_LOGGING_ONLY

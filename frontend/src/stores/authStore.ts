@@ -18,14 +18,31 @@ interface AuthState {
   bootstrapAuth: () => Promise<void>;
 }
 
-function persistSession(access: string, refresh: string | undefined, email: string, set: (s: Partial<AuthState>) => void) {
+/** Decode the JWT `sub` claim; never throws (a corrupt token must not crash the UI). */
+function parseJwtSub(access: string): string | null {
+  try {
+    const payload = JSON.parse(atob(access.split(".")[1]));
+    return typeof payload?.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSession(
+  access: string,
+  email: string,
+  set: (s: Partial<AuthState>) => void
+) {
+  // Access token in localStorage (short-lived); the refresh token is an
+  // httpOnly cookie set by the server — never stored in JS-readable storage.
   localStorage.setItem("token", access);
-  if (refresh) localStorage.setItem("refresh_token", refresh);
-  const payload = JSON.parse(atob(access.split(".")[1]));
-  // `email` may be empty after a refresh (the rotate response has no email field);
-  // prefer a previously-known email though, defaulting to payload.sub.
-  const resolvedEmail = email || "";
-  set({ user: { user_id: payload.sub, email: resolvedEmail }, token: access, isLoading: false });
+  set({ user: { user_id: parseJwtSub(access) ?? "", email }, token: access, isLoading: false });
+}
+
+function clearSession(set: (s: Partial<AuthState>) => void) {
+  localStorage.removeItem("token");
+  localStorage.removeItem("refresh_token");
+  set({ user: null, token: null, isLoading: false });
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -37,7 +54,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true });
     try {
       const res = await authApi.login(email, password);
-      persistSession(res.data.access_token, res.data.refresh_token, email, set);
+      persistSession(res.data.access_token, email, set);
     } catch (err) {
       set({ isLoading: false });
       throw err;
@@ -60,7 +77,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true });
     try {
       const res = await authApi.verifyEmail(email, code);
-      persistSession(res.data.access_token, res.data.refresh_token, email, set);
+      persistSession(res.data.access_token, email, set);
     } catch (err) {
       set({ isLoading: false });
       throw err;
@@ -68,48 +85,64 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    const refresh = typeof window !== "undefined" ? localStorage.getItem("refresh_token") : null;
-    if (refresh) {
-      authApi.logout(refresh).catch(() => undefined);
-    }
-    localStorage.removeItem("token");
-    localStorage.removeItem("refresh_token");
-    set({ user: null, token: null });
+    // Cookie-based logout: the browser sends the httpOnly refresh cookie.
+    authApi.logout().catch(() => undefined);
+    clearSession(set);
   },
 
   loadUser: () => {
     if (typeof window === "undefined") return;
     const token = localStorage.getItem("token");
     if (token) {
-      try {
-        const payload = JSON.parse(atob(token.split(".")[1]));
-        set({ user: { user_id: payload.sub, email: "" }, token });
-      } catch {
-        localStorage.removeItem("token");
-        localStorage.removeItem("refresh_token");
+      const sub = parseJwtSub(token);
+      if (sub) {
+        set({ user: { user_id: sub, email: "" }, token });
+      } else {
+        clearSession(set);
       }
     }
   },
 
   bootstrapAuth: async () => {
-    // Prove the stored session is still valid on the server, not just present
-    // in localStorage. A stale/expired/rotated token must NOT auto-authenticate
-    // the user into the workspace.
+    // Prove the stored session is still valid on the server — WITHOUT rotating
+    // the refresh token. The previous implementation called /auth/refresh on
+    // every cold load: one rotation per page load, and two open tabs rotating
+    // concurrently trip reuse detection and kill each other's sessions.
     if (typeof window === "undefined") return;
-    const refresh = localStorage.getItem("refresh_token");
     const access = localStorage.getItem("token");
-    if (!refresh && !access) {
-      set({ isLoading: false, token: null, user: null });
-      return;
-    }
+    // NOTE: the refresh token now lives in an httpOnly cookie — its presence
+    // can't be checked from JS. When no access token exists we still try the
+    // refresh round-trip (empty body); a missing cookie just fails and the
+    // session is cleared.
     set({ isLoading: true });
+
+    // 1. Access token present → validate it against /auth/me (no rotation).
+    if (access) {
+      try {
+        const res = await authApi.me();
+        persistSession(access, res.data.email, set);
+        return;
+      } catch {
+        // invalid/expired access — fall through to a single refresh attempt
+      }
+    }
+
+    // 2. Rotate once (httpOnly cookie carries the token), then read the email
+    // from /auth/me with the new token.
     try {
-      const res = await authApi.refresh(refresh ?? "");
-      persistSession(res.data.access_token, res.data.refresh_token, res.data.email ?? "", set);
-    } catch {
-      localStorage.removeItem("token");
+      const res = await authApi.refresh("");
+      const newAccess = res.data.access_token;
+      localStorage.setItem("token", newAccess);
       localStorage.removeItem("refresh_token");
-      set({ user: null, token: null, isLoading: false });
+      set({ token: newAccess });
+      try {
+        const me = await authApi.me();
+        set({ user: { user_id: me.data.user_id, email: me.data.email }, isLoading: false });
+      } catch {
+        set({ user: { user_id: parseJwtSub(newAccess) ?? "", email: "" }, isLoading: false });
+      }
+    } catch {
+      clearSession(set);
     }
   },
 }));

@@ -38,6 +38,7 @@ def _new_state(
     chat_id: Any = None,
     provider: str = "auto",
     messages: list | None = None,
+    document_inventory: list | None = None,
 ) -> RAGState:
     """Construct a fresh RAGState with guard counters initialized."""
     return RAGState(
@@ -47,6 +48,7 @@ def _new_state(
         query_original=query,
         provider=provider or "auto",
         messages=messages or [],
+        document_inventory=document_inventory or [],
         request_context={},
         user_credentials={},
         understanding=None,
@@ -120,9 +122,10 @@ def create_initial_state(
     user_credentials: dict | None = None,
     prior_evidence_state=None,
     request_context: dict | None = None,
+    document_inventory: list | None = None,
 ) -> RAGState:
     """Single canonical entry point used by router.py."""
-    state = _new_state(query, user_id, chat_id, provider, messages)
+    state = _new_state(query, user_id, chat_id, provider, messages, document_inventory)
     state["user_credentials"] = user_credentials or {}
     state["prior_evidence_state"] = prior_evidence_state
     state["request_context"] = request_context or {}

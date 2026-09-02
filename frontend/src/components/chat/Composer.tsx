@@ -95,11 +95,20 @@ export default function Composer({ sessionId, disabled }: ComposerProps) {
           status: "uploaded",
         });
         setUploadedFile(file.name);
-      } catch {
-        useChatStore.getState().addSystemMessage(`Ingestion failed: ${file.name}`, {
-          filename: file.name,
-          status: "failed",
-        });
+      } catch (err) {
+        // Surface the server's rejection reason (413 size, 429 budget, …)
+        // instead of a generic message the user can't act on.
+        const detail =
+          err && typeof err === "object" && "response" in err
+            ? (err.response as { data?: { detail?: string } })?.data?.detail
+            : undefined;
+        useChatStore.getState().addSystemMessage(
+          `Ingestion failed: ${file.name}${detail ? ` — ${detail}` : ""}`,
+          {
+            filename: file.name,
+            status: "failed",
+          }
+        );
       } finally {
         setUploading(false);
       }

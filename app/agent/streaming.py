@@ -48,7 +48,9 @@ from app.agent.schemas import (
 )
 from app.agent.chat_service import (  # noqa: F401
     _verify_chat_ownership,
+    _load_history,
     _load_prior_evidence_state,
+    _load_document_inventory,
     _finalize_evidence_state,
     _store_messages,
     _log_interaction,
@@ -84,6 +86,7 @@ def _build_initial_state(
     history: list | None = None,
     prior_evidence_state: EvidenceState | None = None,
     user_credentials: dict | None = None,
+    document_inventory: list | None = None,
 ) -> dict:
     """Build the initial LangGraph state via the graph's canonical factory."""
     return create_initial_state(
@@ -94,6 +97,7 @@ def _build_initial_state(
         messages=history or [],
         user_credentials=user_credentials or {},
         prior_evidence_state=prior_evidence_state,
+        document_inventory=document_inventory,
     )
 
 
@@ -107,19 +111,28 @@ async def _stream_query(
 ):
     """SSE generator that yields node-level status events during graph execution."""
     start_time = time.perf_counter()
-    # Load prior cross-turn evidence state (short-lived session).
+    # Load history + prior cross-turn evidence state + document inventory
+    # (short-lived session). History is ESSENTIAL: follow-ups like "talk about
+    # its equations" are unresolvable without the prior turns — the SSE path
+    # previously ran the graph with zero conversation context.
     prior_state: EvidenceState | None = None
+    document_inventory: list[str] = []
+    history: list = []
     async with session_factory() as _vs:
         await _verify_chat_ownership(_vs, chat_id, user_id)
+        history = await _load_history(_vs, chat_id)
         prior_state = await _load_prior_evidence_state(_vs, chat_id)
+        document_inventory = await _load_document_inventory(_vs, chat_id)
     turn = (prior_state.turn + 1) if prior_state else 1
     initial_state = _build_initial_state(
         query=message,
         user_id=user_id,
         chat_id=chat_id,
         provider=provider,
+        history=history,
         prior_evidence_state=prior_state,
         user_credentials=user_credentials or {},
+        document_inventory=document_inventory,
     )
     answer = ""
     accumulated_state: dict = {**initial_state}
@@ -133,48 +146,78 @@ async def _stream_query(
         # only generate_answer tokens (planner/judge streams stay internal).
         HEARTBEAT_S = 5.0  # ping during silent stretches so clients never look stuck
 
-        async def _event_iter():
-            async for ev in rag_app.astream_events(initial_state, version="v2"):
-                yield ev
+        # Producer runs astream_events in its OWN task and pushes into a queue.
+        # Never await/cancel the generator's frame from the consumer loop:
+        # asyncio.wait_for(fut, timeout) on __anext__ cancels the generator's
+        # frame mid-iteration, which kills the event stream the first time a
+        # node runs silent longer than the heartbeat (routine on Cloud Run's
+        # throttled CPU). The queue + independent task keep the 5s ping side-
+        # effect free.
+        _SENTINEL = object()
+        events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
 
-        ait = _event_iter().__aiter__()
+        async def _producer():
+            try:
+                async for ev in rag_app.astream_events(initial_state, version="v2"):
+                    await events_q.put(ev)
+            finally:
+                await events_q.put(_SENTINEL)
+
+        producer_task: asyncio.Task = asyncio.ensure_future(_producer())
         answer_pass_has_tokens = False   # tokens emitted for the current pass?
         node_started: dict[str, float] = {}
-
         while True:
             try:
-                ev = await asyncio.wait_for(ait.__anext__(), timeout=HEARTBEAT_S)
-            except StopAsyncIteration:
-                break
+                ev = await asyncio.wait_for(events_q.get(), timeout=HEARTBEAT_S)
             except asyncio.TimeoutError:
                 elapsed_ms = int((time.perf_counter() - start_time) * 1000)
                 yield f"event: ping\ndata: {json.dumps({'elapsed_ms': elapsed_ms})}\n\n"
                 continue
-
+            if ev is _SENTINEL:
+                break
             etype = ev.get("event", "")
             name = ev.get("name", "")
             meta = ev.get("metadata") or {}
             data = ev.get("data") or {}
             node = meta.get("langgraph_node") or name
             total_ms = int((time.perf_counter() - start_time) * 1000)
-
+    
             if settings.QUERY_TIMEOUT_SECONDS and settings.QUERY_TIMEOUT_SECONDS > 0 \
                     and time.perf_counter() - start_time > settings.QUERY_TIMEOUT_SECONDS:
                 raise asyncio.TimeoutError()
-
+    
+            # ── Node/graph exceptions: surface for diagnosis; UI still gets a
+            # well-formed done so the fallback path isn't mistaken for success. ──
+            if etype == "on_chain_error":
+                err = str(data.get("error") or data.get("exception") or ev.get("error") or "")
+                node_err = meta.get("langgraph_node") or name
+                logger.error("Graph %serror in node=%r name=%r: %s",
+                             "substep " if node_err and node_err != name else "", node_err, name, err)
+                continue
+    
+            # Graph-root terminal event. astream_events occasionally drops
+            # intermediate node events under heavy asyncio scheduling (observed
+            # on Cloud Run), but it ALWAYS closes with `on_chain_end` for the
+            # root (name=="LangGraph") carrying the authoritative final state.
+            # Without this merge the answer/evidence would be lost and the UI
+            # show an empty fallback even though the graph succeeded.
+            if etype == "on_chain_end" and name not in NODE_LABELS and isinstance(data.get("output"), dict):
+                accumulated_state.update(data["output"])
+                continue
+    
             # ── Node lifecycle → status events (start + completion w/ timing) ──
             if etype == "on_chain_start" and name in NODE_LABELS:
                 node_started[name] = time.perf_counter()
                 yield f"event: status\ndata: {json.dumps({'node': name, 'label': NODE_LABELS[name], 'status': 'running', 'elapsed_ms': total_ms})}\n\n"
                 continue
-
+    
             if etype == "on_chain_end" and name in NODE_LABELS:
                 out = data.get("output")
                 started_at = node_started.pop(name, None)
                 node_ms = int((time.perf_counter() - started_at) * 1000) if started_at else None
                 if isinstance(out, dict):
                     accumulated_state.update(out)
-
+    
                 detail = ""
                 if name == "classify_and_plan":
                     u = out.get("understanding") if isinstance(out, dict) else None
@@ -191,7 +234,7 @@ async def _stream_query(
                         in ("unverified", "contradicted", "uncertain")
                     ]
                     detail = f"Claims: {len(claims)} total, {len(failed)} need attention"
-
+    
                 payload = {"node": name, "label": NODE_LABELS.get(name, name),
                            "status": "done", "elapsed_ms": total_ms}
                 if node_ms is not None:
@@ -199,7 +242,7 @@ async def _stream_query(
                 if detail:
                     payload["detail"] = detail
                 yield f"event: status\ndata: {json.dumps(payload)}\n\n"
-
+    
                 if name in ("gather_evidence", "generate_answer") and isinstance(out, dict):
                     evid = accumulated_state.get("evidence") or []
                     if evid:
@@ -207,7 +250,7 @@ async def _stream_query(
                                + json.dumps({"citations": _citations_payload(evid), "conflicts": []})
                                + "\n\n")
                 continue
-
+    
             # ── Real generator tokens ──
             if etype == "on_chat_model_start" and node == "generate_answer":
                 if answer_pass_has_tokens:
@@ -217,7 +260,7 @@ async def _stream_query(
                     yield "event: answer_reset\ndata: {}\n\n"
                     answer = ""
                 continue
-
+    
             if etype == "on_chat_model_stream" and node == "generate_answer":
                 chunk_obj = data.get("chunk")
                 piece = getattr(chunk_obj, "content", "")
@@ -226,7 +269,9 @@ async def _stream_query(
                 answer += piece
                 answer_pass_has_tokens = True
                 yield f"event: token\ndata: {json.dumps({'content': piece})}\n\n"
-
+    
+        if not producer_task.done():
+            producer_task.cancel()
         final_state = accumulated_state
         answer = answer or final_state.get("answer", "") or ""
         if not answer.strip():
@@ -305,6 +350,8 @@ async def _stream_query(
         )
     except Exception as e:
         # Timeout, GraphRecursionError, or any mid-pipeline failure: keep answer + evidence.
+        if not producer_task.done():
+            producer_task.cancel()
         is_timeout = isinstance(e, asyncio.TimeoutError)
         status = "timeout" if is_timeout else "partial"
         if is_timeout:
@@ -391,6 +438,7 @@ def _citations_payload(evidence: list, limit: int = 15) -> list[dict]:
         out.append(
             {
                 "evidence_id": ev.evidence_id,
+                "cite_key": (ev.metadata or {}).get("cite_key"),
                 "text": (ev.text or "")[:500],
                 "source_type": ev.source_type.value if hasattr(ev.source_type, "value") else str(ev.source_type),
                 "source_name": ev.source_name,

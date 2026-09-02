@@ -35,6 +35,7 @@ class QueryRequest(BaseModel):
 
 class CitationResponse(BaseModel):
     evidence_id: str
+    cite_key: str | None = None      # "E1", "E2"… — matches the [E#] markers in the answer text
     text: str
     source_type: str
     source_name: str

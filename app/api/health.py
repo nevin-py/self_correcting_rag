@@ -1,11 +1,11 @@
 """Health and metrics endpoints."""
 
-import asyncio
 import time
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.core.database import AsyncLocalSession
+from app.core.database import make_engine
 from app.core.middleware import metrics
 
 router = APIRouter(tags=["Health"])
@@ -33,7 +33,12 @@ async def readiness_check():
             await session.execute(text("SELECT 1"))
         return {"status": "ready", "database": "ok"}
     except Exception as e:
-        return {"status": "not ready", "database": str(e)}
+        # 503 so orchestrators (Cloud Run, Docker, k8s) actually detect the
+        # failure — a 200 body saying "not ready" is invisible to probes.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "database": str(e)},
+        )
     finally:
         await engine.dispose()
 

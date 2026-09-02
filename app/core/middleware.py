@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -85,14 +85,35 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
 class _Metrics:
-    """In-memory metrics collector."""
+    """In-memory metrics collector.
+
+    Bounded on two axes:
+    - labels use the ROUTE TEMPLATE (``/chats/{chat_id}``), never the raw
+      path — raw UUIDs would make label cardinality unbounded (memory leak);
+    - per-label duration samples are a fixed-size ring (deque maxlen), so
+      long-running processes don't accumulate one entry per request.
+    """
+
+    MAX_SAMPLES = 512
 
     def __init__(self):
         self.request_count: dict[str, int] = defaultdict(int)
-        self.request_duration_ms: dict[str, list[float]] = defaultdict(list)
+        self.request_duration_ms: dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=self.MAX_SAMPLES)
+        )
         self.error_count: dict[str, int] = defaultdict(int)
 
-    def record(self, method: str, path: str, status: int, duration_ms: float):
+    @staticmethod
+    def route_template(request: Request) -> str:
+        """Best-available route template for a request."""
+        route = request.scope.get("route")
+        if route is not None and getattr(route, "path", None):
+            return route.path
+        # WebSocket routes / unmatched paths — keep them bounded too.
+        return "_unmatched"
+
+    def record(self, request: Request, method: str, status: int, duration_ms: float):
+        path = self.route_template(request)
         key = f"{method} {path}"
         self.request_count[key] += 1
         self.request_duration_ms[key].append(duration_ms)
@@ -125,5 +146,5 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - start) * 1000
-        metrics.record(request.method, request.url.path, response.status_code, elapsed_ms)
+        metrics.record(request, request.method, response.status_code, elapsed_ms)
         return response

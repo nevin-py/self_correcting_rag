@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 from langgraph.graph import END
 import time
 from datetime import datetime, timezone
@@ -490,6 +491,9 @@ _CLASSIFY_PROMPT = """You are the planning module of a research assistant. Analy
 
 Current date and time: {temporal_context}
 
+Documents the user has uploaded into this chat (may be empty):
+{document_inventory}
+
 Conversation so far (may be empty):
 {conversation}
 
@@ -515,7 +519,10 @@ Decide:
 
 Rules:
 - The current date matters: if the user asks for "latest"/"current"/"today", set temporal_focus accordingly and prefer fresh sources.
-- Never invent entities not present in the conversation or the message.
+- Documents listed above are IN this chat. If the user refers to "this paper", "the document", "what I gave you", or names/misspells any of them (e.g. "the zk pfl paper" ≈ "ZK-PFL Paper.pdf"), treat it as RESEARCH about that document: set needs_documents=true, needs_web=false unless the topic also needs public facts, and rewrite the query around the document's title/topic.
+- NEVER choose "clarification" to ask WHICH document or paper the user means when the answer is in the uploaded-documents list above — just use it.
+- Referential follow-ups are NOT ambiguity. When the conversation already established the topic and the user refines it — "its equations", "all of them", "more detail", even just "yes" confirming your last suggestion — choose RESEARCH and resolve the reference against the conversation. Clarification is ONLY for terms with two or more distinct real-world referents that you genuinely cannot pick between.
+- Never invent entities not present in the conversation, the message, or the uploaded documents list.
 """
 
 
@@ -523,6 +530,8 @@ _GENERATE_PROMPT = """You are a precise research assistant. Answer the user's qu
 
 Current date and time: {temporal_context}
 {temporal_focus_line}
+
+Documents the user uploaded into this chat (may be empty): {document_inventory}
 
 Evidence (cite with the bracketed keys):
 {context}
@@ -532,7 +541,8 @@ Rules:
 2. If the evidence is insufficient, say so plainly — never fabricate facts or citations.
 3. Respect time: if the question asks for latest/current figures, prefer the most recent evidence and say which period each figure covers.
 4. If two evidence items conflict, report both with citations instead of picking silently.
-5. Match the user's language. Be direct and concise; structure with short paragraphs or bullets when it helps.
+5. When evidence comes from one of the user's uploaded documents, weave the document's name into the prose naturally (e.g. "According to the uploaded 'ZK-PFL Paper.pdf', ..."). Never refer to uploaded documents as "the evidence" or "the provided context" — name them.
+6. Match the user's language. Be direct and concise; structure with short paragraphs or bullets when it helps.
 """
 
 
@@ -598,6 +608,7 @@ def classify_and_plan(state: dict) -> dict:
     messages = [
         SystemMessage(content=_CLASSIFY_PROMPT.format(
             temporal_context=temporal_context,
+            document_inventory="\n".join(f"- {name}" for name in state.get("document_inventory") or []) or "(no documents uploaded)",
             conversation="\n".join(convo_lines) or "(no prior conversation)",
             prior_evidence=_prior_evidence_block(state) or "(none)",
             query=query,
@@ -628,6 +639,49 @@ def classify_and_plan(state: dict) -> dict:
         logger.info("Planner chose clarification without a question; coercing to research")
         u.mode = QueryMode.RESEARCH
         u.needs_web = True
+    if u.mode == QueryMode.CLARIFICATION:
+        # Mechanical guard: never clarify when the conversation already
+        # establishes the referent. Two cases:
+        #   (a) the user's message or ANY prior turn references an uploaded
+        #       document (by any distinctive filename token);
+        #   (b) a referential follow-up ("its equations", "all of them") after
+        #       a substantive answer already exists.
+        inventory = [n.lower() for n in (state.get("document_inventory") or [])]
+        # NOTE: full window — clarification ping-pong can push the doc mention
+        # out of a short tail window.
+        recent_text = query.lower() + "\n" + "\n".join(convo_lines).lower()
+        stems = set()
+        for name in inventory:
+            # Match on distinctive tokens of the filename (strip extension),
+            # skipping generic words like "paper", "the", "final".
+            generic = {"paper", "the", "and", "for", "with", "final", "draft", "v2", "doc", "pdf"}
+            stems.update(w for w in name.replace(".", " ").replace("-", " ").replace("_", " ").split() if len(w) >= 3 and w not in generic)
+        doc_hit = bool(stems) and any(s in recent_text for s in stems)
+
+        reference_words = {"it", "its", "this", "that", "them", "they", "those", "these", "paper", "document", "pdf", "file", "same", "above"}
+        query_words = set(re.findall(r"[a-z]+", query.lower()))
+        has_substantive_answer = any(
+            isinstance(m, AIMessage) and len(getattr(m, "content", "") or "") >= 200
+            for m in _format_history(state)
+        )
+        referent_hit = bool(query_words & reference_words) and has_substantive_answer
+
+        if doc_hit or referent_hit:
+            logger.info(
+                "Coercing clarification → research (doc_hit=%s referent_hit=%s inventory=%s)",
+                doc_hit, referent_hit, inventory,
+            )
+            u.mode = QueryMode.RESEARCH
+            u.needs_documents = True
+            u.clarification_question = ""
+            # Anchor retrieval: the user's ask, plus the referenced document
+            # itself so chunks from the right file rank first.
+            u.search_queries = [u.rewritten_query or query]
+            if doc_hit:
+                doc_name = next((n for n in inventory if any(s in n for s in stems)), "")
+                if doc_name:
+                    u.search_queries.append(doc_name)
+            u.search_queries = [q for q in u.search_queries if q.strip()][:3]
     if u.mode == QueryMode.RESEARCH:
         if not u.needs_documents and not u.needs_web:
             u.needs_web = True  # research must look somewhere
@@ -804,6 +858,52 @@ async def _search_web(queries: list[str], state: dict) -> list[Evidence]:
     return evidence
 
 
+async def _attach_document_urls(doc_evidence: list[Evidence], state: dict) -> None:
+    """Set source_url on DOCUMENT evidence pointing at the stored original.
+
+    URLs are relative signed paths — the frontend prefixes its API base so
+    [E#] markers and source cards become real links the user can open.
+    Evidence whose file wasn't persisted (legacy uploads) is left untouched.
+    """
+    from sqlalchemy.future import select as _select
+    from app.core.database import AsyncLocalSession
+    from app.documents.models import IngestionLog as _IngestionLog
+    from app.documents.signing import signed_file_path
+
+    chat_id = state.get("chat_id")
+    if chat_id is None:
+        return
+    # Prefer the graph's session factory (test-overridable); fall back to the
+    # app-level factory in production paths.
+    session_factory = state.get("session_factory") or AsyncLocalSession
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                _select(_IngestionLog).where(
+                    _IngestionLog.chat_id == chat_id,
+                    _IngestionLog.storage_path.isnot(None),
+                )
+            )
+        ).scalars().all()
+    if not rows:
+        return
+
+    def _norm(name: str) -> str:
+        return re.sub(r"\s+", " ", (name or "")).strip().lower()
+
+    by_name: dict[str, str] = {}
+    for row in rows:
+        by_name[_norm(row.filename)] = str(row.id)
+        stem = _norm(Path(row.filename).stem)
+        by_name.setdefault(stem, str(row.id))
+
+    for ev in doc_evidence:
+        doc_id = by_name.get(_norm(ev.source_name)) or by_name.get(_norm(Path(ev.source_name).stem))
+        if doc_id:
+            ev.source_url = signed_file_path(doc_id)
+            ev.metadata = {**(ev.metadata or {}), "document_id": doc_id}
+
+
 async def gather_evidence(state: dict) -> dict:
     """Run document retrieval and web search in parallel, rerank, assign cite keys.
 
@@ -838,6 +938,16 @@ async def gather_evidence(state: dict) -> dict:
                 logger.exception("%s failed: %s", name, result)
                 continue
             evidence.extend(result)
+
+    # Hyperlink document citations back to their stored originals: map each
+    # DOCUMENT evidence's source_name (chunk metadata carries the upload
+    # filename) to a persisted ingestion and attach a signed file URL.
+    doc_evs = [ev for ev in evidence if ev.source_type == SourceType.DOCUMENT and not ev.source_url]
+    if doc_evs:
+        try:
+            await _attach_document_urls(doc_evs, state)
+        except Exception:  # noqa: BLE001
+            logger.exception("document source-url attachment failed; continuing without links")
 
     # Carry forward verified facts from prior turns (chat memory).
     prior = state.get("prior_evidence_state")
@@ -940,6 +1050,7 @@ def generate_answer(state: dict) -> dict:
         SystemMessage(content=_GENERATE_PROMPT.format(
             temporal_context=_temporal_context(state),
             temporal_focus_line=temporal_focus_line,
+            document_inventory=", ".join(state.get("document_inventory") or []) or "(none)",
             context=context,
         )),
         *_format_history(state),

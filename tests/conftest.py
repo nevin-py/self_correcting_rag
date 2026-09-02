@@ -14,14 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine, create_async_engin
 from app.core.database import Base, get_db, get_session_factory
 from app.main import app
 
-TEST_DATABASE_URL = "postgresql+asyncpg://ariva:nevin@localhost:5432/self_correcting_rag_test"
+# Rate limiting is IP-keyed and every test shares one client IP — the real
+# limits (5/min login, 5/min register, …) would randomly 429 the suite.
+# Disable the shared limiter for tests; test_rate_limiting.py re-enables it.
+from app.core.limiter import limiter as _app_limiter
+
+_app_limiter.enabled = False
+
+TEST_DATABASE_URL = "postgresql+asyncpg://ariva:nevin@localhost:5433/self_correcting_rag_test"
 
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[tuple[AsyncSession, AsyncEngine], None]:
     """Fresh async engine + session per test. Tables dropped and recreated on each test."""
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    
+
     # Drop all tables and recreate to ensure clean state with latest schema
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -32,6 +39,14 @@ async def db_session() -> AsyncGenerator[tuple[AsyncSession, AsyncEngine], None]
         yield session, engine
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def test_session_factory(db_session) -> AsyncGenerator[async_sessionmaker, None]:
+    """Session factory bound to the TEST engine — for direct DB assertions in
+    tests that must NOT touch the .env/dev database via AsyncLocalSession."""
+    _, engine = db_session
+    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest_asyncio.fixture

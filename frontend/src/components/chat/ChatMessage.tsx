@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Copy, Check, MoreHorizontal, PanelRightOpen } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import type { Citation, Claim, Conflict } from "@/lib/api";
+import { resolveSourceUrl } from "@/lib/api";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
@@ -56,7 +57,7 @@ function SourceChips({ citations }: { citations: Citation[] }) {
         return c.source_url ? (
           <a
             key={c.evidence_id}
-            href={c.source_url}
+            href={resolveSourceUrl(c.source_url)}
             target="_blank"
             rel="noopener noreferrer"
             className={cls}

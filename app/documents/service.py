@@ -26,7 +26,8 @@ from collections import OrderedDict
 import re
 
 from app.core.config import settings
-from app.documents.clients import get_chroma_client, groq_client
+from app.documents.clients import groq_client
+from app.documents import vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -94,71 +95,48 @@ def _tokenize_for_bm25(text: str) -> list[str]:
 
 async def hybrid_search_chunks(
     query: str,
-    collection,
-    query_embedding: list[float],
+    rows: list[dict],
     top_k: int = 30,
     alpha: float = 0.7,  # Weight for vector: 0.7 vector + 0.3 BM25
-    where_filter: dict | None = None,
 ) -> list[dict]:
-    """Hybrid search combining vector similarity with BM25 keyword matching.
-    
+    """Hybrid search: BM25 fusion over pgvector candidates.
+
     Args:
         query: Search query string
-        collection: ChromaDB collection
-        query_embedding: Pre-computed query embedding
+        rows: Vector-search candidates ({id, text, metadata, distance}) —
+              already owner-scoped by the SQL layer.
         top_k: Number of results to return
         alpha: Weight for vector scores (1-alpha for BM25)
-        where_filter: ChromaDB metadata filter
-        
+
     Returns:
         List of chunks sorted by hybrid score
     """
     try:
         from rank_bm25 import BM25Okapi
     except ImportError:
-        logger.warning("rank-bm25 not available, falling back to vector-only search")
-        # Fallback to pure vector search
-        return await retrieve_chunks(query, None, top_k, where_filter=where_filter)
-    
-    # 1. Vector search first (get more results for fusion)
-    vector_top_k = top_k * 2
-    query_kwargs = {
-        "query_embeddings": [query_embedding],
-        "n_results": vector_top_k,
-    }
-    if where_filter:
-        query_kwargs["where"] = where_filter
-    
-    try:
-        vector_results = collection.query(**query_kwargs)
-    except Exception as e:
-        logger.warning(f"Vector search failed: {e}")
-        return []
-    
-    if not vector_results.get("documents") or not vector_results["documents"][0]:
-        return []
-    
-    # 2. Build BM25 index from retrieved documents
-    docs = []
-    for i in range(len(vector_results["documents"][0])):
-        docs.append({
-            "id": vector_results["ids"][0][i],
-            "text": vector_results["documents"][0][i],
-            "metadata": vector_results["metadatas"][0][i] if vector_results["metadatas"] else {},
-            "distance": vector_results["distances"][0][i] if vector_results["distances"] else None,
-        })
-    
+        logger.warning("rank-bm25 not available, falling back to vector-only ranking")
+        return sorted(rows, key=lambda r: (r.get("distance") is not None, r.get("distance") or 0.0))[:top_k]
+
+    docs = [
+        {
+            "id": r["id"],
+            "text": r["text"],
+            "metadata": r.get("metadata") or {},
+            "distance": r.get("distance"),
+        }
+        for r in rows
+    ]
     if not docs:
         return []
-    
-    # Build BM25 index
+
+    # BM25 rerank over the vector candidates (same fusion math as before —
+    # only the recall leg moved from Chroma to pgvector).
     tokenized_docs = [_tokenize_for_bm25(d["text"]) for d in docs]
     bm25 = BM25Okapi(tokenized_docs)
-    
-    # Score query with BM25
+
     query_tokens = _tokenize_for_bm25(query)
     bm25_scores = bm25.get_scores(query_tokens)
-    
+
     # Normalize BM25 scores (bm25_scores is a numpy array — never truth-test it)
     if getattr(bm25_scores, "size", len(bm25_scores)) == 0:
         max_bm25 = 1.0
@@ -166,19 +144,12 @@ async def hybrid_search_chunks(
         max_bm25 = float(max(bm25_scores))
         if max_bm25 <= 0:
             max_bm25 = 1.0
-    
-    # 3. Fuse scores
+
     hybrid_results = []
     for i, doc in enumerate(docs):
-        # Convert vector distance to similarity score
-        vec_sim = 1.0 - min(1.0, max(0.0, float(doc.get("distance", 0.5))))
-        
-        # Normalize BM25 score
+        vec_sim = 1.0 - min(1.0, max(0.0, float(doc.get("distance", 0.5) or 0.5)))
         bm25_norm = float(bm25_scores[i]) / max_bm25
-        
-        # Hybrid score (weighted combination)
         hybrid_score = alpha * vec_sim + (1 - alpha) * bm25_norm
-        
         hybrid_results.append({
             "text": doc["text"],
             "metadata": doc["metadata"],
@@ -188,60 +159,51 @@ async def hybrid_search_chunks(
             "vector_score": vec_sim,
             "bm25_score": bm25_norm,
         })
-    
-    # Sort by hybrid score
+
     hybrid_results.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Fetch parent context for child chunks
-    hybrid_results = await _add_parent_context(hybrid_results, collection)
-    
     return hybrid_results[:top_k]
 
 
-async def _add_parent_context(chunks: list[dict], collection) -> list[dict]:
-    """Add parent context to child chunks if available."""
-    if not chunks:
+async def _add_parent_context(
+    chunks: list[dict],
+    user_id: uuid.UUID | None,
+    scope: str = "chat",
+    chat_id: uuid.UUID | None = None,
+) -> list[dict]:
+    """Add parent context to child chunks if available.
+
+    Parent rows are looked up via the chunking parent_id key in metadata
+    (the old Chroma path looked up doc ids that never matched — latent bug;
+    this one actually resolves parents)."""
+    if not chunks or user_id is None:
         return chunks
-    
-    # Get unique parent IDs from child chunks
-    parent_ids_to_fetch = set()
-    for chunk in chunks:
-        meta = chunk.get("metadata", {})
-        if meta.get("chunk_type") == "child":
-            parent_id = meta.get("parent_id")
-            if parent_id:
-                parent_ids_to_fetch.add(parent_id)
-    
+
+    parent_ids_to_fetch = {
+        c["metadata"].get("parent_id")
+        for c in chunks
+        if (c.get("metadata") or {}).get("chunk_type") == "child"
+        and (c.get("metadata") or {}).get("parent_id")
+    }
     if not parent_ids_to_fetch:
         return chunks
-    
-    # Fetch parent chunks by their document IDs (stored on children as parent_id)
+
     try:
-        parent_results = collection.get(
-            ids=list(parent_ids_to_fetch),
-            include=["documents", "metadatas"],
+        parents = await vector_store.fetch_parents(
+            user_id, sorted(parent_ids_to_fetch), scope=scope, chat_id=chat_id
         )
     except Exception as e:
         logger.warning(f"Failed to fetch parent context: {e}")
         return chunks
-    
-    # Build parent lookup
-    parent_map = {}
-    if parent_results.get("ids"):
-        for i, pid in enumerate(parent_results["ids"]):
-            parent_map[pid] = {
-                "text": parent_results["documents"][i] if parent_results.get("documents") else "",
-                "metadata": parent_results["metadatas"][i] if parent_results.get("metadatas") else {},
-            }
-    
-    # Add parent context to each chunk
+
+    parent_map = {p["metadata"].get("parent_id"): p["text"] for p in parents}
+
     for chunk in chunks:
-        meta = chunk.get("metadata", {})
+        meta = chunk.get("metadata") or {}
         if meta.get("chunk_type") == "child":
-            parent_id = meta.get("parent_id")
-            if parent_id and parent_id in parent_map:
-                chunk["parent_context"] = parent_map[parent_id]["text"]
-    
+            pid = meta.get("parent_id")
+            if pid and pid in parent_map:
+                chunk["parent_context"] = parent_map[pid]
+
     return chunks
 
 
@@ -481,56 +443,55 @@ async def embed_n_store(
     scope: str = "chat",
 ):
     """
-    Embed chunks and store in ChromaDB with scope metadata.
+    Embed chunks and store in Postgres (pgvector) with scope metadata.
 
     scope="chat"     → chat-scoped, retrievable only within the specified chat
     scope="permanent" → user's permanent memory, retrievable across all chats
+
+    Returns a store name for logging/compat (the old Chroma collection name).
     """
     user_hex = user_id.hex[:16]
     collection_name = f"user_{user_hex}"
-    client = get_chroma_client()
-    if client is None:
-        raise RuntimeError("ChromaDB is not available — vector storage disabled")
-    collection = client.get_or_create_collection(name=collection_name)
-
-    documents = []
-    metadatas = []
-    ids = []
 
     user_id_str = str(user_id)
     chat_id_str = str(chat_id) if chat_id else ""
 
-    for idx, chunk in enumerate(chunk_list):
-        chunk_text = chunk.get("text", "").strip()
+    texts = []
+    metas = []
+    for chunk in chunk_list:
+        chunk_text = (chunk.get("text") or "").strip()
         if not chunk_text:
             continue
-        meta = chunk.get("metadata", {}).copy()
-        # Core scope fields — always set
+        meta = (chunk.get("metadata") or {}).copy()
+        # Core scope fields — always set (same as the Chroma metadata contract)
         meta["user_id"] = user_id_str
         meta["scope"] = scope
         meta["chat_id"] = chat_id_str if scope == "chat" else ""
-        documents.append(chunk_text)
-        metadatas.append(meta)
-        source = meta.get("source", "unknown")
-        ids.append(f"{user_id_str}_{chat_id_str}_{source}_{idx}")
+        texts.append(chunk_text)
+        metas.append(meta)
 
-    if not documents:
+    if not texts:
         return collection_name
 
-    # Batch embed with rate limiting
+    # Batch embed with rate limiting (content-hash cache handles repeats)
     batch_size = 32
-    all_embeddings = []
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i : i + batch_size]
-        emb = await _embed_text_rate_limited(batch, task_type="search_document")
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(texts), batch_size):
+        emb = await _embed_text_rate_limited(texts[i : i + batch_size], task_type="search_document")
         all_embeddings.extend(emb)
 
-    collection.add(
-        ids=ids,
-        embeddings=all_embeddings,
-        documents=documents,
-        metadatas=metadatas,
-    )
+    rows = [
+        {
+            "user_id": user_id,
+            "chat_id": chat_id if scope == "chat" else None,
+            "scope": scope,
+            "text": t,
+            "embedding": e,
+            "metadata": m,
+        }
+        for t, e, m in zip(texts, all_embeddings, metas)
+    ]
+    await vector_store.insert_chunks(rows)
 
     return collection_name
 
@@ -569,16 +530,29 @@ def compute_file_hash(contents: bytes) -> str:
 
 
 async def full_pipeline(
-    file_contents: bytes, filename: str, uid: uuid.UUID, chat_id: uuid.UUID
+    file_contents: bytes,
+    filename: str,
+    uid: uuid.UUID,
+    chat_id: uuid.UUID,
+    pre_extracted: tuple[str, dict] | None = None,
 ):
-    """Ingest a file: validate → hash → extract → chunk → embed → store."""
+    """Ingest a file: validate → hash → extract → chunk → embed → store.
+
+    ``pre_extracted`` lets the upload endpoint pass the (text, metadata) it
+    already produced during budget checks, so parsing (PDF/DOCX — the most
+    expensive step) happens once, not twice.
+    """
     if not file_contents:
         raise ValueError("file_contents is empty or None")
 
     validate_file_magic(file_contents, filename)
     file_hash = compute_file_hash(file_contents)
 
-    text, metadata = ingestion_pipeline(file_contents, filename)
+    if pre_extracted is not None:
+        text, metadata = pre_extracted
+        metadata = dict(metadata)
+    else:
+        text, metadata = ingestion_pipeline(file_contents, filename)
     metadata["file_hash"] = file_hash
     chunked_docs = chunking(text=text, metadata=metadata)
     collection_name = await embed_n_store(
@@ -664,51 +638,6 @@ async def _embed_text_rate_limited(
 
 # ── Retrieval (scope-filtered, rate-limited) ─────────────────────────────────
 
-def _get_user_collection(user_id: uuid.UUID):
-    """A1: Get the user's ChromaDB collection. Fail closed on lookup failure.
-
-    No implicit fallback to a different scope. If the user's collection doesn't
-    exist, return None — the caller must handle this as "no documents available".
-    """
-    client = get_chroma_client()
-    if client is None:
-        return None
-    user_hex = user_id.hex[:16]
-    collection_name = f"user_{user_hex}"
-    try:
-        return client.get_collection(name=collection_name)
-    except Exception:
-        # A1: Fail closed — no fallback to chat-scoped or other collection
-        return None
-
-
-def _build_scope_filter(
-    scope: str, chat_id: uuid.UUID | None = None, user_id: uuid.UUID | None = None,
-) -> dict | None:
-    """A2: Build a ChromaDB where filter with owner predicate for defense-in-depth.
-
-    Every filter includes an explicit owner_user_id clause sourced from the
-    authenticated session, never from client-controlled input. This ensures
-    isolation even if collection naming assumptions break.
-    """
-    owner_clause = {"user_id": str(user_id)} if user_id else {}
-    if scope == "permanent":
-        permanent_filter = {"scope": "permanent"}
-        if owner_clause:
-            return {"$and": [permanent_filter, owner_clause]}
-        return permanent_filter
-    if chat_id is not None:
-        chat_filter = {"$and": [{"scope": "chat"}, {"chat_id": str(chat_id)}]}
-        if owner_clause:
-            return {"$and": [chat_filter, owner_clause]}
-        return chat_filter
-    # Cross-chat: all chat-scoped chunks with owner verification
-    chat_all = {"scope": "chat"}
-    if owner_clause:
-        return {"$and": [chat_all, owner_clause]}
-    return chat_all
-
-
 async def retrieve_chunks(
     query: str,
     user_id: uuid.UUID,
@@ -719,53 +648,42 @@ async def retrieve_chunks(
 ) -> list[dict]:
     """Retrieve chunks with hybrid (vector + BM25) or vector-only search.
 
-    A1+A2: Collection resolved from user_id (fail closed). Filter includes
-    owner_user_id predicate for defense-in-depth isolation.
+    pgvector-backed, owner-scoped at the SQL layer (user_id predicate — the
+    same defense-in-depth the old _build_scope_filter provided).
     """
-    collection = _get_user_collection(user_id)
-    if collection is None:
+    if user_id is None:
         return []
 
-    query_embedding = await _embed_text_rate_limited([query], task_type="search_query")
-    # A2: Pass user_id for owner predicate in filter
-    where_filter = _build_scope_filter(scope, chat_id, user_id=user_id)
+    try:
+        query_embedding = await _embed_text_rate_limited([query], task_type="search_query")
+    except Exception as e:
+        # Fail closed — same contract as the old chroma-unavailable path.
+        logger.warning("Query embedding failed; retrieval disabled: %s", e)
+        return []
 
-    # Use hybrid search (vector + BM25 fusion)
+    rows = await vector_store.search_similar(
+        user_id=user_id,
+        query_embedding=query_embedding[0],
+        scope=scope,
+        chat_id=chat_id,
+        limit=max(top_k * 2, 30),
+    )
+    if not rows:
+        return []
+
     if use_hybrid:
         try:
-            return await hybrid_search_chunks(
-                query=query,
-                collection=collection,
-                query_embedding=query_embedding[0],
-                top_k=top_k,
-                alpha=0.7,
-                where_filter=where_filter,
-            )
+            results = await hybrid_search_chunks(query=query, rows=rows, top_k=top_k, alpha=0.7)
         except Exception as e:
             logger.warning(f"Hybrid search failed, falling back to vector: {e}")
-    
-    # Fallback to pure vector search
-    query_kwargs = {"query_embeddings": query_embedding, "n_results": top_k}
-    if where_filter is not None:
-        query_kwargs["where"] = where_filter
+            results = sorted(rows, key=lambda r: r.get("distance") if r.get("distance") is not None else 1.0)[:top_k]
+    else:
+        results = sorted(rows, key=lambda r: r.get("distance") if r.get("distance") is not None else 1.0)[:top_k]
 
-    results = collection.query(**query_kwargs)
-
-    chunks_retrieved = []
-    if results["documents"]:
-        for i in range(len(results["documents"][0])):
-            chunks_retrieved.append({
-                "text": results["documents"][0][i],
-                "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                "id": results["ids"][0][i],
-                "distance": results["distances"][0][i] if results["distances"] else None,
-            })
-    
     # Add parent context
-    if chunks_retrieved:
-        chunks_retrieved = await _add_parent_context(chunks_retrieved, collection)
-    
-    return chunks_retrieved
+    results = await _add_parent_context(results, user_id, scope=scope, chat_id=chat_id)
+
+    return results
 
 
 async def multi_query_retrieval(

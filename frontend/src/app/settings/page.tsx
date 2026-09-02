@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Eye, EyeOff, Copy, Check, Trash2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
 import { authApi, settingsApi, type ProviderSettings } from "@/lib/api";
@@ -26,14 +27,24 @@ function errDetail(err: unknown): string | undefined {
   return undefined;
 }
 
-const ROUTING_PROVIDERS = [
+// Full provider catalog — any can be selected for routing and given a key.
+// Custom OpenAI-compatible endpoints can still be added by id below.
+const PROVIDER_CATALOG: { id: string; label: string; desc: string }[] = [
   { id: "auto", label: "AUTO", desc: "Uses whichever user or server keys exist (Groq → Google → OpenRouter)" },
-  { id: "groq", label: "GROQ", desc: "Require Groq key (user Settings or server env)" },
-  { id: "openrouter", label: "OPENROUTER", desc: "Require OpenRouter key" },
-  { id: "google", label: "GOOGLE", desc: "Require Google AI Studio key" },
-] as const;
+  { id: "openrouter", label: "OPENROUTER", desc: "400+ models behind one key — openrouter.ai" },
+  { id: "google", label: "GOOGLE AI", desc: "Gemini models — aistudio.google.com/apikey" },
+  { id: "groq", label: "GROQ", desc: "Ultra-fast LPU inference — console.groq.com" },
+  { id: "openai", label: "OPENAI", desc: "GPT-4o / GPT-4.1 family — platform.openai.com" },
+  { id: "anthropic", label: "ANTHROPIC", desc: "Claude family — console.anthropic.com" },
+  { id: "mistral", label: "MISTRAL", desc: "Mistral Large/Small — console.mistral.ai" },
+  { id: "deepseek", label: "DEEPSEEK", desc: "DeepSeek V3 / R1 — platform.deepseek.com" },
+  { id: "xai", label: "xAI (GROK)", desc: "Grok models — console.x.ai" },
+  { id: "together", label: "TOGETHER AI", desc: "Open models hosted — api.together.xyz" },
+  { id: "fireworks", label: "FIREWORKS", desc: "Fast open-model serving — fireworks.ai" },
+  { id: "ollama", label: "OLLAMA (LOCAL)", desc: "Local models, no key needed — localhost:11434" },
+];
 
-const KEY_PROVIDERS = ["openrouter", "google", "groq"] as const;
+const KEY_PROVIDERS = PROVIDER_CATALOG.filter((p) => p.id !== "auto").map((p) => p.id);
 
 const TABS = [
   { id: "profile", label: "Profile" },
@@ -66,6 +77,8 @@ export default function SettingsPage() {
   const [verifierModel, setVerifierModel] = useState("");
   const [providerMsg, setProviderMsg] = useState("");
   const [providerErr, setProviderErr] = useState("");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [pwMsg, setPwMsg] = useState("");
@@ -104,6 +117,52 @@ export default function SettingsPage() {
   const handleProviderChange = (id: string) => {
     setProvider(id);
     localStorage.setItem("llm_provider", id);
+  };
+
+  // Reset reveal state whenever the edited provider changes.
+  useEffect(() => {
+    setRevealedKey(null);
+    setCopied(false);
+  }, [editProvider]);
+
+  const revealKey = async (which: "api_key" | "fallback_api_key") => {
+    setProviderErr("");
+    if (revealedKey) {
+      setRevealedKey(null);
+      return;
+    }
+    try {
+      const res = await settingsApi.revealProvider(editProvider);
+      const key = res.data[which];
+      if (!key) {
+        setProviderErr("Key could not be decrypted — delete and re-enter it.");
+        return;
+      }
+      setRevealedKey(key);
+    } catch (err) {
+      setProviderErr(errDetail(err) || "Reveal failed");
+    }
+  };
+
+  const copyKey = async () => {
+    let key = revealedKey;
+    if (!key) {
+      try {
+        const res = await settingsApi.revealProvider(editProvider);
+        key = res.data.api_key;
+      } catch (err) {
+        setProviderErr(errDetail(err) || "Copy failed");
+        return;
+      }
+    }
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setProviderErr("Clipboard unavailable — reveal and copy manually.");
+    }
   };
 
   const saveProviderKeys = async () => {
@@ -283,7 +342,7 @@ export default function SettingsPage() {
             <div className="space-y-6">
               <div className="space-y-2">
                 <p className="label-caps mb-2">Default routing preference</p>
-                {ROUTING_PROVIDERS.map((p) => (
+                {PROVIDER_CATALOG.map((p) => (
                   <button
                     key={p.id}
                     onClick={() => handleProviderChange(p.id)}
@@ -308,26 +367,33 @@ export default function SettingsPage() {
               <div className="border border-border bg-surface p-4 space-y-3">
                 <p className="label-caps">Your API keys & models</p>
                 <p className="text-xs text-text-muted">
-                  OpenRouter, Google, and Groq keys are encrypted at rest. Tavily and Nomic remain
+                  Keys are encrypted at rest and scoped to your account. You can view and copy your
+                  own keys; reveal them only on trusted devices. Tavily and Nomic remain
                   system-configured.
                 </p>
                 <div className="flex gap-2 flex-wrap">
-                  {Array.from(new Set([...KEY_PROVIDERS, ...providerRows.map((p) => p.provider)])).map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => setEditProvider(p)}
-                      className={cn(
-                        "border px-3 py-1 font-mono text-[10px] uppercase",
-                        editProvider === p ? "border-accent text-accent" : "border-border text-text-muted"
-                      )}
-                    >
-                      {p}
-                    </button>
-                  ))}
+                  {Array.from(new Set([...KEY_PROVIDERS, ...providerRows.map((p) => p.provider)])).map((p) => {
+                    const row = providerRows.find((r) => r.provider === p);
+                    const meta = PROVIDER_CATALOG.find((c) => c.id === p);
+                    return (
+                      <button
+                        key={p}
+                        title={meta?.desc || p}
+                        onClick={() => setEditProvider(p)}
+                        className={cn(
+                          "flex items-center gap-1.5 border px-3 py-1 font-mono text-[10px] uppercase",
+                          editProvider === p ? "border-accent text-accent" : "border-border text-text-muted"
+                        )}
+                      >
+                        {meta?.label || p}
+                        {row?.has_key && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="flex gap-2">
                   <Input
-                    placeholder="Add provider id (e.g. deepseek, mistral, anthropic)"
+                    placeholder="Add provider id (any OpenAI-compatible endpoint)"
                     value={newProviderName}
                     onChange={(e) => setNewProviderName(e.target.value)}
                   />
@@ -336,10 +402,39 @@ export default function SettingsPage() {
                   </Button>
                 </div>
                 {selectedRow && (
-                  <p className="font-mono text-[10px] text-text-muted">
-                    Saved key: {selectedRow.has_key ? selectedRow.masked_key : "none"}
-                    {selectedRow.has_server_key ? " · server fallback available" : ""}
-                  </p>
+                  <div className="space-y-2 border border-border bg-surface-inset p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-mono text-[10px] text-text-muted">
+                        Primary key: {selectedRow.has_key ? selectedRow.masked_key : "none"}
+                        {selectedRow.has_server_key ? " · server fallback available" : ""}
+                      </p>
+                      {selectedRow.has_key && (
+                        <div className="flex gap-1">
+                          <Button variant="ghost" size="sm" onClick={() => revealKey("api_key")}>
+                            {revealedKey ? <EyeOff size={12} /> : <Eye size={12} />}
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => copyKey()}>
+                            {copied ? <Check size={12} className="text-accent" /> : <Copy size={12} />}
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={clearProvider}>
+                            <Trash2 size={12} />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                    {revealedKey && (
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 select-all break-all border border-border bg-void px-2 py-1 font-mono text-[10px] text-accent-bright">
+                          {revealedKey}
+                        </code>
+                      </div>
+                    )}
+                    {selectedRow.has_fallback_key && (
+                      <p className="font-mono text-[10px] text-text-muted">
+                        Fallback key: {selectedRow.masked_fallback_key}
+                      </p>
+                    )}
+                  </div>
                 )}
                 <Input
                   type="password"

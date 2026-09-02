@@ -27,7 +27,7 @@ tenacity>=9.0.0
 tiktoken>=0.8.0
 
 # Vector DB
-chromadb>=0.6.0
+pgvector>=0.3.0
 
 # Document processing
 pypdf>=5.3.0

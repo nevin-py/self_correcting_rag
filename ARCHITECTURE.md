@@ -61,8 +61,23 @@ All under `/api/v1/agent` (see `app/agent/router.py`):
 
 - `POST /chats/{id}/query` — JSON response with `answer`, `claims`, `citations`, `verification_errors`, `final_status`.
 - `POST /chats/{id}/query_stream` — SSE: node status events, streamed tokens, provenance push.
-- `WS /ws/{chat_id}` — WebSocket streaming variant.
+- `WS /ws/{chat_id}` — removed (Sprint 1): the SSE endpoint replaces it; the WS variant bypassed rate limits and usage budgets.
 - Chat CRUD, history, messages, usage endpoints.
+
+## Auth & token flow
+
+- Access JWT (short-lived, `Authorization: Bearer`) + opaque refresh token
+  stored hashed, single-use, with **reuse detection**: presenting a revoked
+  token revokes the user's entire token family.
+- The refresh token is issued as an **httpOnly cookie** (`Path=/api/v1/auth`,
+  `SameSite=None; Secure` in production) so browser clients never store it in
+  JS-readable storage; JSON-body tokens remain supported for API clients.
+- Password change/reset revokes all live refresh tokens.
+- Per-user LLM keys are Fernet-encrypted under a dedicated `ENCRYPTION_KEY`
+  (independent of `SECRET_KEY` rotation); legacy rows fall back transparently
+  (`scripts/reencrypt_user_keys.py` migrates them).
+- Rate limits: auth/query endpoints via `app/core/limiter.py`; proxy-aware IP
+  keys (`TRUST_PROXY_HEADERS`), optional Redis storage (`RATELIMIT_STORAGE_URI`).
 
 ## Configuration
 

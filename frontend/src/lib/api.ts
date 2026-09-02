@@ -5,7 +5,20 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 export const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
+  // Send the httpOnly refresh_token cookie on auth calls (and any future
+  // cookie-based endpoints). No CSRF surface: auth uses bearer tokens, and
+  // CORS only echoes exact allowed origins.
+  withCredentials: true,
 });
+
+/** Citation/source links: the backend emits absolute http(s) URLs for web
+ * sources and RELATIVE signed paths for uploaded documents. Prefix relative
+ * ones with the API base so links open against the right origin. */
+export function resolveSourceUrl(url?: string | null): string {
+  if (!url) return "";
+  if (url.startsWith("/") && !url.startsWith("//")) return `${API_BASE}${url}`;
+  return url;
+}
 
 // Inject JWT token into every request
 api.interceptors.request.use((config) => {
@@ -18,7 +31,47 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 — try refresh once, then clear session on auth endpoints
+// Handle 401 — try refresh ONCE (single-flight), then clear session on auth endpoints
+//
+// Single-flight matters: refresh tokens are single-use (rotated server-side).
+// When several requests 401 simultaneously (a page firing 3+ parallel calls),
+// naive handling would launch one refresh per request — the second refresh
+// would fail (token already rotated), CLEAR the session, and log the user out
+// despite a perfectly valid new token. All waiters therefore share ONE
+// in-flight refresh promise; latecomers retry against the fresh token.
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function singleFlightRefresh(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    // The refresh token lives in an httpOnly cookie — the browser attaches it
+    // automatically (withCredentials). A legacy localStorage token is still
+    // sent in the body so sessions issued before the cookie rollout survive.
+    const legacy = localStorage.getItem("refresh_token");
+    try {
+      // Bare axios call — going through `api` would re-enter this interceptor.
+      const res = await axios.post(
+        `${API_BASE}/api/v1/auth/refresh`,
+        legacy ? { refresh_token: legacy } : {},
+        { withCredentials: true }
+      );
+      localStorage.setItem("token", res.data.access_token);
+      // Migrate off localStorage refresh tokens; the cookie is the source of
+      // truth from here on.
+      localStorage.removeItem("refresh_token");
+      return res.data.access_token as string;
+    } catch {
+      localStorage.removeItem("token");
+      localStorage.removeItem("refresh_token");
+      return null;
+    } finally {
+      // Release AFTER the storage writes so awaiters see a settled state.
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
 api.interceptors.response.use(
   (res) => res,
   async (err) => {
@@ -27,36 +80,32 @@ api.interceptors.response.use(
     const original = err.config as { _retry?: boolean; url?: string; headers?: Record<string, string> } | undefined;
     if (!original) return Promise.reject(err);
 
+    const isAuthEndpoint =
+      url.includes("/auth/login") ||
+      url.includes("/auth/register") ||
+      url.includes("/auth/refresh") ||
+      url.includes("/auth/verify-email") ||
+      url.includes("/auth/resend-otp") ||
+      url.includes("/auth/forgot-password") ||
+      url.includes("/auth/reset-password") ||
+      url.includes("/auth/logout");
+
     if (
       status === 401 &&
       typeof window !== "undefined" &&
       !original._retry &&
-      !url.includes("/auth/login") &&
-      !url.includes("/auth/register") &&
-      !url.includes("/auth/refresh") &&
-      !url.includes("/auth/verify-email")
+      !isAuthEndpoint
     ) {
-      const refresh = localStorage.getItem("refresh_token");
-      if (refresh) {
+      const newToken = await singleFlightRefresh();
+      if (newToken) {
         original._retry = true;
-        try {
-          const res = await api.post("/api/v1/auth/refresh", { refresh_token: refresh });
-          localStorage.setItem("token", res.data.access_token);
-          if (res.data.refresh_token) {
-            localStorage.setItem("refresh_token", res.data.refresh_token);
-          }
-          original.headers = original.headers || {};
-          original.headers.Authorization = `Bearer ${res.data.access_token}`;
-          return api.request(original);
-        } catch {
-          localStorage.removeItem("token");
-          localStorage.removeItem("refresh_token");
-        }
+        original.headers = original.headers || {};
+        original.headers.Authorization = `Bearer ${newToken}`;
+        return api.request(original);
       }
     }
 
     if (status === 401 && typeof window !== "undefined") {
-      const isAuthEndpoint = url.includes("/auth/login") || url.includes("/auth/register");
       if (isAuthEndpoint) {
         localStorage.removeItem("token");
         localStorage.removeItem("refresh_token");
@@ -70,6 +119,7 @@ api.interceptors.response.use(
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 export const authApi = {
+  me: () => api.get<{ user_id: string; email: string; email_verified: boolean; is_active: boolean }>("/api/v1/auth/me"),
   register: (email: string, password: string) =>
     api.post("/api/v1/auth/register", { email, password }),
   login: (email: string, password: string) =>
@@ -88,10 +138,10 @@ export const authApi = {
     api.post("/api/v1/auth/forgot-password", { email }),
   resetPassword: (email: string, code: string, new_password: string) =>
     api.post("/api/v1/auth/reset-password", { email, code, new_password }),
-  refresh: (refresh_token: string) =>
-    api.post("/api/v1/auth/refresh", { refresh_token }),
-  logout: (refresh_token: string) =>
-    api.post("/api/v1/auth/logout", { refresh_token }),
+  refresh: (refresh_token?: string) =>
+    api.post("/api/v1/auth/refresh", refresh_token ? { refresh_token } : {}),
+  logout: (refresh_token?: string) =>
+    api.post("/api/v1/auth/logout", refresh_token ? { refresh_token } : {}),
 };
 
 export interface ProviderSettings {
@@ -102,6 +152,8 @@ export interface ProviderSettings {
   masked_fallback_key: string | null;
   client_family: string;
   base_url: string | null;
+  default_base_url: string | null;
+  default_family: string;
   planner_model: string | null;
   generator_model: string | null;
   verifier_model: string | null;
@@ -113,6 +165,10 @@ export interface ProviderSettings {
 
 export const settingsApi = {
   listProviders: () => api.get<{ providers: ProviderSettings[] }>("/api/v1/settings/providers"),
+  revealProvider: (provider: string) =>
+    api.get<{ provider: string; api_key: string | null; fallback_api_key: string | null }>(
+      `/api/v1/settings/providers/${provider}/reveal`
+    ),
   upsertProvider: (
     provider: string,
     body: {
@@ -200,6 +256,7 @@ export const chatApi = {
 
 export interface Citation {
   evidence_id: string;
+  cite_key?: string | null;   // "E1", "E2"… — matches [E#] markers in the answer text
   text: string;
   source_type: "document" | "web" | "llm" | "unknown";
   source_name: string;

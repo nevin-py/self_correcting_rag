@@ -484,6 +484,9 @@ def resolve_llms(
             return resolve_llms("auto", user_credentials=creds)
         family = (entry.get("client_family") or "openai")
         base_url = entry.get("base_url")
+        if not base_url:
+            from app.settings.router import PROVIDER_DEFAULT_BASE_URLS
+            base_url = PROVIDER_DEFAULT_BASE_URLS.get(pref)
         pm, gm, vm = _user_models(entry)
         try:
             p, g, v = _build_custom_bundle(family, key, base_url, pm, gm, vm)

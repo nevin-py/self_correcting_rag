@@ -3,6 +3,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Citation } from "@/lib/api";
+import { resolveSourceUrl } from "@/lib/api";
 
 function cleanLLMOutput(text: string): string {
   return text
@@ -17,6 +18,24 @@ function cleanLLMOutput(text: string): string {
     .trim();
 }
 
+/**
+ * Rewrite bare [E1]-style citation markers into markdown links pointing at
+ * the cited source URL, so readers can jump straight to the document/web
+ * page. Markers without a URL are left as plain text (they still resolve in
+ * the Evidence panel). We skip markers already followed by "(" (i.e. inside a
+ * markdown link) and code spans are rare enough not to warrant a parser.
+ */
+function linkCitationMarkers(text: string, byKey: Map<string, Citation>, positional: Citation[]): string {
+  if (byKey.size === 0 && positional.length === 0) return text;
+  return text.replace(/\[([Ee]\d{1,3})\](?!\()/g, (match, key: string) => {
+    const n = parseInt(key.slice(1), 10);
+    const citation = byKey.get(key.toUpperCase()) ?? positional[n - 1];
+    if (!citation?.source_url) return match;
+    const url = resolveSourceUrl(citation.source_url).replace(/[)\s]+$/, "");
+    return `[${key}](${url})`;
+  });
+}
+
 const PROSE =
   "prose prose-invert max-w-none " +
   // Readability: body copy 15px/1.7, sans — the gothic display font never
@@ -29,7 +48,6 @@ const PROSE =
   "prose-li:text-[15px] prose-li:leading-[1.65] prose-ul:my-2 prose-ol:my-2 " +
   "prose-blockquote:border-l-2 prose-blockquote:border-accent prose-blockquote:text-text-secondary ";
 
-
 export default function MarkdownRenderer({
   content,
   citations,
@@ -37,7 +55,14 @@ export default function MarkdownRenderer({
   content: string;
   citations?: Citation[];
 }) {
-  const cleaned = cleanLLMOutput(content);
+  // Map [E#] markers → citations. Keys are assigned per-turn ("E1", "E2", …)
+  // by the backend and exposed on each citation as `cite_key`.
+  const citeByKey = new Map<string, Citation>();
+  (citations || []).forEach((c) => {
+    if (c.cite_key) citeByKey.set(c.cite_key.toUpperCase(), c);
+  });
+
+  const cleaned = linkCitationMarkers(cleanLLMOutput(content), citeByKey, citations || []);
 
   return (
     <div className={PROSE}>
@@ -50,7 +75,12 @@ export default function MarkdownRenderer({
             </div>
           ),
           a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer">
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={citations?.some((c) => c.source_url === href) ? "Open cited source ↗" : undefined}
+            >
               {children}
             </a>
           ),
@@ -74,19 +104,11 @@ export default function MarkdownRenderer({
               </div>
             );
           },
-          // Inline citation markers like [1] get styled
-          p: ({ children }) => {
-            return <p className="leading-relaxed">{children}</p>;
-          },
+          p: ({ children }) => <p className="leading-relaxed">{children}</p>,
         }}
       >
         {cleaned}
       </ReactMarkdown>
-      {citations && citations.length > 0 && (
-        <div className="mt-3 hidden border-t border-border pt-2">
-          {/* Reserved for inline citation expansion */}
-        </div>
-      )}
     </div>
   );
 }

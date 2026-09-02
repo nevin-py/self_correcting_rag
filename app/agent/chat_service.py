@@ -18,8 +18,10 @@ from sqlalchemy import case as sql_case, delete as sql_delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.core.database import get_db, get_session_factory
+from app.core.database import get_db, get_session_factory, AsyncLocalSession
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 from app.auth.models import User
 from app.auth.router import get_current_user
 from app.agent.models import Chats, Agent_interact
@@ -50,22 +52,27 @@ from app.documents.service import estimate_tokens
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 
-def _delete_chroma_for_chat(user_id: _uuid.UUID, chat_id: _uuid.UUID | None = None) -> None:
-    """Best-effort vector cleanup: one chat or the whole user collection."""
+async def delete_chunks_for_chat(
+    user_id: _uuid.UUID, chat_id: _uuid.UUID | None = None
+) -> None:
+    """Best-effort vector cleanup: one chat's chunks or the user's whole store."""
     try:
-        from app.documents.clients import get_chroma_client
+        from app.documents import vector_store
 
-        client = get_chroma_client()
-        if client is None:
-            return
-        name = f"user_{user_id.hex[:16]}"
-        collection = client.get_or_create_collection(name=name)
         if chat_id is None:
-            client.delete_collection(name)
+            # Whole-store wipe: delete every row belonging to the user.
+            from sqlalchemy import delete as _sql_delete
+            from app.documents.models import DocumentChunk
+
+            async with AsyncLocalSession() as db:
+                await db.execute(
+                    _sql_delete(DocumentChunk).where(DocumentChunk.user_id == user_id)
+                )
+                await db.commit()
         else:
-            collection.delete(where={"chat_id": str(chat_id)})
+            await vector_store.delete_chat_chunks(chat_id, user_id)
     except Exception:
-        logger.warning("Chroma cleanup failed for user=%s chat=%s", user_id, chat_id, exc_info=True)
+        logger.warning("Vector chunk cleanup failed for user=%s chat=%s", user_id, chat_id, exc_info=True)
 
 async def _delete_chat_children(db: AsyncSession, chat_id: _uuid.UUID) -> None:
     """Remove FK children before deleting chats (DB FKs are ON DELETE RESTRICT)."""
@@ -93,6 +100,33 @@ async def _verify_chat_ownership(
 MAX_HISTORY_MESSAGES = 20  # last N message pairs to include in context
 
 MAX_PRIOR_EVIDENCE = 5     # max evidence items to carry forward from prior turns
+
+
+async def _load_document_inventory(session: AsyncSession, chat_id: _uuid.UUID) -> list[str]:
+    """Filenames of documents ingested into this chat (newest first).
+
+    Injected into classify/generate prompts so the planner can resolve
+    references like "that paper I gave you" and the generator can name the
+    source document — instead of asking the user "which paper?".
+    """
+    from app.documents.models import IngestionLog
+
+    result = await session.execute(
+        select(IngestionLog.filename)
+        .where(
+            IngestionLog.chat_id == chat_id,
+            IngestionLog.status == "completed",
+        )
+        .order_by(IngestionLog.id.desc())
+        .limit(20)
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for (name,) in result.all():
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 async def _load_history(session: AsyncSession, chat_id: _uuid.UUID) -> list:
     """Load recent conversation history as LangChain messages."""

@@ -5,6 +5,7 @@ import { ExternalLink, ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { useChatStore, Message } from "@/stores/chatStore";
 import { Citation, Claim, Conflict } from "@/lib/api";
+import { resolveSourceUrl } from "@/lib/api";
 import PipelineTracker from "./PipelineTracker";
 import { OPERATIONAL_LABELS } from "@/lib/pipeline";
 import { Badge } from "@/components/ui/Badge";
@@ -65,7 +66,7 @@ function EvidenceItem({ citation, index }: { citation: Citation; index: number }
         </div>
         {citation.source_url && (
           <a
-            href={citation.source_url}
+            href={resolveSourceUrl(citation.source_url)}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
@@ -89,8 +90,18 @@ function EvidenceItem({ citation, index }: { citation: Citation; index: number }
 }
 
 function ClaimItem({ claim, citations }: { claim: Claim; citations?: Citation[] }) {
+  // Claim evidence_ids are cite keys ("E1", "E2", …) from the verifier.
+  // Match them against citation cite_key first, then positional fallback for
+  // messages persisted before cite_key existed.
   const refs = claim.evidence_ids
-    .map((id) => citations?.find((c) => c.evidence_id === id))
+    .map((id) => {
+      const byKey = citations?.find(
+        (c) => c.cite_key?.toUpperCase() === id.toUpperCase() || c.evidence_id === id
+      );
+      if (byKey) return byKey;
+      const n = parseInt(id.replace(/^\D+/, ""), 10);
+      return citations && Number.isFinite(n) ? citations[n - 1] : undefined;
+    })
     .filter(Boolean) as Citation[];
 
   return (
@@ -101,9 +112,9 @@ function ClaimItem({ claim, citations }: { claim: Claim; citations?: Citation[] 
       </div>
       {refs.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1">
-          {refs.map((ref, i) => (
+          {refs.map((ref) => (
             <span key={ref.evidence_id} className="font-mono text-[9px] text-accent-bright">
-              [{citations?.indexOf(ref)! + 1 || i + 1}]
+              [{ref.cite_key || `E${(citations?.indexOf(ref) ?? -1) + 1}`}]
             </span>
           ))}
         </div>

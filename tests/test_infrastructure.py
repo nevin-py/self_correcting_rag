@@ -153,7 +153,9 @@ class TestReadinessAndMetrics:
         from app.core.config import settings
 
         # Readiness probes the configured dev database. When it is not running
-        # (common in CI), the endpoint must still answer honestly with 200.
+        # (common in CI), the endpoint must report failure via HTTP 503 so
+        # orchestrators (Cloud Run / k8s / Docker) actually detect it — a 200
+        # body saying "not ready" is invisible to probes.
         u = urlparse(settings.DATABASE_URL.replace("+asyncpg", ""))
         db_up = False
         try:
@@ -163,10 +165,11 @@ class TestReadinessAndMetrics:
             pass
 
         resp = await client.get("/health/ready")
-        assert resp.status_code == 200
         if not db_up:
+            assert resp.status_code == 503
             assert resp.json()["status"] == "not ready"
         else:
+            assert resp.status_code == 200
             assert resp.json()["status"] == "ready"
 
     async def test_metrics(self, client):

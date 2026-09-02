@@ -26,6 +26,7 @@ from app.agent.evidence_state import (
     merge_evidence_state,
     serialize_for_storage,
 )
+from langchain_core.messages import HumanMessage
 from app.agent.graph import create_initial_state, rag_app
 from app.agent.nodes import (
     ask_clarification,
@@ -196,6 +197,28 @@ class TestClassifyAndPlan:
         _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
         out = classify_and_plan(_state())
         assert out["understanding"].needs_web is True
+
+    def test_document_reference_coerces_clarification_to_research(self, monkeypatch):
+        """"talk about this paper" after ingesting ZK-PFL Paper.pdf must NEVER
+        produce a clarification question — the planner knows the doc list and
+        the mechanical guard routes to research anchored on the document."""
+        u = QueryUnderstanding(
+            mode=QueryMode.CLARIFICATION,
+            clarification_question="Which paper do you mean?",
+            search_queries=[""],
+        )
+        _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
+        out = classify_and_plan(_state(
+            query="talk about this paper",
+            document_inventory=["ZK-PFL Paper.pdf"],
+            messages=[HumanMessage(content="i just gave you the zk pfl paper")],
+        ))
+        got = out["understanding"]
+        assert got.mode == QueryMode.RESEARCH
+        assert got.needs_documents is True
+        assert route_after_classify(out) == "gather_evidence"
+        # Retrieval must be anchored on the referenced document's own tokens.
+        assert any("zk" in q.lower() or "pfl" in q.lower() for q in got.search_queries)
 # ── conversational_response ──────────────────────────────────────────────────
 
 
