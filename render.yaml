@@ -1,0 +1,50 @@
+# Render Blueprint — deploys the SC-RAG backend as a free web service.
+# In Render: New → Blueprint → pick this repo → fill the sync:false secrets.
+services:
+  - type: web
+    name: scrag-api
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: UVICORN_WORKERS
+        value: "1"
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: SEARXNG_URL
+        value: ""
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: NOMIC_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: GROQ_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_TLS
+        value: "true"
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
