@@ -49,5 +49,5 @@ langchain-openai>=0.1.0
 langchain-google-genai>=2.0.0
 flashrank>=0.2.0
 rank-bm25>=0.2.2
-transformers>=4.44.0
-torch>=2.2.0
+# fastembed (optional, better claim-support gate): install locally if you want
+# ONNX MiniLM embeddings; containers use the keyword-cosine fallback to stay small

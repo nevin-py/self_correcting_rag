@@ -572,6 +572,12 @@ async def full_pipeline(
 
 def _embed_text_sync(texts: list[str], task_type: str) -> list[list[float]]:
     """Synchronous Nomic embedding call — must run in a thread."""
+    # Auth once per process. The nomic lib ignores the NOMIC_API_KEY env var
+    # for embed.text — it needs an explicit login (used to live inside the
+    # old get_chroma_client; must run standalone now).
+    from app.documents.clients import _ensure_nomic
+
+    _ensure_nomic()
     response = embed.text(
         texts=texts,
         model="nomic-embed-text-v1.5",
