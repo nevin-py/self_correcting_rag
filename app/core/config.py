@@ -57,6 +57,25 @@ class Settings(BaseSettings):
     EVIDENCE_FETCH_TIMEOUT: float = 8.0
     MAX_CHUNKS_PER_FILE: int = 500
 
+    # Reranking — OpenRouter rerank API (free Nemotron model, zero RAM) by
+    # default; FlashRank local ONNX as fallback (adds ~40MB resident + a
+    # ~1.3MB/passage activation spike that OOMs 512MB containers on large
+    # batches — hence the hard passage cap on the local path).
+    RERANK_BACKEND: str = "openrouter"  # openrouter | flashrank
+    RERANK_MODEL: str = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+    RERANK_MAX_PASSAGES: int = 60       # latency cap for the API path; RAM cap for FlashRank
+    RERANK_TIMEOUT: float = 12.0
+    FLASHRANK_CACHE_DIR: str = "/tmp/flashrank"
+
+    # Shared HTTP client + bounded full-page enrichment (memory spikes under load)
+    HTTPX_MAX_CONNECTIONS: int = 20
+    ENRICHMENT_CONCURRENCY: int = 4
+
+    # Async DB pool caps (asyncpg conns cost ~10-30MB each under concurrency;
+    # Supabase-pooler URLs bypass this via NullPool above)
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 0
+
     # AI agent keys (system defaults; users may override LLM keys in Settings)
     GROQ_KEY: str = ""
     NOMIC_API_KEY: str

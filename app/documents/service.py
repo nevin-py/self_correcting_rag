@@ -7,11 +7,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import base64
-import pandas as pd
 import tiktoken
 from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from nomic import embed
 from PIL import Image
 from pypdf import PdfReader
 from tenacity import (
@@ -252,6 +250,9 @@ def tabular(df):
 
 
 def extract_text_csv(stream: io.BytesIO, filename: str) -> tuple[str, dict]:
+    # Lazy import: pandas costs ~114MB of RSS and is only needed when a
+    # tabular file is actually ingested — keep it out of the query path.
+    import pandas as pd
     stream.seek(0)
     df = pd.read_csv(stream)
     clean_text, i = tabular(df)
@@ -259,6 +260,8 @@ def extract_text_csv(stream: io.BytesIO, filename: str) -> tuple[str, dict]:
 
 
 def extract_text_excel(stream: io.BytesIO, filename: str) -> tuple[str, dict]:
+    # Lazy import — see extract_text_csv.
+    import pandas as pd
     stream.seek(0)
     df = pd.read_excel(stream)
     clean_text, i = tabular(df)
@@ -578,6 +581,10 @@ def _embed_text_sync(texts: list[str], task_type: str) -> list[list[float]]:
     from app.documents.clients import _ensure_nomic
 
     _ensure_nomic()
+    # Lazy import: `from nomic import ...` pulls pandas + pyarrow (~200MB RSS)
+    # via nomic.dataset's module-level imports. Embeddings are ingestion-only,
+    # so the query path should never pay that cost.
+    from nomic import embed
     response = embed.text(
         texts=texts,
         model="nomic-embed-text-v1.5",

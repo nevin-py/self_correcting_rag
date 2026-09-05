@@ -60,35 +60,34 @@ class LocationTool:
     async def _search_via_api(self, query: str) -> LocationInfo | None:
         """Search using geocoding API (Google Maps, OpenCage, etc.)."""
         try:
-            import httpx
+            from app.core.http_client import get_http_client
 
             # Example using OpenCage API (no auth for low volume)
             url = "https://api.opencagedata.com/geocode/v1/json"
             params = {"q": query, "key": self.api_key or "demo"}
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    results = data.get("results", [])
-                    if results:
-                        first = results[0]
-                        components = first.get("components", {})
+            client = get_http_client()
+            response = await client.get(url, params=params, timeout=10.0)
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("results", [])
+                if results:
+                    first = results[0]
+                    components = first.get("components", {})
 
-                        # Extract location info
-                        location = LocationInfo(
-                            name=query,
-                            country=components.get("country", ""),
-                            state=components.get("state", components.get("state_code")),
-                            coordinates={
-                                "lat": first["geometry"]["lat"],
-                                "lon": first["geometry"]["lng"],
-                            },
-                            region_type=self._determine_region_type(components),
-                            population=None,
-                        )
-
-                        return location
+                    # Extract location info
+                    location = LocationInfo(
+                        name=query,
+                        country=components.get("country", ""),
+                        state=components.get("state", components.get("state_code")),
+                        coordinates={
+                            "lat": first["geometry"]["lat"],
+                            "lon": first["geometry"]["lng"],
+                        },
+                        region_type=self._determine_region_type(components),
+                        population=None,
+                    )
+                    return location
         except Exception as exc:
             logger.debug("API location search failed: %s", exc)
 

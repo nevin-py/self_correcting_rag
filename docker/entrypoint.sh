@@ -40,7 +40,7 @@ if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
   alembic upgrade head
 fi
 
-WORKERS="${UVICORN_WORKERS:-2}"
+WORKERS="${UVICORN_WORKERS:-1}"
 HOST="${UVICORN_HOST:-0.0.0.0}"
 # Cloud Run injects PORT (usually 8080). Docker Compose uses 8000.
 PORT="${PORT:-${UVICORN_PORT:-8000}}"

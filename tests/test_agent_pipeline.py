@@ -101,9 +101,9 @@ def _patch_llms(monkeypatch, llms: FakeLLMs):
 
 def _patch_rerank(monkeypatch):
     """Identity rerank — avoids loading the real FlashRank model in tests."""
-    monkeypatch.setattr(nodes, "rerank", lambda q, items, top_k=None: [
-        SimpleNamespace(text=t, score=0.9, source=s) for s, t in items
-    ])
+    async def _identity_rerank(q, items, top_k=None):
+        return [SimpleNamespace(text=t, score=0.9, source=s) for s, t in items]
+    monkeypatch.setattr(nodes, "rerank", _identity_rerank)
 
 
 def _state(**over) -> dict:

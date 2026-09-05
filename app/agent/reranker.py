@@ -1,14 +1,24 @@
+"""Reranking with pluggable backends and a hard memory ceiling.
+
+Backends (settings.RERANK_BACKEND):
+- ``openrouter`` (default): POST /api/v1/rerank with the free Nemotron rerank
+  model. Zero resident RAM, zero cost, no ONNX runtime — but adds ~1-4s and
+  depends on a remote API (rate limits on free tiers).
+- ``flashrank``: local ONNX cross-encoder. ~40MB resident and a ~1.3MB/passage
+  activation spike that OOM-killed a 512MB container at 60 realistic-length
+  passages — so the local path is (a) hard-capped at RERANK_MAX_PASSAGES,
+  (b) run in a worker thread so it never blocks the event loop, and
+  (c) guarded by a process-wide lock so concurrent spikes cannot stack.
+
+Every path funnels into the same keyword/BM25 fallback on failure, so a rerank
+outage degrades gracefully to pre-rerank ordering instead of failing the turn.
 """
-Cross-encoder reranker using FlashRank.
 
-Replaces keyword-based relevance scoring with a proper cross-attention model
-that compares query-document pairs word-for-word.
-
-FlashRank uses quantized ONNX models that run on CPU with no GPU required.
-"""
-
+import asyncio
 import logging
 from dataclasses import dataclass
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +26,20 @@ logger = logging.getLogger(__name__)
 
 _reranker = None
 _init_attempted = False
+# Serializes FlashRank inference: rerank() is CPU-bound ONNX work; one at a
+# time keeps peak memory bounded and the event loop responsive.
+_flashrank_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _flashrank_lock
+    if _flashrank_lock is None:
+        _flashrank_lock = asyncio.Lock()
+    return _flashrank_lock
 
 
 def _get_reranker():
-    """Lazy-load the FlashRank reranker on first use."""
+    """Lazy-load the FlashRank reranker on first use (fallback path only)."""
     global _reranker, _init_attempted
     if _reranker is not None:
         return _reranker
@@ -28,9 +48,9 @@ def _get_reranker():
     _init_attempted = True
 
     try:
-        from flashrank import Ranker, RerankRequest
+        from flashrank import Ranker, Config  # noqa: F401  (Ranker used below)
         # Default model: ms-marco-TinyBERT-L-2-v2 (~3MB), ultra-fast CPU reranking
-        _reranker = Ranker()
+        _reranker = Ranker(cache_dir=settings.FLASHRANK_CACHE_DIR)
         logger.info("FlashRank reranker loaded: ms-marco-TinyBERT-L-2-v2")
     except Exception:
         logger.exception("Failed to load FlashRank reranker — falling back to keyword scoring")
@@ -46,35 +66,98 @@ class RankedItem:
     source: str  # "chunk" or "search"
 
 
-def rerank(query: str, items: list[tuple[str, str]], top_k: int = 15) -> list[RankedItem]:
-    """Rerank items by relevance to query using cross-encoder.
+async def rerank(query: str, items: list[tuple[str, str]], top_k: int = 15) -> list[RankedItem]:
+    """Rerank items by relevance to the query.
 
     Args:
         query: The user's question
-        items: List of (source, text) tuples where source is "chunk" or "search"
+        items: List of (source, text) tuples where source is "chunk" or "search",
+               in pre-rerank (retrieval-merge) order — the passage cap keeps the
+               first RERANK_MAX_PASSAGES, so callers should order best-first
+               when they can.
         top_k: Number of top items to return
 
     Returns:
-        List of RankedItem sorted by relevance (highest first)
+        List of RankedItem sorted by score (highest first). Items beyond top_k
+        (or beyond the passage cap) are simply absent — callers treat missing
+        scores as "keep the retrieval score".
     """
     if not items:
         return []
 
-    ranker = _get_reranker()
+    backend = (settings.RERANK_BACKEND or "openrouter").strip().lower()
+    if backend == "flashrank":
+        return await _rerank_flashrank(query, items, top_k)
 
-    # Fallback to keyword scoring if reranker unavailable
+    try:
+        return await _rerank_openrouter(query, items, top_k)
+    except Exception as e:
+        logger.warning("OpenRouter rerank failed (%s) — falling back to FlashRank", e)
+        return await _rerank_flashrank(query, items, top_k)
+
+
+async def _rerank_openrouter(query: str, items: list[tuple[str, str]], top_k: int) -> list[RankedItem]:
+    """Cross-encoder rerank via the OpenRouter rerank API (Cohere-compatible).
+
+    Uses the server OPENROUTER_API_KEY — reranking is system infrastructure,
+    not per-user model choice. Raises on any failure so the caller's fallback
+    chain (FlashRank → keyword) takes over.
+    """
+    from app.core.http_client import get_http_client
+
+    api_key = (settings.OPENROUTER_API_KEY or "").strip()
+    if not api_key or len(api_key) < 20:
+        raise RuntimeError("no server OPENROUTER_API_KEY configured")
+
+    capped = items[: settings.RERANK_MAX_PASSAGES]
+    if len(items) > len(capped):
+        logger.info("rerank: capped %d passages → %d (RERANK_MAX_PASSAGES)", len(items), len(capped))
+
+    payload = {
+        "model": settings.RERANK_MODEL,
+        "query": query,
+        "documents": [text for _, text in capped],
+        "top_n": min(top_k, len(capped)),
+    }
+    client = get_http_client()
+    resp = await client.post(
+        "https://openrouter.ai/api/v1/rerank",
+        json=payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=settings.RERANK_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    results = data.get("results") or []
+    ranked: list[RankedItem] = []
+    for r in results:
+        idx = int(r.get("index", -1))
+        if 0 <= idx < len(capped):
+            source, text = capped[idx]
+            ranked.append(RankedItem(text=text, score=float(r.get("relevance_score", 0.0)), source=source))
+    logger.debug("OpenRouter reranked %d passages → %d results (%s)", len(capped), len(ranked), settings.RERANK_MODEL)
+    return ranked
+
+
+async def _rerank_flashrank(query: str, items: list[tuple[str, str]], top_k: int) -> list[RankedItem]:
+    """Local ONNX cross-encoder path — capped, locked, thread-offloaded."""
+    capped = items[: min(settings.RERANK_MAX_PASSAGES, 40)]
+    if len(items) > len(capped):
+        logger.info("rerank: FlashRank capped %d passages → %d (RAM guard)", len(items), len(capped))
+    try:
+        async with _get_lock():
+            return await asyncio.to_thread(_flashrank_rerank_sync, query, capped, top_k)
+    except Exception as e:
+        logger.warning("FlashRank reranking failed: %s — falling back to keyword scoring", e)
+        return _keyword_rerank(query, capped, top_k)
+
+
+def _flashrank_rerank_sync(query: str, items: list[tuple[str, str]], top_k: int) -> list[RankedItem]:
+    """Blocking FlashRank inference — always called via asyncio.to_thread."""
+    ranker = _get_reranker()
     if ranker is None:
         return _keyword_rerank(query, items, top_k)
 
-    try:
-        return _flashrank_rerank(ranker, query, items, top_k)
-    except Exception as e:
-        logger.warning("FlashRank reranking failed: %s — falling back to keyword scoring", e)
-        return _keyword_rerank(query, items, top_k)
-
-
-def _flashrank_rerank(ranker, query: str, items: list[tuple[str, str]], top_k: int) -> list[RankedItem]:
-    """Rerank using FlashRank cross-encoder."""
     from flashrank import RerankRequest
 
     # FlashRank expects passages with "id" and "text" fields
@@ -100,7 +183,7 @@ def _keyword_rerank(query: str, items: list[tuple[str, str]], top_k: int) -> lis
     try:
         return _bm25_rerank(query, items, top_k)
     except Exception as e:
-        logger.warning("BM25 reranking failed: %s — falling back to simple keyword scoring", e)
+        logger.warning("BM25 rerank failed: %s — falling back to simple keyword scoring", e)
         return _simple_keyword_rerank(query, items, top_k)
 
 
@@ -125,7 +208,7 @@ def _bm25_rerank(query: str, items: list[tuple[str, str]], top_k: int) -> list[R
     query_tokens = tokenize(query)
     scores = bm25.get_scores(query_tokens)
 
-    # Normalize scores to [0, 1] range
+    # Normalize scores to [0, 1]
     max_score = max(scores) if scores and max(scores) > 0 else 1.0
 
     ranked = []
@@ -148,7 +231,7 @@ def _simple_keyword_rerank(query: str, items: list[tuple[str, str]], top_k: int)
             "have", "has", "had", "do", "does", "did", "will", "would", "could",
             "should", "may", "might", "shall", "can", "to", "of", "in", "for",
             "on", "with", "at", "by", "from", "as", "into", "through", "during",
-            "and", "but", "or", "if", "the", "this", "that", "it", "its",
+            "and", "or", "if", "the", "this", "that", "it", "its",
         }
         words = re.findall(r'[a-z0-9]+', text.lower())
         return {w for w in words if w not in stopwords and len(w) > 2}

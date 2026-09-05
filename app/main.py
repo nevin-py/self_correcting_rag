@@ -27,7 +27,9 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.
 async def lifespan(app: FastAPI):
     logging.getLogger(__name__).info("Starting Self-Correcting RAG v%s", app.version)
     yield
-    logging.getLogger(__name__).info("Shutting down — disposing DB engine")
+    logging.getLogger(__name__).info("Shutting down — disposing DB engine and HTTP client")
+    from app.core.http_client import close_http_client
+    await close_http_client()
     await engine.dispose()
 
 

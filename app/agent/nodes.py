@@ -966,7 +966,7 @@ async def gather_evidence(state: dict) -> dict:
 
     query = state.get("query") or u.rewritten_query
     if unique:
-        ranked = rerank(query, [
+        ranked = await rerank(query, [
             ("chunk" if ev.source_type == SourceType.DOCUMENT else "search", ev.text)
             for ev in unique
         ], top_k=len(unique))

@@ -10,9 +10,21 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.core.config import settings
+from app.core.http_client import get_http_client
 from app.documents.clients import tavily_client
 
 logger = logging.getLogger(__name__)
+
+# Process-wide cap on concurrent full-page fetch+parse (lxml trees cost ~10x
+# their input in RAM; see ENRICHMENT_CONCURRENCY in settings).
+_enrichment_sem: asyncio.Semaphore | None = None
+
+
+def _enrichment_semaphore() -> asyncio.Semaphore:
+    global _enrichment_sem
+    if _enrichment_sem is None:
+        _enrichment_sem = asyncio.Semaphore(max(1, int(settings.ENRICHMENT_CONCURRENCY)))
+    return _enrichment_sem
 
 
 # ── Memory-safe HTML parsing ───────────────────────────────────────
@@ -197,61 +209,60 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
         "User-Agent": "MySelfCorrectingRAGBot/1.0 (contact@your-domain.com)"
     }
 
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        response = None
-        
-        try:
-            response = await client.get(direct_url, headers=headers)
-            response.raise_for_status()
-            
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info("Direct Wikipedia page missing (404). Falling back to search for: %s", query)
-                search_url = f"{base_domain}/w/index.php"
-                search_params = {"search": query}
-                
-                try:
-                    response = await client.get(search_url, params=search_params, headers=headers)
-                    response.raise_for_status()
-                except httpx.HTTPError as search_err:
-                    logger.error("Wikipedia search backup route failed: %s", str(search_err))
-                    return None
-            else:
-                logger.warning("Wikipedia returned status code %s for query: %s", e.response.status_code, query)
-                return None
-                
-        except httpx.RequestError as e:
-            logger.error("Primary network request failed for Wikipedia query '%s': %s", query, str(e))
-            return None
+    client = get_http_client()
+    response = None
 
-        if not response:
-            return None
+    try:
+        response = await client.get(direct_url, headers=headers, timeout=10.0)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            logger.info("Direct Wikipedia page missing (404). Falling back to search for: %s", query)
+            search_url = f"{base_domain}/w/index.php"
+            search_params = {"search": query}
 
-        soup = _bs(response.text)
-
-        if soup.title and "Search results" in soup.title.text:
-            first_res = soup.find("div", class_="mw-search-result-heading") or soup.find("div", id="mw-search-result-heading")
-            if not first_res:
-                logger.info("No matching Wikipedia search results found for: %s", query)
-                return None
-
-            link_tag = first_res.find("a")
-            if not link_tag or not link_tag.get("href"):
-                return None
-
-            target_url = f"{base_domain}{link_tag['href']}"
             try:
-                response = await client.get(target_url, headers=headers)
+                response = await client.get(search_url, params=search_params, headers=headers, timeout=10.0)
                 response.raise_for_status()
-                soup = _bs(response.text)
-            except httpx.HTTPError as e:
-                logger.error("Failed to fetch article from search result link: %s", str(e))
+            except httpx.HTTPError as search_err:
+                logger.error("Wikipedia search backup route failed: %s", str(search_err))
                 return None
+        else:
+            logger.warning("Wikipedia returned status code %s for query: %s", e.response.status_code, query)
+            return None
 
-        result = _extract_wiki_text(soup)
-        elapsed = time.perf_counter() - start
-        logger.info("[wiki] '%s' — %.1fs", query[:40], elapsed)
-        return result
+    except httpx.RequestError as e:
+        logger.error("Primary network request failed for Wikipedia query '%s': %s", query, str(e))
+        return None
+
+    if not response:
+        return None
+
+    soup = _bs(response.text)
+
+    if soup.title and "Search results" in soup.title.text:
+        first_res = soup.find("div", class_="mw-search-result-heading") or soup.find("div", id="mw-search-result-heading")
+        if not first_res:
+            logger.info("No matching Wikipedia search results found for: %s", query)
+            return None
+
+        link_tag = first_res.find("a")
+        if not link_tag or not link_tag.get("href"):
+            return None
+
+        target_url = f"{base_domain}{link_tag['href']}"
+        try:
+            response = await client.get(target_url, headers=headers, timeout=10.0)
+            response.raise_for_status()
+            soup = _bs(response.text)
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch article from search result link: %s", str(e))
+            return None
+
+    result = _extract_wiki_text(soup)
+    elapsed = time.perf_counter() - start
+    logger.info("[wiki] '%s' — %.1fs", query[:40], elapsed)
+    return result
 
 
 async def search_tavily(query: str) -> Optional[str]:
@@ -312,9 +323,9 @@ async def search_searxng(query: str) -> Optional[str]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
+        client = get_http_client()
+        response = await client.get(url, params=params, timeout=15.0)
+        response.raise_for_status()
     except httpx.HTTPError as e:
         logger.error("SearXNG search failed for query '%s': %s", query, str(e))
         return None
@@ -453,9 +464,9 @@ async def _searxng_structured(
     }
     if time_range:
         params["time_range"] = time_range
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
+    client = get_http_client()
+    response = await client.get(url, params=params, timeout=12.0)
+    response.raise_for_status()
     data = response.json()
     out: List[Dict[str, Any]] = []
     for res in data.get("results", [])[: max_results * 2]:
@@ -573,22 +584,26 @@ async def search_structured(  # noqa: C901
         targets = [r for r in results if r.get("url")][:fetch_n]
 
         async def _fetch(url: str) -> str:
-            try:
-                async with httpx.AsyncClient(
-                    timeout=float(getattr(settings, "EVIDENCE_FETCH_TIMEOUT", 8.0)),
-                    follow_redirects=True,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; SelfCorrectingRAG/1.0)"},
-                ) as client:
-                    resp = await client.get(url)
+            # Bounded by a process-wide semaphore: each fetch+parse holds an
+            # lxml tree worth ~10x its input size; 20 concurrent queries each
+            # fetching 2 pages unbounded was a multi-hundred-MB spike.
+            async with _enrichment_semaphore():
+                try:
+                    client = get_http_client()
+                    resp = await client.get(
+                        url,
+                        timeout=float(getattr(settings, "EVIDENCE_FETCH_TIMEOUT", 8.0)),
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; SelfCorrectingRAG/1.0)"},
+                    )
                     resp.raise_for_status()
+                except Exception as exc:
+                    logger.debug("page fetch failed for %s: %s", url, exc)
+                    return ""
                 soup = _bs(resp.text)
                 for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
                     tag.decompose()
                 paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
                 return _clean_search_text("\n\n".join(p for p in paragraphs if len(p) > 40), max_chars=4000)
-            except Exception as exc:
-                logger.debug("page fetch failed for %s: %s", url, exc)
-                return ""
 
         fetched = await asyncio.gather(*(_fetch(r["url"]) for r in targets))
         enriched = 0
