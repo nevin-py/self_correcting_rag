@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -55,7 +56,9 @@ async def create_and_send_otp(
     await db.commit()
 
     body = body_template.format(code=code, minutes=settings.OTP_TTL_MINUTES)
-    delivered = send_email(user.email, subject, body)
+    # to_thread: both backends (SMTP handshake, HTTP call) block for seconds;
+    # never hold the event loop hostage during mail delivery.
+    delivered = await asyncio.to_thread(send_email, user.email, subject, body)
     return code, delivered
 
 
