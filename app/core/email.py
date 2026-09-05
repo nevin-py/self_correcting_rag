@@ -1,14 +1,17 @@
-"""Email delivery for OTP verification (SMTP or Resend HTTP API).
+"""Email delivery for OTP verification (SMTP, Resend, or Brevo HTTP API).
 
 Backends (settings.EMAIL_BACKEND):
 - ``smtp`` (default): smtplib with STARTTLS. Blocked on Render's free tier
   (outbound ports 25/465/587 are firewalled — Errno 101).
 - ``resend``: POST to Resend's HTTP API — works from any host, no egress
-  rules needed. Requires RESEND_API_KEY; sender is RESEND_FROM.
+  rules needed. Requires RESEND_API_KEY; sender is RESEND_FROM. Sandbox
+  sender only delivers to your own account email until a domain is verified.
+- ``brevo``: POST to Brevo's HTTP API — single-sender verification, no
+  domain needed. Requires BREVO_API_KEY + BREVO_FROM (verified sender).
 
-Both return True when the message was handed off, False when delivery failed
-(logged, never raised — callers decide whether undelivered OTPs may be echoed
-locally; production routes return 503 on undelivered mail).
+Both HTTP backends return True when the message was handed off, False when
+delivery failed (logged, never raised — callers decide whether undelivered
+OTPs may be echoed locally; production routes return 503 on undelivered mail).
 """
 
 from __future__ import annotations
@@ -55,10 +58,49 @@ def _send_via_resend(to: str, subject: str, body: str) -> bool:
         return False
 
 
+def _send_via_brevo(to: str, subject: str, body: str) -> bool:
+    """Deliver via Brevo's HTTP API (https://developers.brevo.com).
+
+    Single-sender verification makes this the domain-free option: verify one
+    sender address (BREVO_FROM) at brevo.com → Senders & IP and OTPs are
+    deliverable to anyone.
+    """
+    api_key = (settings.BREVO_API_KEY or "").strip()
+    sender = (settings.BREVO_FROM or "").strip()
+    if not api_key or not sender:
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError("BREVO_API_KEY and BREVO_FROM are required when EMAIL_BACKEND=brevo")
+        logger.warning("EMAIL_BACKEND=brevo but BREVO_API_KEY/BREVO_FROM unset — email to %s not sent", to)
+        return False
+
+    try:
+        resp = httpx.Client(timeout=settings.SMTP_TIMEOUT_SECONDS).post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": api_key, "content-type": "application/json"},
+            json={
+                "sender": {"email": sender},
+                "to": [{"email": to}],
+                "subject": subject,
+                "textContent": body,
+            },
+        )
+        if resp.status_code in (200, 201):
+            logger.info("Email sent via brevo to %s subject=%s", to, subject)
+            return True
+        logger.error("Brevo rejected email to %s: HTTP %d %s", to, resp.status_code, resp.text[:300])
+        return False
+    except Exception:
+        logger.exception("Failed to send email via brevo to %s", to)
+        return False
+
+
 def send_email(to: str, subject: str, body: str) -> bool:
-    """Send a plain-text email via the configured backend (smtp | resend)."""
-    if (settings.EMAIL_BACKEND or "smtp").strip().lower() == "resend":
+    """Send a plain-text email via the configured backend (smtp | resend | brevo)."""
+    backend = (settings.EMAIL_BACKEND or "smtp").strip().lower()
+    if backend == "resend":
         return _send_via_resend(to, subject, body)
+    if backend == "brevo":
+        return _send_via_brevo(to, subject, body)
 
     if not settings.SMTP_HOST or not settings.SMTP_FROM:
         if settings.ENVIRONMENT == "production":

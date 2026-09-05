@@ -43,12 +43,16 @@ class Settings(BaseSettings):
     SMTP_TIMEOUT_SECONDS: float = 5.0
 
     # Email delivery backend. Render's free tier blocks outbound SMTP, so its
-    # deployments should use "resend" (HTTP API, works everywhere).
-    EMAIL_BACKEND: str = "smtp"  # smtp | resend
+    # deployments should use "resend" or "brevo" (HTTP APIs, work everywhere).
+    EMAIL_BACKEND: str = "smtp"  # smtp | resend | brevo
     RESEND_API_KEY: str = ""
     # Resend's sandbox sender only delivers to your own account email —
     # verify a domain at resend.com/domains for production senders.
     RESEND_FROM: str = "onboarding@resend.dev"
+    # Brevo: single-sender verification (no domain needed) — BREVO_FROM must
+    # match a sender verified at brevo.com → Senders & IP.
+    BREVO_API_KEY: str = ""
+    BREVO_FROM: str = ""
 
     # Anti-spam / quotas
     MAX_CHATS_PER_USER: int = 20
