@@ -1,6 +1,11 @@
 import axios from "axios";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Strip trailing slashes: the bare (instance-less) auth calls concatenate
+// API_BASE + "/api/..." directly, and axios only normalizes the join for
+// instance calls — a trailing "/" here produced "//api/v1/auth/refresh" 404s.
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+).replace(/\/+$/, "");
 
 export const api = axios.create({
   baseURL: API_BASE,

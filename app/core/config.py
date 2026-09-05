@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     OTP_TTL_MINUTES: int = 10
     OTP_MAX_ATTEMPTS: int = 5
     OTP_RESEND_COOLDOWN_SECONDS: int = 60
+    SMTP_TIMEOUT_SECONDS: float = 5.0
 
     # Anti-spam / quotas
     MAX_CHATS_PER_USER: int = 20

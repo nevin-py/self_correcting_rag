@@ -36,15 +36,20 @@ def send_email(to: str, subject: str, body: str) -> bool:
     msg.set_content(body)
 
     try:
+        # 5s socket timeout: a blocked outbound SMTP (e.g. Render's free tier
+        # firewalls ports 25/465/587 — Errno 101 "Network is unreachable")
+        # must fail in seconds, not hang the HTTP request for 30s+ before
+        # returning a misleading "code was sent".
+        timeout = float(getattr(settings, "SMTP_TIMEOUT_SECONDS", 5))
         if settings.SMTP_TLS:
             context = ssl.create_default_context()
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as server:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
                 server.starttls(context=context)
                 if settings.SMTP_USER:
                     server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
         else:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as server:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
                 if settings.SMTP_USER:
                     server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
