@@ -311,12 +311,18 @@ counts, and outcome (ok/parse-fallback/timeout/error).
 - **Email ownership via OTP** (register/reset): codes hashed, attempt-capped,
   expiry-checked, resend-cooldown enforced. In non-production an undeliverable code is
   echoed as `debug_otp` so the flow is testable without mail; in production it never is,
-  and undelivered mail → 503.
+  and undelivered mail → 503. **Logout revokes ALL of the user's refresh tokens** —
+  a concurrent tab's in-flight rotation can otherwise commit after logout and re-install
+  a live cookie (session resurrection on next open).
 - **Per-user LLM keys Fernet-encrypted** under a dedicated `ENCRYPTION_KEY`
   (independent of `SECRET_KEY` rotation); `scripts/reencrypt_user_keys.py` migrates
   legacy rows transparently. Key reveal requires explicit confirmation; masked by default.
 - **Usage budgets** (`usage_events` table): queries/hour, chat creates/hour + total,
   Tavily calls/day, ingest tokens/day.
+- **DB connections are pooled persistently** even over the Supabase transaction
+  pooler (`statement_cache_size=0` handles pgbouncer; `pool_pre_ping` + 5-min recycle
+  handle idle eviction). NullPool here opened a fresh TLS handshake per request —
+  measured 0.8–2.8s on every auth/CRUD endpoint.
 - **Timezone lesson:** event timestamps are DB-clock (`func.now()`), so budget windows
   are computed **in SQL** (`created_at >= now() - interval`). The original Python-side
   UTC comparison silently never enforced caps on any non-UTC Postgres — a bug class

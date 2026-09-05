@@ -76,7 +76,7 @@ All under `/api/v1/agent` (see `app/agent/router.py`, `app/agent/streaming.py`):
 
 - Access JWT (short-lived, `Authorization: Bearer`) + opaque refresh token stored hashed, single-use, with **reuse detection**: presenting a revoked token revokes the user's entire token family.
 - The refresh token is issued as an **httpOnly cookie** (`Path=/api/v1/auth`, `SameSite=None; Secure` in production) so browser clients never store it in JS-readable storage; JSON-body tokens remain supported for API clients.
-- Password change/reset revokes all live refresh tokens. Email OTP flows (register/reset) use hashed, attempt-capped, expiry-checked codes; in non-production undeliverable OTPs echo as `debug_otp`, in production undelivered mail → 503.
+- Password change/reset revokes all live refresh tokens — and so does **logout**: user-wide revocation closes the in-flight-rotation race where a concurrent tab's post-logout Set-Cookie resurrected the session (the "auto sign-in after I just open it" bug). Email OTP flows (register/reset) use hashed, attempt-capped, expiry-checked codes; in non-production undeliverable OTPs echo as `debug_otp`, in production undelivered mail → 503.
 - Per-user LLM keys are Fernet-encrypted under a dedicated `ENCRYPTION_KEY` (independent of `SECRET_KEY` rotation); legacy rows fall back transparently (`scripts/reencrypt_user_keys.py`).
 - **Usage budgets** (`usage_events`) are computed **in SQL with DB-clock windows** — the original Python-side UTC comparison silently never enforced caps on any non-UTC Postgres. Rate limits via `app/core/limiter.py` (proxy-aware IP keys, optional Redis storage).
 - **Fail-fast boot validation** in production: CORS origins set, SMTP present, strong `SECRET_KEY` — the service refuses to start unsafe.

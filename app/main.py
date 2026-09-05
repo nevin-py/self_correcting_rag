@@ -195,8 +195,11 @@ app.add_middleware(
 )
 
 # ── Custom middleware (skip OPTIONS) ────────────────────────────────────────
-app.add_middleware(RequestIDMiddleware)
+# Starlette runs the LAST-added middleware first (outermost). RequestID must
+# wrap StructuredLogging, so it is added AFTER it — otherwise every log line
+# reads request_id="unknown" because the ID was never set when logging ran.
 app.add_middleware(StructuredLoggingMiddleware)
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(MetricsMiddleware)
 
 # ── Routes ───────────────────────────────────────────────────────────────────

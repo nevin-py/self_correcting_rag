@@ -17,6 +17,7 @@ from app.auth.tokens import (
     rotate_refresh_token,
     revoke_refresh_token,
     revoke_all_for_user,
+    user_id_for_refresh_token,
     RefreshTokenReuseError,
 )
 from app.auth.schemas import (
@@ -365,8 +366,23 @@ async def refresh_token(request: Request, body: RefreshRequest, response: Respon
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, body: RefreshRequest, response: Response, db: AsyncSession = Depends(get_db)):
+    """Log out — and kill EVERY live refresh token of the user.
+
+    Why user-wide rather than just the presented token: a concurrent tab's
+    in-flight rotation can commit AFTER this request revokes the presented
+    token, and its Set-Cookie then lands after our cookie clear — leaving a
+    fresh, LIVE refresh token in the browser's cookie jar. Reopening the app
+    would then silently resurrect the session (the "auto sign-in after I just
+    open it" bug). Revoking all of the user's tokens makes any such in-flight
+    rotation worthless server-side: whatever token it installed is revoked
+    before (rotate sees it revoked → reuse detection) or after (revoked
+    directly) it lands. Trade-off: logout on one device signs out all devices
+    for this user — the correct default for a personal tool.
+    """
     raw = _refresh_token_from(request, body)
     if raw:
-        await revoke_refresh_token(db, raw)
+        user_id = await user_id_for_refresh_token(db, raw)
+        if user_id:
+            await revoke_all_for_user(db, user_id)
     _clear_refresh_cookie(response)
     return MessageResponse(detail="Logged out.")

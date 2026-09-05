@@ -147,6 +147,59 @@ class TestRefreshCookie:
         resp = await client.post("/api/v1/auth/refresh", json={})
         assert resp.status_code == 401
 
+    async def test_logout_kills_all_user_sessions(self, client, registered_user):
+        """Logout must revoke EVERY live refresh token of the user.
+
+        Regression: a concurrent tab's in-flight rotation could commit after
+        logout revoked the presented token, and its Set-Cookie landed after the
+        cookie clear — leaving a fresh LIVE refresh token in the browser jar.
+        Reopening the app then silently resurrected the session ("auto sign-in
+        after I just open it"). User-wide revocation makes any such in-flight
+        rotation worthless server-side.
+        """
+        login = await client.post(
+            "/api/v1/auth/login",
+            data={"username": registered_user["email"], "password": registered_user["password"]},
+        )
+        assert login.status_code == 200
+        # Second login = a second "device/tab" with its own live refresh token.
+        login2 = await client.post(
+            "/api/v1/auth/login",
+            data={"username": registered_user["email"], "password": registered_user["password"]},
+        )
+        assert login2.status_code == 200
+
+        # The first tab logs out.
+        resp = await client.post("/api/v1/auth/logout", json={})
+        assert resp.status_code == 200
+
+        # The second tab's still-valid refresh token (captured from its login
+        # response — the shared cookie jar can't hold both) must ALSO be dead:
+        # a post-logout rotation can no longer resurrect the session.
+        import re as _re
+        m = _re.search(r"refresh_token=([^;]+)", login2.headers.get("set-cookie", ""))
+        assert m, "no refresh cookie on second login"
+        resp = await client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": m.group(1)}
+        )
+        assert resp.status_code == 401
+
+    async def test_refresh_after_logout_is_reuse_not_resurrection(self, client, registered_user):
+        """Simulates the exact race: refresh in flight while logout lands.
+        The rotated-out token presented later must trigger reuse handling
+        (401), never issue a new live pair."""
+        await client.post(
+            "/api/v1/auth/login",
+            data={"username": registered_user["email"], "password": registered_user["password"]},
+        )
+        # Rotation 1 (the "in-flight" refresh that lands after logout).
+        r1 = await client.post("/api/v1/auth/refresh", json={})
+        assert r1.status_code == 200
+        # Logout kills the whole family.
+        await client.post("/api/v1/auth/logout", json={})
+        # Any further refresh — old cookie, rotated cookie, anything — 401s.
+        assert (await client.post("/api/v1/auth/refresh", json={})).status_code == 401
+
 
 @pytest.mark.asyncio
 class TestMetricsTemplates:

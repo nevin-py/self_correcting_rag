@@ -25,15 +25,21 @@ _sql_echo = (
 _db_url = settings.DATABASE_URL
 _engine_kwargs: dict = {"echo": _sql_echo}
 _connect_args: dict = {}
-# Supabase transaction pooler (6543) does not support prepared-statement caching.
+# Supabase transaction pooler (6543) does not support prepared-statement
+# caching — statement_cache_size=0 handles that. A PERSISTENT pool is still
+# safe (and important): NullPool here opened a fresh TLS connection per
+# request (~0.6-1.5s handshake), making every DB endpoint cost 1-3s.
 if "pooler.supabase.com" in _db_url or ":6543/" in _db_url or _db_url.rstrip("/").endswith(":6543"):
-    _engine_kwargs["poolclass"] = NullPool
     _connect_args["statement_cache_size"] = 0
-else:
-    # Bound the pool: each asyncpg connection costs ~10-30MB under
-    # concurrency. Default SQLAlchemy pool (5 + 10 overflow) could hold 15.
+
+# Bound the pool for ALL URLs: each asyncpg connection costs ~10-30MB under
+# concurrency. pool_pre_ping + pool_recycle keep stale pooler connections
+# from surfacing as errors after idle periods.
+if "poolclass" not in _engine_kwargs:
     _engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
     _engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
+    _engine_kwargs["pool_pre_ping"] = True
+    _engine_kwargs["pool_recycle"] = 300
 if "supabase.co" in _db_url or "supabase.com" in _db_url:
     import ssl as _ssl
 

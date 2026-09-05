@@ -31,22 +31,68 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 — try refresh ONCE (single-flight), then clear session on auth endpoints
+// Handle 401 — try refresh ONCE (single-flight, cross-tab), then clear session
 //
-// Single-flight matters: refresh tokens are single-use (rotated server-side).
-// When several requests 401 simultaneously (a page firing 3+ parallel calls),
-// naive handling would launch one refresh per request — the second refresh
-// would fail (token already rotated), CLEAR the session, and log the user out
-// despite a perfectly valid new token. All waiters therefore share ONE
-// in-flight refresh promise; latecomers retry against the fresh token.
+// Single-flight matters doubly: refresh tokens are single-use (rotated
+// server-side), AND the rotation is per-BROWSER (httpOnly cookie jar shared by
+// all tabs). Per-tab promises don't serialize tabs — three tabs loading at once
+// produced three sequential rotations (each legitimate on its own, but every
+// other tab's stored access token goes stale, and the NEXT rotation from a
+// stale tab trips reuse detection and kills the whole session).
+//
+// Two layers of coordination:
+// 1. Web Locks API — only ONE tab rotates at a time, across tabs.
+// 2. Freshness window — if another tab refreshed <10s ago, adopt its token
+//    from localStorage instead of rotating again.
+//
+// Backend backstop: logout (and reuse detection) revoke ALL of the user's
+// tokens, so a rotation that races a logout is worthless server-side.
 let refreshInFlight: Promise<string | null> | null = null;
+const REFRESH_FRESH_MS = 10_000;
+const REFRESH_LOCK_NAME = "scrag-auth-refresh";
 
-async function singleFlightRefresh(): Promise<string | null> {
+/** Broadcast auth events to every other tab of this origin. */
+const authChannel: BroadcastChannel | null =
+  typeof window !== "undefined" && "BroadcastChannel" in window
+    ? new BroadcastChannel("scrag-auth")
+    : null;
+
+export function broadcastAuthEvent(type: string): void {
+  try {
+    authChannel?.postMessage({ type });
+  } catch {
+    // channel unavailable — non-fatal
+  }
+}
+
+/** Subscribe other tabs to auth events (returns an unsubscribe fn). */
+export function onAuthEvent(cb: (type: string) => void): () => void {
+  if (!authChannel) return () => undefined;
+  const handler = (ev: MessageEvent) => {
+    if (ev.data?.type) cb(ev.data.type as string);
+  };
+  authChannel.addEventListener("message", handler);
+  return () => authChannel.removeEventListener("message", handler);
+}
+
+/**
+ * The ONE way any tab rotates the session. Serialized across tabs via Web
+ * Locks, deduped via the freshness window. Returns the new access token or
+ * null when the session is genuinely dead.
+ */
+export async function refreshAccessToken(): Promise<string | null> {
   if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = (async () => {
-    // The refresh token lives in an httpOnly cookie — the browser attaches it
-    // automatically (withCredentials). A legacy localStorage token is still
-    // sent in the body so sessions issued before the cookie rollout survive.
+
+  const rotate = async (): Promise<string | null> => {
+    // Another tab may have JUST rotated — adopt its token instead of
+    // burning another single-use rotation (the freshness window is short
+    // enough that a legitimately-expired token path is unaffected).
+    const refreshedAt = Number(localStorage.getItem("token_refreshed_at") || 0);
+    const stored = localStorage.getItem("token");
+    if (stored && Date.now() - refreshedAt < REFRESH_FRESH_MS) return stored;
+
+    // Legacy localStorage refresh token still sent in the body so sessions
+    // issued before the cookie rollout survive.
     const legacy = localStorage.getItem("refresh_token");
     try {
       // Bare axios call — going through `api` would re-enter this interceptor.
@@ -56,6 +102,7 @@ async function singleFlightRefresh(): Promise<string | null> {
         { withCredentials: true }
       );
       localStorage.setItem("token", res.data.access_token);
+      localStorage.setItem("token_refreshed_at", String(Date.now()));
       // Migrate off localStorage refresh tokens; the cookie is the source of
       // truth from here on.
       localStorage.removeItem("refresh_token");
@@ -63,7 +110,18 @@ async function singleFlightRefresh(): Promise<string | null> {
     } catch {
       localStorage.removeItem("token");
       localStorage.removeItem("refresh_token");
+      localStorage.removeItem("token_refreshed_at");
       return null;
+    }
+  };
+
+  refreshInFlight = (async () => {
+    try {
+      const locks = typeof navigator !== "undefined" ? (navigator as Navigator & { locks?: { request: (name: string, cb: () => Promise<string | null>) => Promise<string | null> } }).locks : undefined;
+      if (locks?.request) {
+        return await locks.request(REFRESH_LOCK_NAME, rotate);
+      }
+      return await rotate();
     } finally {
       // Release AFTER the storage writes so awaiters see a settled state.
       refreshInFlight = null;
@@ -96,7 +154,7 @@ api.interceptors.response.use(
       !original._retry &&
       !isAuthEndpoint
     ) {
-      const newToken = await singleFlightRefresh();
+      const newToken = await refreshAccessToken();
       if (newToken) {
         original._retry = true;
         original.headers = original.headers || {};

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { authApi } from "@/lib/api";
+import { authApi, refreshAccessToken, broadcastAuthEvent, onAuthEvent } from "@/lib/api";
 
 interface User {
   user_id: string;
@@ -85,8 +85,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    // Cookie-based logout: the browser sends the httpOnly refresh cookie.
+    // Cookie-based logout: the browser sends the httpOnly refresh cookie. The
+    // backend revokes ALL of the user's refresh tokens (see the logout route:
+    // this closes the in-flight-rotation race that resurrected sessions), and
+    // every other tab is told to drop its state immediately via BroadcastChannel.
     authApi.logout().catch(() => undefined);
+    localStorage.removeItem("token_refreshed_at");
+    broadcastAuthEvent("logout");
     clearSession(set);
   },
 
@@ -128,12 +133,15 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
 
     // 2. Rotate once (httpOnly cookie carries the token), then read the email
-    // from /auth/me with the new token.
+    //    from /auth/me with the new token — through the SAME cross-tab-coordinated
+    //    refresh the 401 interceptor uses (Web Locks + freshness window), so a
+    //    multi-tab cold start performs at most ONE rotation for the whole browser.
     try {
-      const res = await authApi.refresh("");
-      const newAccess = res.data.access_token;
-      localStorage.setItem("token", newAccess);
-      localStorage.removeItem("refresh_token");
+      const newAccess = await refreshAccessToken();
+      if (!newAccess) {
+        clearSession(set);
+        return;
+      }
       set({ token: newAccess });
       try {
         const me = await authApi.me();
@@ -146,3 +154,16 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 }));
+
+// Other tabs: on a logout broadcast, drop local state immediately instead of
+// discovering it on the next 401 (the server has already revoked everything).
+if (typeof window !== "undefined") {
+  onAuthEvent((type) => {
+    if (type === "logout") {
+      localStorage.removeItem("token");
+      localStorage.removeItem("refresh_token");
+      localStorage.removeItem("token_refreshed_at");
+      useAuthStore.setState({ user: null, token: null, isLoading: false });
+    }
+  });
+}

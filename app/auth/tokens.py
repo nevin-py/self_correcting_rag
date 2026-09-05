@@ -128,3 +128,12 @@ async def revoke_refresh_token(db: AsyncSession, raw_refresh: str) -> None:
     if row and row.revoked_at is None:
         row.revoked_at = _naive_utc_now()
         await db.commit()
+
+
+async def user_id_for_refresh_token(db: AsyncSession, raw_refresh: str) -> uuid.UUID | None:
+    """Resolve the owning user of a refresh token (for logout-all)."""
+    token_hash = _hash_token(raw_refresh.strip())
+    result = await db.execute(
+        select(RefreshToken.user_id).where(RefreshToken.token_hash == token_hash)
+    )
+    return result.scalar_one_or_none()
