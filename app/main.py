@@ -138,10 +138,19 @@ def _validate_production_settings() -> None:
     problems: list[str] = []
     if not settings.cors_origin_set:
         problems.append("CORS_ORIGINS must list your frontend origin(s) in production")
-    if not (settings.SMTP_HOST or "").strip() or not (settings.SMTP_FROM or "").strip():
-        problems.append("SMTP_HOST and SMTP_FROM are required in production (OTP email)")
-    if (settings.SMTP_USER or "").strip() and not (settings.SMTP_PASSWORD or "").strip():
-        problems.append("SMTP_PASSWORD is required when SMTP_USER is set")
+    # Email backend: validate whichever transport is actually selected.
+    email_backend = (settings.EMAIL_BACKEND or "smtp").strip().lower()
+    if email_backend == "brevo":
+        if not (settings.BREVO_API_KEY or "").strip() or not (settings.BREVO_FROM or "").strip():
+            problems.append("BREVO_API_KEY and BREVO_FROM are required in production (EMAIL_BACKEND=brevo)")
+    elif email_backend == "resend":
+        if not (settings.RESEND_API_KEY or "").strip() or not (settings.RESEND_FROM or "").strip():
+            problems.append("RESEND_API_KEY and RESEND_FROM are required in production (EMAIL_BACKEND=resend)")
+    else:
+        if not (settings.SMTP_HOST or "").strip() or not (settings.SMTP_FROM or "").strip():
+            problems.append("SMTP_HOST and SMTP_FROM are required in production (EMAIL_BACKEND=smtp)")
+        if (settings.SMTP_USER or "").strip() and not (settings.SMTP_PASSWORD or "").strip():
+            problems.append("SMTP_PASSWORD is required when SMTP_USER is set")
     weak_secrets = {
         "",
         "your_secret_key_here",
