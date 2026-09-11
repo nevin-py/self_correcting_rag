@@ -197,7 +197,30 @@ def _extract_wiki_text(soup: BeautifulSoup) -> Optional[str]:
     return _clean_search_text(result)
 
 
+async def search_wiki_with_title(query: str, lang: str = "en") -> tuple[Optional[str], Optional[str]]:
+    """Fetch the best-matching Wikipedia article. Returns (title, text).
+
+    The title is the article's canonical <title> (" - Wikipedia" suffix
+    stripped) — never the raw query string, which used to leak into source
+    labels as fabricated-looking page names.
+    """
+    text = await _wiki_text(query, lang)
+    if text is None:
+        return None, None
+    return _last_wiki_title.get("title"), text
+
+
+# Single-slot handoff from _wiki_text (same request scope: each call fetches,
+# then its caller reads immediately). Concurrent queries run in separate calls.
+_last_wiki_title: dict = {}
+
+
 async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
+    text, _ = await search_wiki_with_title(query, lang)
+    return text
+
+
+async def _wiki_text(query: str, lang: str = "en") -> Optional[str]:
     start = time.perf_counter()
     clean_query = query.strip().replace(" ", "_")
     encoded_query = urllib.parse.quote(clean_query)
@@ -260,6 +283,10 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
             return None
 
     result = _extract_wiki_text(soup)
+    if soup.title and soup.title.text:
+        raw = soup.title.text.strip()
+        title = re.sub(r"\s*-\s*Wikipedia\s*$", "", raw).strip()
+        _last_wiki_title["title"] = title or None
     elapsed = time.perf_counter() - start
     logger.info("[wiki] '%s' — %.1fs", query[:40], elapsed)
     return result
@@ -515,7 +542,7 @@ async def search_structured(  # noqa: C901
     # evidence than news snippets. Question-shaped queries don't.
     wiki_direct = None
     if not _QUESTIONY_RE.search(query):
-        wiki_direct = asyncio.ensure_future(_safe(search_wiki(query), "wikipedia-direct"))
+        wiki_direct = asyncio.ensure_future(_safe(search_wiki_with_title(query), "wikipedia-direct"))
 
     tasks = []
     if allow_tavily:
@@ -561,11 +588,11 @@ async def search_structured(  # noqa: C901
     # Direct Wikipedia article (when fetched) outranks snippets: its body
     # states the event/fact outright instead of referencing it.
     if wiki_direct is not None:
-        wiki_text = wiki_direct.result()
+        wiki_title, wiki_text = wiki_direct.result() or (None, None)
         if wiki_text and len(wiki_text) > 200:
             item = _normalize_result(
                 content=wiki_text,
-                title=f"Wikipedia: {query}",
+                title=wiki_title or f"Wikipedia: {query}",
                 url=f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
                 source="wikipedia.org",
                 published_date=None,
@@ -618,11 +645,11 @@ async def search_structured(  # noqa: C901
 
     if not results:
         try:
-            wiki_text = await search_wiki(query)
+            wiki_text, wiki_title = await search_wiki_with_title(query)
             if wiki_text:
                 item = _normalize_result(
                     content=wiki_text,
-                    title=f"Wikipedia: {query}",
+                    title=wiki_title or f"Wikipedia: {query}",
                     url=f"https://en.wikipedia.org/wiki/{urllib.parse.quote(query.replace(' ', '_'))}",
                     source="wikipedia.org",
                     published_date=None,

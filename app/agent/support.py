@@ -20,6 +20,20 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _SNIPPET_CHARS = 1500  # evidence texts are truncated to this before encoding
+_WINDOW_SENTENCES = 2  # sliding-window size, in sentences
+
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _windows(text: str) -> list[str]:
+    """Sliding windows of ~_WINDOW_SENTENCES sentences (stride 1)."""
+    sentences = [s.strip() for s in _SENT_SPLIT_RE.split(text or "") if s.strip()]
+    if len(sentences) <= _WINDOW_SENTENCES:
+        return [text] if text.strip() else []
+    return [
+        " ".join(sentences[i : i + _WINDOW_SENTENCES])
+        for i in range(len(sentences) - _WINDOW_SENTENCES + 1)
+    ]
 
 
 @functools.lru_cache(maxsize=1)
@@ -58,25 +72,30 @@ def max_support(
     *,
     embed=None,
 ) -> float:
-    """Best cosine similarity between ``sentence`` and any of ``evidence_texts``.
+    """Best claim-vs-window similarity across the cited evidence texts.
 
-    Returns 1.0 for an empty sentence (nothing to falsify) and 0.0 when no
-    evidence texts are given.
+    Each evidence chunk is cut into ~2-sentence sliding windows; the score is
+    the max cosine between the claim and any window (whole chunks dilute a
+    single supporting sentence). Returns 1.0 for an empty sentence (nothing to
+    falsify) and 0.0 when no evidence texts are given.
     """
     if not sentence or not sentence.strip():
         return 1.0
     if not evidence_texts:
         return 0.0
     embed = embed or _local_embed_fn()
+    windows = [w for t in evidence_texts for w in _windows(t[:_SNIPPET_CHARS])]
+    if not windows:
+        return 0.0
     if embed is None:
-        return _keyword_cosine(sentence, evidence_texts)
-    vecs = embed([sentence.strip()] + [t[:_SNIPPET_CHARS] for t in evidence_texts])
+        return _best_window_cosine(sentence, evidence_texts)
+    vecs = embed([sentence.strip()] + windows)
     claim_vec = vecs[0]
     return max(_cosine(claim_vec, ev) for ev in vecs[1:])
 
 
-def _keyword_cosine(sentence: str, evidence_texts: list[str]) -> float:
-    """Fallback: token-overlap cosine (no model). Weak but safe-directional."""
+def _best_window_cosine(sentence: str, evidence_texts: list[str]) -> float:
+    """Keyword-cosine fallback: best claim-vs-window overlap. Weak but safe-directional."""
     from collections import Counter
 
     def bag(t: str) -> Counter:
@@ -87,14 +106,15 @@ def _keyword_cosine(sentence: str, evidence_texts: list[str]) -> float:
         return 1.0 if sentence.strip() else 0.0
     best = 0.0
     for t in evidence_texts:
-        tb = bag(t[:_SNIPPET_CHARS])
-        if not tb:
-            continue
-        common = set(sb) & set(tb)
-        dot = sum(sb[w] * tb[w] for w in common)
-        na = math.sqrt(sum(v * v for v in sb.values()))
-        nb = math.sqrt(sum(v * v for v in tb.values()))
-        best = max(best, dot / (na * nb) if na and nb else 0.0)
+        for w in _windows(t[:_SNIPPET_CHARS]):
+            tb = bag(w)
+            if not tb:
+                continue
+            common = set(sb) & set(tb)
+            dot = sum(sb[x] * tb[x] for x in common)
+            na = math.sqrt(sum(v * v for v in sb.values()))
+            nb = math.sqrt(sum(v * v for v in tb.values()))
+            best = max(best, dot / (na * nb) if na and nb else 0.0)
     return best
 
 

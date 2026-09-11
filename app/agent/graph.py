@@ -4,7 +4,8 @@
                        ├─ ask_clarification ─────── END
                        └─ gather_evidence ─► generate_answer ─► verify_answer
                                                    ▲                │
-                                                   └── repair ◄─────┘  (≤ MAX_REPAIR_PASSES)
+                                                   ├── repair ◄─────┤  search pass (≤ MAX_REPAIR_PASSES)
+                                                   └── revise ◄─────┘  critique-only pass
                                                                     │ (else)
                                                                    END
 """
@@ -27,7 +28,6 @@ from app.agent.nodes import (
     verify_answer,
 )
 from app.agent.state import RAGState
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,11 @@ def _new_state(
         repair_queries=[],
         repair_count=0,
         prior_evidence_state=None,
+        critique="",
+        draft_answer="",
+        revise_requested=False,
+        history_summary="",
+        computations=[],
         graph_steps=0,
         search_count=0,
         retrieval_count=0,
@@ -92,6 +97,7 @@ builder.add_edge("gather_evidence", "generate_answer")
 builder.add_edge("generate_answer", "verify_answer")
 builder.add_conditional_edges("verify_answer", route_after_verify, {
     "gather_evidence": "gather_evidence",
+    "generate_answer": "generate_answer",  # revise-only pass (critique, no new search)
     END: END,
 })
 

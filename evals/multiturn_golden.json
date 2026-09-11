@@ -1,0 +1,60 @@
+{
+  "description": "Multi-turn golden cases: uploaded-document preference in the face of live web search. All Zentro Dynamics facts are fictitious — they exist ONLY in the ingested document, so any correct answer proves the agent preferred the user's document over web results. C1-C4 run with the doc ingested; C5 is the no-doc control (must NOT contain doc figures).",
+  "document": {
+    "filename": "Zentro Dynamics Q3 FY2025 Investor Report.md",
+    "must_contain_facts": ["412", "27", "89", "2.1%", "1,840", "Meera Krishnan", "Pune", "Orbit Analytics 2.0"]
+  },
+  "cases": [
+    {
+      "id": "C1-doc-lookup",
+      "turns": ["According to the Zentro Dynamics report, what was their Q3 FY2025 revenue and how did it change?"],
+      "expect": {
+        "status": ["answered", "answered_with_caveats"],
+        "must_contain_any": ["412"],
+        "must_cite_document": true,
+        "doc_source_in_citations": true,
+        "max_caveat_bullets": 5
+      }
+    },
+    {
+      "id": "C2-doc-multifact-followup",
+      "turns": [
+        "What does the Zentro Dynamics report say about their expansion?",
+        "and what was their monthly churn rate again?"
+      ],
+      "expect": {
+        "status": ["answered", "answered_with_caveats"],
+        "turn2_must_contain_any": ["2.1"],
+        "turn2_must_cite_document": true
+      }
+    },
+    {
+      "id": "C3-doc-entities",
+      "turns": ["Who founded Zentro Dynamics and where is the company headquartered?"],
+      "expect": {
+        "status": ["answered", "answered_with_caveats"],
+        "must_contain_any": ["Meera Krishnan", "Pune"]
+      }
+    },
+    {
+      "id": "C4-cross-turn-pin",
+      "turns": [
+        "Give me a quick summary of the Zentro Dynamics Q3 report.",
+        "what did you say about their headcount?"
+      ],
+      "expect": {
+        "status": ["answered", "answered_with_caveats"],
+        "turn2_must_contain_any": ["1,840", "1840"]
+      }
+    },
+    {
+      "id": "C5-no-doc-control",
+      "turns": ["According to the Zentro Dynamics report, what was their Q3 FY2025 revenue?"],
+      "expect": {
+        "status": ["answered", "answered_with_caveats", "needs_clarification"],
+        "must_not_contain_any": ["412 crore", "Meera Krishnan", "Orbit Analytics"],
+        "note": "No doc ingested for this chat — the agent must not hallucinate the private figures"
+      }
+    }
+  ]
+}

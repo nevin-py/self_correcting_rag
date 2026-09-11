@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     # Shared HTTP client + bounded full-page enrichment (memory spikes under load)
     HTTPX_MAX_CONNECTIONS: int = 20
     ENRICHMENT_CONCURRENCY: int = 4
-
     # Async DB pool caps (asyncpg conns cost ~10-30MB each under concurrency;
     # Supabase-pooler URLs bypass this via NullPool above)
     DB_POOL_SIZE: int = 5
@@ -125,6 +124,9 @@ class Settings(BaseSettings):
     OPENROUTER_PLANNER_MODEL: str = "xiaomi/mimo-v2.5"
     OPENROUTER_GENERATOR_MODEL: str = "xiaomi/mimo-v2.5"
     OPENROUTER_HALLUCINATION_MODEL: str = "xiaomi/mimo-v2.5"
+    # Small fast model for greetings/meta (conversational node). Empty = the
+    # generator model handles these too (correct but needlessly slow).
+    OPENROUTER_LIGHT_MODEL: str = ""
     # Fallback chain: cheap + good reasoning models (comma-separated)
     OPENROUTER_PLANNER_FALLBACKS: str = "google/gemini-2.5-flash,deepseek/deepseek-chat-v3-0324"
     OPENROUTER_GENERATOR_FALLBACKS: str = "google/gemini-2.5-flash,deepseek/deepseek-chat-v3-0324"
@@ -139,24 +141,47 @@ class Settings(BaseSettings):
     MAX_GRAPH_STEPS: int = 20
     MAX_SEARCHES: int = 4
     MAX_RETRIEVALS: int = 3
-    MAX_REGENERATIONS: int = 2
 
-    USE_VERIFY_CASCADE: bool = True
-    MAX_REPAIR_PASSES: int = 1
-    MAX_REPAIR_SEARCHES: int = 3  # C1: independent search-only budget for gap filling
-    NLI_ENTAIL_THRESHOLD: float = 0.7
-    NLI_CONTRADICT_THRESHOLD: float = 0.7
-    # C5: Near-duplicate similarity threshold for evidence dedup (0-1)
+    # Self-correction loop. Pass 1 = targeted search from the judge's repair
+    # queries; pass 2 = critique-driven revise with no new search.
+    MAX_REPAIR_PASSES: int = 2
+    # Retrieval sufficiency floor: when the best rerank score is below this and
+    # the pool is thin, retry search with decomposed queries BEFORE generating
+    # (CRAG-style retrieval evaluation). 0 disables the retry.
+    SUFFICIENCY_TOP_SCORE: float = 0.35
+    SUFFICIENCY_MIN_EVIDENCE: int = 2
+    # Pinned prior-turn facts must still be relevant to THIS query (topic
+    # switches must not drag stale verified facts into context).
+    ESTABLISHED_MIN_SCORE: float = 0.3
+
     # Claim↔evidence support gate: a cited sentence whose embedding similarity
-    # to ALL of its cited evidence chunks falls below this is demoted to a caveat
-    # (citation id resolution alone does not imply the evidence supports the claim).
+    # to its cited evidence falls below this is demoted to a caveat (citation
+    # id resolution alone does not imply the evidence supports the claim).
     CITATION_SUPPORT_GATE: bool = True
     CITATION_SUPPORT_MIN_SIM: float = 0.55
-    # C9: Numeric contradiction penalty multiplier (lower = harsher penalty)
-    NUMERIC_CONTRADICTION_PENALTY: float = 0.5
+
+    # Judge context parity: the verifier must see the same evidence the
+    # generator saw, at the same snippet length, or it invents caveats.
+    JUDGE_SNIPPET_CHARS: int = 1200
+    JUDGE_CONTEXT_CHARS: int = 12000
+
+    # Fast path: when mechanical citation checks + the support gate fully pass,
+    # skip the LLM judge (saves 30-90s on every clean answer). 0 disables.
+    JUDGE_FAST_PATH: bool = True
+
+    # Deterministic calculator: on numeric questions the LLM plans pure
+    # arithmetic expressions and a sandboxed evaluator computes them exactly.
+    # The answer must match these values — no model mental arithmetic.
+    COMPUTE_ENABLED: bool = True
+    COMPUTE_MAX_EXPRESSIONS: int = 6
 
     QUERY_TIMEOUT_SECONDS: int = 0
     STREAM_NODE_TIMEOUT_SECONDS: int = 60
+    # Per-role structured-output timeouts (s). The planner/judge do small
+    # classification jobs — a hung attempt should not eat the whole budget
+    # before the fallback chain gets its turn.
+    PLANNER_TIMEOUT_SECONDS: int = 20
+    VERIFIER_TIMEOUT_SECONDS: int = 35
     # Soft context window for UI meter (tokens)
     CONTEXT_WINDOW_TOKENS: int = 128_000
 

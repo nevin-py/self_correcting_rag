@@ -91,3 +91,4 @@ backups/
 .cursor/
 frontend/tsconfig.tsbuildinfo
 deploy/hf-space/
+deploy/render.env

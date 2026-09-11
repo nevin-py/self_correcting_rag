@@ -51,12 +51,10 @@ from app.agent.chat_service import (  # noqa: F401
     _delete_chat_children,
     _verify_chat_ownership,
     MAX_HISTORY_MESSAGES,
-    MAX_PRIOR_EVIDENCE,
     _load_history,
     _load_prior_evidence_state,
     _load_document_inventory,
     _finalize_evidence_state,
-    _load_prior_evidence_summary,
     _store_messages,
     _log_interaction,
 )
@@ -241,22 +239,6 @@ async def delete_chat(
     await db.commit()
     await delete_chunks_for_chat(current_user.user_id, chat_id)
     logger.info("Chat deleted: chat_id=%s user_id=%s", chat_id, current_user.user_id)
-
-
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Conversation memory helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
 
 
 

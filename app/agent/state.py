@@ -62,13 +62,6 @@ class Evidence(BaseModel):
 
     model_config = {"extra": "ignore"}
 
-    def to_citation(self) -> str:
-        if self.source_type == SourceType.WEB and self.source_url:
-            return f"[{self.source_name or self.source_url}]"
-        if self.source_name:
-            return f"[{self.source_name}]"
-        return f"[{self.evidence_id}]"
-
 
 class Claim(BaseModel):
     """An atomic factual statement from the answer, with its verdict."""
@@ -112,6 +105,15 @@ class Verdict(BaseModel):
     # organizations, or expansions of an acronym), the judge writes ONE
     # question listing the interpretations so the agent can ask instead of guess.
     clarification_question: str = ""
+    # Relevance-to-question verdict (Self-RAG style): does the answer address
+    # what was actually asked? A fluent, fully-cited answer to the wrong
+    # question must not pass as "supported".
+    addresses_question: bool = True
+    question_gaps: list[str] = Field(default_factory=list)  # Aspects of the question left unanswered
+    # Entity triage: the query names an entity but evidence shows several
+    # distinct real-world referents sharing that name (people, orgs, acronyms).
+    referent_ambiguity: bool = False
+    referents: list[str] = Field(default_factory=list)  # Short identities found in evidence
 
     model_config = {"extra": "ignore"}
 
@@ -119,6 +121,28 @@ class Verdict(BaseModel):
     @classmethod
     def _none_to_empty_str(cls, v: Any) -> Any:
         return "" if v is None else v
+
+
+class Computation(BaseModel):
+    """One planned arithmetic step, executed by the sandboxed evaluator."""
+
+    label: str = ""
+    expression: str = ""
+
+    model_config = {"extra": "ignore"}
+
+    @field_validator("label", "expression", mode="before")
+    @classmethod
+    def _none_to_empty_str(cls, v: Any) -> Any:
+        return "" if v is None else v
+
+
+class ComputationPlan(BaseModel):
+    """Structured output of the compute-planner call (pure arithmetic only)."""
+
+    computations: list[Computation] = Field(default_factory=list)
+
+    model_config = {"extra": "ignore"}
 
 
 class EvidenceState(BaseModel):
@@ -132,6 +156,7 @@ class EvidenceState(BaseModel):
     turn: int = 0
     established: list[Evidence] = Field(default_factory=list)   # Verified facts from prior turns
     unresolved: list[str] = Field(default_factory=list)         # Claims that could not be resolved
+    last_final_status: str = ""                                 # needs_clarification etc.
     model_config = {"extra": "ignore"}
 
     def all_evidence(self) -> list[Evidence]:
@@ -178,6 +203,16 @@ class RAGState(TypedDict, total=False):
     repair_queries: Annotated[list[str], _keep_latest]
     repair_count: Annotated[int, _keep_latest]
     prior_evidence_state: Annotated[EvidenceState | None, _keep_latest]
+    # Deterministic calculator: planned expressions evaluated by the sandboxed
+    # evaluator — authoritative numeric ground truth for generate + judge.
+    computations: Annotated[list[dict], _keep_latest]
+    # Self-correction loop (Reflexion-style): the judge's serialized critique
+    # and the previous draft are fed back into the regeneration pass so the
+    # repair actually fixes the flagged problems instead of repeating them.
+    critique: Annotated[str, _keep_latest]
+    draft_answer: Annotated[str, _keep_latest]
+    revise_requested: Annotated[bool, _keep_latest]       # Revise-only pass (no new search)
+    history_summary: Annotated[str, _keep_latest]         # Compaction of older messages
 
     # ── guard counters ──
     graph_steps: int
@@ -198,8 +233,4 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def evidence_by_id(evidence: list[Evidence], evidence_id: str) -> Evidence | None:
-    for ev in evidence:
-        if ev.evidence_id == evidence_id:
-            return ev
-    return None
+

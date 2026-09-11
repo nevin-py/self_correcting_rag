@@ -26,7 +26,7 @@ from app.agent.evidence_state import (
     merge_evidence_state,
     serialize_for_storage,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from app.agent.graph import create_initial_state, rag_app
 from app.agent.nodes import (
     ask_clarification,
@@ -153,12 +153,22 @@ class TestClassifyAndPlan:
         assert route_after_classify(out) == "conversational_response"
 
     def test_clarification_routes_when_question_present(self, monkeypatch):
+        """GROUNDED mid-conversation ambiguity still clarifies: the conversation
+        itself establishes two distinct referents."""
         u = QueryUnderstanding(
             mode=QueryMode.CLARIFICATION,
             clarification_question="Do you mean the city of Paris or Paris, Texas?",
         )
         _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
-        out = classify_and_plan(_state(query="paris"))
+        out = classify_and_plan(_state(
+            query="paris",
+            messages=[
+                HumanMessage(content="tell me about the city of Paris"),
+                AIMessage(content="Paris, France is the capital city. " + "y" * 250),
+                HumanMessage(content="now the other paris"),
+                AIMessage(content="Paris, Texas is a small town. " + "z" * 250),
+            ],
+        ))
         assert route_after_classify(out) == "ask_clarification"
         result = ask_clarification(out)
         assert result["final_status"] == "needs_clarification"
@@ -191,6 +201,76 @@ class TestClassifyAndPlan:
         assert got.needs_web is True
         assert any(q.strip() for q in got.search_queries)
         assert route_after_classify(out) == "gather_evidence"
+
+    def test_fresh_name_clarification_coerces_to_research(self, monkeypatch):
+        """"Who is X" on turn 1: a planner that has not searched cannot know a
+        name is ambiguous — speculative clarification is ungrounded (RAC).
+        Must research; the verify stage enumerates real referents from evidence."""
+        u = QueryUnderstanding(
+            mode=QueryMode.CLARIFICATION,
+            clarification_question="There may be several people with this name — which one?",
+        )
+        _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
+        out = classify_and_plan(_state(query="who is atharva bhede"))
+        assert out["understanding"].mode == QueryMode.RESEARCH
+        assert out["understanding"].needs_web is True
+        assert route_after_classify(out) == "gather_evidence"
+
+    def test_clarification_answer_followup_coerces_to_research(self, monkeypatch):
+        """"the moneyworks4me one" answers the agent's own question — asking
+        again is clarify-ping-pong. The anaphora guard must route to research."""
+        u = QueryUnderstanding(
+            mode=QueryMode.CLARIFICATION,
+            clarification_question="Which person do you mean?",
+        )
+        _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
+        out = classify_and_plan(_state(
+            query="the moneyworks4me one",
+            messages=[
+                HumanMessage(content="who is atharva bhede"),
+                AIMessage(content="There appear to be multiple individuals named "
+                                   "Atharva Bhide. " + "x" * 250),
+            ],
+        ))
+        assert out["understanding"].mode == QueryMode.RESEARCH
+        assert route_after_classify(out) == "gather_evidence"
+
+    def test_no_second_clarification_round(self, monkeypatch):
+        """Rule: clarification never loops. After a needs_clarification turn, the
+        user's reply must trigger research with an explicit assumption — never
+        a second clarifying question."""
+        u = QueryUnderstanding(
+            mode=QueryMode.CLARIFICATION,
+            clarification_question="Which one do you mean?",
+        )
+        _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
+        out = classify_and_plan(_state(
+            query="the finance one at that company",
+            prior_evidence_state=EvidenceState(turn=1, last_final_status="needs_clarification"),
+        ))
+        assert out["understanding"].mode == QueryMode.RESEARCH
+        assert out["understanding"].needs_web is True
+        assert route_after_classify(out) == "gather_evidence"
+
+    def test_clarification_allowed_when_not_previously_offered(self, monkeypatch):
+        """One round of clarification is legitimate when a prior turn actually
+        established the ambiguity and no clarification was offered before."""
+        u = QueryUnderstanding(
+            mode=QueryMode.CLARIFICATION,
+            clarification_question="Do you mean the city of Paris or Paris, Texas?",
+        )
+        _patch_llms(monkeypatch, FakeLLMs(planner=FakeLLM(structured=u)))
+        out = classify_and_plan(_state(
+            query="paris",
+            messages=[
+                HumanMessage(content="tell me about the city of Paris"),
+                AIMessage(content="Paris, France is the capital city. " + "y" * 250),
+                HumanMessage(content="now the other paris"),
+                AIMessage(content="Paris, Texas is a small town. " + "z" * 250),
+            ],
+            prior_evidence_state=EvidenceState(turn=2, last_final_status="answered"),
+        ))
+        assert route_after_classify(out) == "ask_clarification"
 
     def test_research_without_sources_forces_web(self, monkeypatch):
         u = QueryUnderstanding(mode=QueryMode.RESEARCH, needs_documents=False, needs_web=False)
@@ -348,11 +428,26 @@ class TestVerifyAnswer:
                     claims=[Claim(text="GDP grew 3%", status=ClaimStatus.UNVERIFIED)],
                     repair_queries=["Japan GDP growth 2025"])
         st = self._setup(monkeypatch, v, "Japan's GDP grew 3% last year.")
-        st["repair_count"] = 1  # budget exhausted
+        st["repair_count"] = 2  # budget exhausted (MAX_REPAIR_PASSES = 2)
         out = verify_answer(st)
         assert out["repair_queries"] == []
+        assert out["revise_requested"] is False
         assert out["final_status"] == "answered_with_caveats"
         assert "Caveats:" in out["answer"]
+
+    def test_revise_only_pass_after_first_repair(self, monkeypatch):
+        """Pass 2 of the repair loop revises with critique, no new search."""
+        v = Verdict(overall="partial",
+                    claims=[Claim(text="GDP grew 3%", status=ClaimStatus.UNVERIFIED)],
+                    repair_queries=["Japan GDP growth 2025"])
+        st = self._setup(monkeypatch, v, "Japan's GDP grew 3% last year.")
+        st["repair_count"] = 1  # one search pass already used
+        out = verify_answer(st)
+        assert out["repair_queries"] == []          # no new search scheduled
+        assert out["revise_requested"] is True
+        assert "GDP grew 3%" in out["critique"]     # critique carries the gap
+        assert out["draft_answer"] == "Japan's GDP grew 3% last year."
+        assert route_after_verify(out) == "generate_answer"
 
     def test_contradiction_never_loops(self, monkeypatch):
         v = Verdict(overall="unsupported",

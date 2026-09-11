@@ -69,6 +69,7 @@ def merge_evidence_state(prior: EvidenceState | None, current: EvidenceState) ->
         turn=current.turn,
         established=merged_established[:MAX_CARRIED_EVIDENCE],
         unresolved=list(current.unresolved),
+        last_final_status=current.last_final_status,
     )
 
 
@@ -77,6 +78,7 @@ def serialize_for_storage(state: EvidenceState) -> str:
     try:
         payload = {
             "turn": state.turn,
+            "last_final_status": state.last_final_status,
             "established": [
                 {
                     "evidence_id": ev.evidence_id,
@@ -119,6 +121,7 @@ def load_evidence_state_from_text(text: str) -> EvidenceState | None:
         ]
         return EvidenceState(
             turn=int(data.get("turn", 0)),
+        last_final_status=data.get("last_final_status", ""),
             established=established,
             unresolved=[u for u in data.get("unresolved", []) if u],
         )

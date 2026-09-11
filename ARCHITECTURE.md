@@ -27,22 +27,25 @@ classify_and_plan ─┬─ conversational_response ── END   (small talk / m
 
 Graph wiring: `app/agent/graph.py`. State schema: `app/agent/state.py` (`TypedDict` with
 `_keep_latest` / `_add_to_list` reducers + guard counters: `MAX_GRAPH_STEPS=20`,
-`MAX_SEARCHES=4`, `MAX_RETRIEVALS=3`, `MAX_REGENERATIONS=2`, `MAX_REPAIR_PASSES=1`,
-`MAX_REPAIR_SEARCHES=3`).
+`MAX_SEARCHES=4`, `MAX_RETRIEVALS=3`, `MAX_REPAIR_PASSES=2`).
 
 ## Design rules
 
 1. **No hardcoded knowledge.** Intent detection, query rewriting, tool selection, and claim verdicts are all structured LLM output. There are no keyword lists, stop-word tables, or scoring thresholds anywhere in the pipeline.
 2. **Provenance first.** Every piece of evidence is a typed `Evidence` record with source type, name, URL, and date. Answers must cite `[E#]` keys that resolve to real evidence; the citation validator (`app/agent/citation_validator.py`) enforces this deterministically.
 3. **Honest uncertainty.** Claims the judge cannot verify are listed under *Caveats* in the answer with `final_status = "answered_with_caveats"`. The agent never silently guesses.
-4. **Bounded self-correction.** When verification finds gaps a targeted search could fix, the judge emits `repair_queries` and the graph loops `gather → generate → verify` once (`settings.MAX_REPAIR_PASSES`). Contradictions never loop — they go straight to caveats (or a clarification question when the judge finds an ambiguous term).
-5. **Cheap checks first.** Deterministic citation validation runs before the LLM judge; only unresolved questions reach the model. A local-embedding **claim-support gate** (`app/agent/support.py`, fastembed ONNX MiniLM with keyword-cosine fallback) additionally demotes cited sentences whose evidence does not semantically support them (`CITATION_SUPPORT_MIN_SIM=0.55`) — id resolution alone does not imply entailment.
+4. **Bounded self-correction with critique carry-over (Reflexion).** When verification finds gaps, the judge's findings are serialized into a `critique` and the graph loops with it:
+   pass 1 = `gather → generate → verify` where generate reruns as a **REVISE** prompt that sees the critique + its previous draft + the judge's repair queries; pass 2 = revise-only (no new search). Contradictions never loop — they go straight to caveats (or a clarification question when the judge finds referent ambiguity).
+5. **Cheap checks first — including skipping the judge.** Deterministic citation validation runs before the LLM judge; when the mechanical checks + support gate fully pass, the judge is skipped entirely (`JUDGE_FAST_PATH`, saves 30-90s per clean answer). A local-embedding **claim-support gate** (`app/agent/support.py`, fastembed ONNX MiniLM with keyword-cosine fallback) scores each claim against ~2-sentence sliding windows of its cited evidence (`CITATION_SUPPORT_MIN_SIM=0.55`) — whole-chunk cosine dilutes a single supporting sentence, so window-max is the entailment proxy.
 6. **Stateless storage.** ChromaDB was replaced by **pgvector** (`app/documents/vector_store.py`) because local-disk vector persistence vanished on container restart — breaking Cloud Run / Render / HF Spaces deploys. Embeddings stay Nomic `nomic-embed-text-v1.5` (768 dims); only the storage engine moved.
 
 ## Chat dynamics & temporal awareness
 
-- **Conversation history** (`messages`) is included in classify, generate, and conversational prompts. Followups ("what about the growth?") are resolved by the planner into standalone rewritten queries.
-- **Cross-turn memory:** verified facts persist between turns as `EvidenceState` (`app/agent/evidence_state.py`) — only evidence that backed judge-*verified* claims (capped at 8) carries forward; unresolved items reset each turn. Serialized into each interaction's `routing_path` and reloaded on the next query; merging dedupes by normalized text.
+- **Conversation history** (`messages`) is included in classify, generate, and conversational prompts. Followups ("what about the growth?") are resolved by the planner into standalone rewritten queries. Older messages beyond the verbatim window are represented by a compact rolling summary.
+- **Cross-turn memory:** verified facts persist between turns as `EvidenceState` (`app/agent/evidence_state.py`) — only evidence that backed judge-*verified* claims (capped at 8) carries forward and is **pinned** into the next turn's context under stable `P1..Pn` cite keys (it does not compete in rerank); unresolved items reset each turn, and clarification/conversational turns persist no claims. Serialized into each interaction's `routing_path` and reloaded on the next query; merging dedupes by normalized text.
+- **Judge context parity:** the verifier sees the same evidence snippets the generator saw (`JUDGE_SNIPPET_CHARS`) plus the user's question — it judges relevance-to-question (`addresses_question`, `question_gaps`) as well as claim support (Self-RAG-style reflection).
+- **Exclusive clarify-or-answer:** an answer that ends by asking the user a question is always `needs_clarification` — never a finalized answer with a dangling question. Referent ambiguity (several distinct people/orgs sharing the queried name) enumerates the identities found in evidence; detail-level conflicts (credentials, numbers) are reported inline, never blocked on.
+- **Caveat hygiene:** caveats list atomic factual claims only (questions, first-person commentary, and answer intros are never claims), deduped against the answer body, capped at 5.
 - **Temporal grounding:** current date/time (+ user timezone/location from `request_context`) is injected into every prompt. The planner extracts `temporal_focus`; the generator prefers period-matching evidence and states each figure's period.
 
 ## Retrieval & ranking
@@ -87,8 +90,11 @@ Key knobs in `.env` (reference: `.env.example`):
 
 | Variable | Purpose |
 |---|---|
-| `OPENROUTER_*_MODEL`, `*_FALLBACKS` | Planner/generator/verifier models + fallback chains |
-| `MAX_SEARCHES`, `MAX_RETRIEVALS`, `MAX_REPAIR_PASSES`, `MAX_REPAIR_SEARCHES` | Loop budgets |
+| `OPENROUTER_*_MODEL`, `*_FALLBACKS` | Planner/generator/verifier models + fallback chains; `OPENROUTER_LIGHT_MODEL` for greetings/meta |
+| `MAX_SEARCHES`, `MAX_RETRIEVALS`, `MAX_REPAIR_PASSES` | Loop budgets (repair pass 1 = search, pass 2 = revise-only) |
+| `SUFFICIENCY_TOP_SCORE`, `SUFFICIENCY_MIN_EVIDENCE` | Retrieval-sufficiency floor before generating (CRAG-style) |
+| `JUDGE_SNIPPET_CHARS`, `JUDGE_CONTEXT_CHARS` | Judge context parity with the generator |
+| `JUDGE_FAST_PATH` | Skip the LLM judge when mechanical checks fully pass |
 | `QUERY_TIMEOUT_SECONDS` | Whole-query deadline (0 = disabled) |
 | `CITATION_SUPPORT_GATE`, `CITATION_SUPPORT_MIN_SIM` | MiniLM entailment gate (default on, 0.55) |
 | `SEARXNG_URL`, `TAVILY_API_KEY(+_BACKUP)` | Web search backends |

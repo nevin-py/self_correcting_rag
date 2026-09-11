@@ -3,50 +3,24 @@
 Split out of router.py: DB access, history loading, evidence-state carry-over,
 message storage, and Chroma cleanup. Routes live in router.py.
 """
-import enum
-import json
-import time
 import uuid as _uuid
 import logging
-import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from sqlalchemy import case as sql_case, delete as sql_delete, func
+from fastapi import HTTPException
+from sqlalchemy import delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.core.database import get_db, get_session_factory, AsyncLocalSession
-from app.core.config import settings
+from app.core.database import AsyncLocalSession
 
 logger = logging.getLogger(__name__)
-from app.auth.models import User
-from app.auth.router import get_current_user
 from app.agent.models import Chats, Agent_interact
 from app.agent.message_models import ChatMessage
-from app.agent.graph import rag_app, create_initial_state
 from app.agent.state import Evidence, Claim, EvidenceState
 from app.agent.evidence_state import (
     build_evidence_state,
     merge_evidence_state,
     load_evidence_state_from_text,
-    serialize_for_storage,
-)
-from app.agent.schemas import (
-    ChatCreate,
-    ChatResponse,
-    ChatListResponse,
-    QueryRequest,
-    QueryResponse,
-    CitationResponse,
-    ClaimResponse,
-    InteractionResponse,
-    InteractionListResponse,
-    MessageResponse,
-    MessageListResponse,
-    UsageSummary,
 )
 from app.documents.service import estimate_tokens
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -98,8 +72,6 @@ async def _verify_chat_ownership(
         raise HTTPException(status_code=404, detail="Chat not found")
 
 MAX_HISTORY_MESSAGES = 20  # last N message pairs to include in context
-
-MAX_PRIOR_EVIDENCE = 5     # max evidence items to carry forward from prior turns
 
 
 async def _load_document_inventory(session: AsyncSession, chat_id: _uuid.UUID) -> list[str]:
@@ -170,51 +142,21 @@ def _finalize_evidence_state(
     prior_state: EvidenceState | None,
     turn: int,
 ) -> EvidenceState:
-    """Build the turn's evidence state and merge it with the prior state."""
+    """Build the turn's evidence state and merge it with the prior state.
+
+    Clarification and conversational turns produce no verified claims — the
+    unverified-claim list from a half-finished research answer must never leak
+    into cross-turn memory as "unresolved facts".
+    """
+    final_status = final_state.get("final_status", "answered")
+    if final_status in ("needs_clarification", "conversational"):
+        return merge_evidence_state(prior_state, EvidenceState(
+            turn=turn, last_final_status=final_status))
     evidence: list[Evidence] = final_state.get("evidence", [])
     claims: list[Claim] = final_state.get("claims", [])
     current = build_evidence_state(evidence, claims, turn=turn)
+    current.last_final_status = final_status
     return merge_evidence_state(prior_state, current)
-
-async def _load_prior_evidence_summary(session: AsyncSession, chat_id: _uuid.UUID) -> str:
-    """Build a summary of key evidence from prior turns to carry forward.
-
-    This prevents cross-turn evidence state loss by including the most important
-    evidence from the last interaction as context for the current query.
-    """
-    # Get the last interaction to extract its evidence metadata
-    result = await session.execute(
-        select(Agent_interact)
-        .where(Agent_interact.chat_id == chat_id)
-        .order_by(Agent_interact.created_at.desc())
-        .limit(1)
-    )
-    last_interaction = result.scalar_one_or_none()
-    if not last_interaction:
-        return ""
-
-    # Parse routing_path to extract prior evidence if stored
-    # We store evidence metadata in the routing_path as JSON
-    routing_path = last_interaction.routing_path or ""
-    try:
-        import json as _json
-        # Check if routing_path contains evidence metadata (new format)
-        if routing_path.startswith("{"):
-            data = _json.loads(routing_path)
-            prior_evidence = data.get("evidence", [])
-            if prior_evidence:
-                lines = ["PRIOR TURN EVIDENCE (from previous conversation):"]
-                for ev in prior_evidence[:MAX_PRIOR_EVIDENCE]:
-                    line = f"- {ev.get('metric', 'N/A')} | {ev.get('geography', 'N/A')} | {ev.get('period', 'N/A')} | {ev.get('value', 'N/A')}"
-                    if ev.get('temporal'):
-                        line += f" ({ev['temporal']})"
-                    line += f" [{ev.get('source', 'unknown')}]"
-                    lines.append(line)
-                return "\n".join(lines)
-    except (ValueError, KeyError):
-        pass
-
-    return ""
 
 async def _store_messages(
     session: AsyncSession,

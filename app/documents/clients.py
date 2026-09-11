@@ -45,10 +45,14 @@ if valid_key(settings.GROQ_KEY):
         model="openai/gpt-oss-120b",
         temperature=0,
     )
+    # Groq free tier enforces a 1000 output-tokens-per-minute limit; a planner
+    # asking for 2048 output tokens 429s instantly. Planning verdicts are small
+    # JSON — 700 is generous.
     routing_llm = ChatGroq(
         api_key=settings.GROQ_KEY,
         model="qwen/qwen3.6-27b",
         temperature=0,
+        max_tokens=700,
     )
     groq_client = Groq(api_key=settings.GROQ_KEY)
 
@@ -206,8 +210,6 @@ def _make_google_llm(model: str, api_key: str):
 
 if valid_key(settings.GOOGLE_AI_API_KEY):
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: F401
-
         primary = settings.GOOGLE_AI_GENERATOR_MODEL
         google_planner_llm = _make_google_llm(settings.GOOGLE_AI_PLANNER_MODEL, settings.GOOGLE_AI_API_KEY)
         google_generator_llm = _make_google_llm(primary, settings.GOOGLE_AI_API_KEY)
@@ -247,6 +249,7 @@ class ProviderLLMs(NamedTuple):
     verifier: Any
     verifier_fallbacks: tuple[Any, ...]
     label: str
+    light: Any = None  # small fast model for greetings/meta; None → generator
 
 
 def _uniq_llms(*models: Any) -> tuple[Any, ...]:
@@ -320,9 +323,11 @@ def _build_google_bundle(api_key: str, planner: str, generator: str, verifier: s
 
 
 def _build_groq_bundle(api_key: str, planner: str, generator: str, verifier: str) -> tuple[Any, Any, Any]:
-    p = ChatGroq(api_key=api_key, model=planner, temperature=0)
+    # Planner/verifier output small structured JSON — cap max_tokens so Groq
+    # free-tier OTPM limits don't instant-429 the request.
+    p = ChatGroq(api_key=api_key, model=planner, temperature=0, max_tokens=700)
     g = ChatGroq(api_key=api_key, model=generator, temperature=0)
-    v = ChatGroq(api_key=api_key, model=verifier, temperature=0)
+    v = ChatGroq(api_key=api_key, model=verifier, temperature=0, max_tokens=2048)
     return p, g, v
 
 
@@ -544,6 +549,11 @@ def resolve_llms(
         planner_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in pb_names], go_planner, gq_planner)
         generator_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in gb_names], go_generator, gq_generator)
         verifier_fallbacks = _uniq_llms(*[_make_or_llm(n) for n in vb_names], go_verifier, gq_verifier)
+        light_llm = (
+            _make_or_llm(settings.OPENROUTER_LIGHT_MODEL.strip())
+            if settings.OPENROUTER_LIGHT_MODEL.strip() and or_key
+            else None
+        )
 
         return ProviderLLMs(
             planner=or_planner or or_generator,
@@ -553,6 +563,7 @@ def resolve_llms(
             verifier=or_verifier or or_generator,
             verifier_fallbacks=verifier_fallbacks,
             label="openrouter",
+            light=light_llm,
         )
 
     if pref == "groq":

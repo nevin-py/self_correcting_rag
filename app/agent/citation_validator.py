@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from app.agent.state import Claim, ClaimStatus, Evidence
 
 
-# Short cite keys E1..En (cite-while-writing) or legacy hex evidence ids
-CITATION_TOKEN_RE = re.compile(r"\[([Ee]\d{1,3}|[a-fA-F0-9]{6,12})\]")
-_EKEY_RE = re.compile(r"[Ee]\d{1,3}")
+# Short cite keys E1..En / P1..Pn (E = fresh evidence, P = pinned prior-turn
+# evidence) or legacy hex evidence ids
+CITATION_TOKEN_RE = re.compile(r"\[([EePp]\d{1,3}|[a-fA-F0-9]{6,12})\]")
+_EKEY_RE = re.compile(r"[EePp]\d{1,3}")
 _HEADING_RE = re.compile(r"^#{1,6}\s+|^\*\*[^*]+\*\*\s*:?\s*$")
 _SECTION_SKIP = re.compile(
     r"(?i)^(direct answer|supporting evidence|analysis|caveats|confidence|"
@@ -29,6 +30,26 @@ _SECTION_SKIP = re.compile(
 _SECTION_SKIP_BODY = re.compile(
     r"(?i)^(analysis|caveats|confidence|limitations|inference)\b"
 )
+# Meta-sentences: the assistant talking about its own answer. Never claims.
+_META_SENTENCE_RE = re.compile(
+    r"(?i)^\s*(based on|according to my|here'?s?( is|'s| what)|i found|i could not find"
+    r"|i (was unable|am unable|couldn'?t)|the evidence (does|suggests|indicates|shows)"
+    r"|there appear|it appears|note that|unfortunately)\b"
+)
+_FIRST_PERSON_RE = re.compile(r"(?i)^\s*(i|we|my|our|let'?s)\b")
+
+
+def is_meta_sentence(sentence: str) -> bool:
+    """True for questions, first-person/meta commentary, and answer intros.
+
+    These are the assistant speaking, not assertions about the world — they can
+    neither carry nor need citations, and quoting them as unverified 'caveats'
+    makes the answer argue with itself.
+    """
+    s = (sentence or '').strip()
+    if not s or s.endswith("?"):
+        return True
+    return bool(_META_SENTENCE_RE.match(s) or _FIRST_PERSON_RE.match(s))
 
 
 @dataclass
@@ -117,8 +138,11 @@ def _is_factual_assertion(sentence: str) -> bool:
     """Heuristic pre-filter so only assertion-like sentences need citations.
 
     Deliberately minimal and domain-agnostic: numbers/percentages/proper-noun-ish
-    content counts; hedged "I could not find…" statements do not.
+    content counts; hedged "I could not find…" statements and meta-sentences
+    (questions, first-person commentary, intros) do not.
     """
+    if is_meta_sentence(sentence):
+        return False
     if not re.search(r"\d|%|\b[A-Z][a-z]+", sentence):
         return False
     if re.search(r"(?i)\b(insufficient|could not|unable to|i don't have|unknown)\b", sentence):
@@ -340,3 +364,35 @@ def flag_uncited_in_answer(answer: str, result: CitationValidationResult) -> str
     if "Citation check:" in answer:
         return answer
     return answer.rstrip() + f"\n\n*Citation check: {note}. Treat uncited figures as unverified.*"
+
+
+def prune_caveats(failed: list, answer_body: str, *, max_bullets: int = 5) -> list:
+    """Filter unverified claims down to honest, non-redundant caveat bullets.
+
+    Drops: meta-sentences (questions, first-person commentary, intros — the
+    answer talking about itself), bullets whose normalized text already appears
+    in the verified answer body (echoing the answer), and duplicates. Caps the
+    result so a noisy verdict can't bury the answer in boilerplate.
+    """
+    def _norm(t: str) -> str:
+        t = CITATION_TOKEN_RE.sub("", t or "")
+        return re.sub(r"\s+", " ", t).strip().lower().rstrip(" .,;:!?")
+
+    body_norm = _norm(answer_body)
+    out: list = []
+    seen: set[str] = set()
+    for claim in failed:
+        text = getattr(claim, "text", "") or ""
+        if is_meta_sentence(text):
+            continue
+        norm = _norm(text)
+        if not norm or norm in seen:
+            continue
+        # Skip bullets that merely repeat (a substring of) the answer body.
+        if len(norm) > 40 and norm in body_norm:
+            continue
+        seen.add(norm)
+        out.append(claim)
+        if len(out) >= max_bullets:
+            break
+    return out

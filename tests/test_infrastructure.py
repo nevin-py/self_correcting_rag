@@ -99,7 +99,8 @@ class TestConfig:
         assert settings.MAX_GRAPH_STEPS > 0
         assert settings.MAX_SEARCHES > 0
         assert settings.MAX_RETRIEVALS > 0
-        assert settings.MAX_REGENERATIONS > 0
+        assert settings.MAX_REPAIR_PASSES > 0
+        assert settings.SUFFICIENCY_MIN_EVIDENCE > 0
 
     def test_nomic_rate_limits(self):
         """Nomic rate limit settings are sane."""
