@@ -156,6 +156,13 @@ async def _stream_query(
         _SENTINEL = object()
         events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
 
+        # Some edge proxies (Render's included, on free tiers) buffer SSE until
+        # an internal size threshold or response end — the client then sees "no
+        # activity" and the answer appearing at once. SSE comments are ignored
+        # by every parser, so padding the stream start with ~2KB of comments
+        # pushes proxies past their threshold and flushes the channel open.
+        yield ": " + ("0" * 2048) + "\n\n"
+
         async def _producer():
             try:
                 async for ev in rag_app.astream_events(initial_state, version="v2"):
