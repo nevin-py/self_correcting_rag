@@ -113,7 +113,7 @@ export default function ChatSessionPage() {
         </span>
         <button
           onClick={toggleRightPanel}
-          className="border border-border p-1.5 text-text-muted hover:border-border-strong hover:text-text-primary lg:hidden"
+          className="border border-border p-1.5 text-text-muted hover:border-border-strong hover:text-text-primary"
           aria-label="Toggle analysis panel"
         >
           {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}

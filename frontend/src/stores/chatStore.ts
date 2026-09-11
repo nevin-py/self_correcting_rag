@@ -171,7 +171,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectedMessageId: null,
   sidebarCollapsed: false,
   sidebarOpen: true,
-  rightPanelOpen: true,
+  // Persisted: the analysis panel toggle survives reloads (defaults open).
+  rightPanelOpen: typeof window === "undefined" || localStorage.getItem("panel_open") !== "0",
   chatCostUsd: 0,
   allSessionsCostUsd: 0,
   contextWindowTokens: 128000,
@@ -298,7 +299,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body: JSON.stringify({ message: content, provider }),
       });
 
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        // A stale backend (older than /query_stream) or an auth/CORS failure
+        // lands here — say WHY in the console instead of silently degrading to
+        // the non-streaming path (which has no pipeline-activity events).
+        console.warn(
+          `[chat] /query_stream HTTP ${resp.status}; falling back to non-streaming /query. `
+          + "If this persists on a deployment, the backend is older than the frontend."
+        );
+        throw new Error(`HTTP ${resp.status}`);
+      }
 
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
@@ -529,7 +539,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           selectedMessageId: msgId,
         }));
       }
-    } catch {
+    } catch (streamErr) {
+      console.warn("[chat] streaming unavailable; using non-streaming fallback:", streamErr);
       try {
         const res = await chatApi.query(activeChatId, content);
         const data = res.data;
@@ -575,7 +586,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sidebarOpen: s.sidebarCollapsed,
     })),
 
-  toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
+  toggleRightPanel: () =>
+    set((s) => {
+      const next = !s.rightPanelOpen;
+      try {
+        localStorage.setItem("panel_open", next ? "1" : "0");
+      } catch {
+        /* private mode — non-fatal */
+      }
+      return { rightPanelOpen: next };
+    }),
 
   setSelectedMessage: (id) => set({ selectedMessageId: id }),
 

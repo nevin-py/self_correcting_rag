@@ -184,7 +184,7 @@ export default function ContextPanel() {
         </div>
         <button
           onClick={toggleRightPanel}
-          className="font-mono text-[10px] text-text-muted hover:text-text-primary lg:hidden"
+          className="font-mono text-[10px] text-text-muted hover:text-text-primary"
         >
           [×]
         </button>
