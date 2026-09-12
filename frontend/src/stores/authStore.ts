@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { authApi, refreshAccessToken, broadcastAuthEvent, onAuthEvent } from "@/lib/api";
+import { authApi, refreshAccessToken, broadcastAuthEvent, onAuthEvent, API_BASE } from "@/lib/api";
 
 interface User {
   user_id: string;
@@ -19,6 +19,29 @@ interface AuthState {
   bootstrapAuth: () => Promise<void>;
 }
 
+function dbg(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>
+) {
+  // #region agent log
+  fetch("http://127.0.0.1:7414/ingest/c9f169d4-33bb-4576-a7c6-7358a7e9745d", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "05b494" },
+    body: JSON.stringify({
+      sessionId: "05b494",
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+      runId: "login-ui",
+    }),
+  }).catch(() => undefined);
+  // #endregion
+}
+
 /** Decode the JWT `sub` claim; never throws (a corrupt token must not crash the UI). */
 function parseJwtSub(access: string): string | null {
   try {
@@ -34,6 +57,7 @@ function persistSession(
   email: string,
   set: (s: Partial<AuthState>) => void
 ) {
+  bootstrapEpoch += 1;
   // Access token in localStorage (short-lived); the refresh token is an
   // httpOnly cookie set by the server — never stored in JS-readable storage.
   localStorage.setItem("token", access);
@@ -52,6 +76,7 @@ function clearSession(set: (s: Partial<AuthState>) => void) {
 }
 
 let bootstrapInFlight: Promise<void> | null = null;
+let bootstrapEpoch = 0;
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
@@ -64,8 +89,24 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true });
     try {
       const res = await authApi.login(email, password);
+      dbg("F", "authStore.ts:login", "login_ok", {
+        hasAccess: Boolean(res.data?.access_token),
+        origin: typeof window !== "undefined" ? window.location.origin : "",
+        apiBase: API_BASE,
+      });
       persistSession(res.data.access_token, email, set);
     } catch (err) {
+      const status =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { status?: number } }).response?.status
+          : undefined;
+      const msg = err instanceof Error ? err.message : String(err);
+      dbg("F", "authStore.ts:login", "login_fail", {
+        status: status ?? null,
+        msg,
+        origin: typeof window !== "undefined" ? window.location.origin : "",
+        apiBase: API_BASE,
+      });
       set({ isLoading: false });
       throw err;
     }
@@ -112,32 +153,38 @@ export const useAuthStore = create<AuthState>((set) => ({
     // concurrently trip reuse detection and kill each other's sessions.
     if (typeof window === "undefined") return;
     if (bootstrapInFlight) return bootstrapInFlight;
+    const epoch = bootstrapEpoch;
 
     bootstrapInFlight = (async () => {
       const access = localStorage.getItem("token");
-      // NOTE: the refresh token now lives in an httpOnly cookie — its presence
-      // can't be checked from JS. When no access token exists we still try the
-      // refresh round-trip (empty body); a missing cookie just fails and the
-      // session is cleared.
+      dbg("G", "authStore.ts:bootstrapAuth", "start", {
+        hasAccess: Boolean(access),
+        epoch,
+        origin: window.location.origin,
+        apiBase: API_BASE,
+      });
 
       // 1. Access token present → validate it against /auth/me (no rotation).
       if (access) {
         try {
           const res = await authApi.me();
+          if (epoch !== bootstrapEpoch) return;
           persistSession(access, res.data.email, set);
+          dbg("H", "authStore.ts:bootstrapAuth", "me_ok", {});
           return;
         } catch {
-          // invalid/expired access — fall through to a single refresh attempt
+          dbg("H", "authStore.ts:bootstrapAuth", "me_fail_try_refresh", {});
         }
       }
 
-      // 2. Rotate once (httpOnly cookie carries the token), then read the email
-      //    from /auth/me with the new token — through the SAME cross-tab-coordinated
-      //    refresh the 401 interceptor uses (Web Locks + freshness window), so a
-      //    multi-tab cold start performs at most ONE rotation for the whole browser.
       try {
         const newAccess = await refreshAccessToken();
+        if (epoch !== bootstrapEpoch) {
+          dbg("G", "authStore.ts:bootstrapAuth", "stale_skip_after_refresh", { epoch, current: bootstrapEpoch });
+          return;
+        }
         if (!newAccess) {
+          dbg("G", "authStore.ts:bootstrapAuth", "refresh_empty_clear", { epoch });
           clearSession(set);
           return;
         }
@@ -148,6 +195,8 @@ export const useAuthStore = create<AuthState>((set) => ({
           persistSession(newAccess, "", set);
         }
       } catch {
+        if (epoch !== bootstrapEpoch) return;
+        dbg("G", "authStore.ts:bootstrapAuth", "refresh_throw_clear", { epoch });
         clearSession(set);
       }
     })().finally(() => {

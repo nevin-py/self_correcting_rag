@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import MutableMapping
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from slowapi import _rate_limit_exceeded_handler
@@ -46,6 +47,52 @@ _dev_origins = {
     "http://127.0.0.1:5173",
 }
 
+_log = logging.getLogger(__name__)
+
+
+def _host(origin: str) -> str:
+    return (urlparse(origin).hostname or "").lower()
+
+
+def is_vercel_preview_of_allowed(origin: str, allowed_origins: set[str]) -> bool:
+    """Allow Vercel *preview* URLs for a project already listed in CORS_ORIGINS.
+
+    Prod:  https://self-correcting-sovrin1.vercel.app
+    Preview: https://self-correcting-<hash>-sovrin1.vercel.app
+
+    Does NOT allow arbitrary *.vercel.app (those stay blocked).
+    """
+    oh = _host(origin)
+    if not oh.endswith(".vercel.app"):
+        return False
+    p = oh[: -len(".vercel.app")].split("-")
+    for allowed in allowed_origins:
+        ah = _host(allowed)
+        if not ah.endswith(".vercel.app"):
+            continue
+        a = ah[: -len(".vercel.app")].split("-")
+        if len(p) != len(a) + 1:
+            continue
+        if any(p[:i] + p[i + 1 :] == a for i in range(len(p))):
+            return True
+    return False
+
+
+def resolve_cors_origin(
+    origin: str | None,
+    allowed_origins: set[str],
+    allow_vercel_previews: bool,
+) -> str | None:
+    if not origin:
+        return None
+    if origin in allowed_origins:
+        return origin
+    if origin.endswith(".vercel.app") and allow_vercel_previews:
+        return origin
+    if is_vercel_preview_of_allowed(origin, allowed_origins):
+        return origin
+    return None
+
 
 class ASGICorsMiddleware:
     """Pure ASGI CORS — handles preflights AND adds headers to ALL responses."""
@@ -70,21 +117,20 @@ class ASGICorsMiddleware:
         headers: MutableMapping[str, str] = dict(scope.get("headers", []))
         origin = headers.get(b"origin", b"").decode() if b"origin" in headers else None
         method = scope.get("method", "")
+        path = scope.get("path", "")
 
-        # Determine if origin is allowed
-        origin = headers.get(b"origin", b"").decode() if b"origin" in headers else None
-        allowed_origin = None
-        if origin:
-            if origin in self.allowed_origins:
-                allowed_origin = origin
-            elif origin.endswith(".vercel.app") and self.allow_vercel_previews:
-                # Vercel serves every deployment on its own *.vercel.app
-                # subdomain (previews + prod aliases). Handy in DEVELOPMENT so
-                # new deploys are never blocked — but in production the origin
-                # list must be exact: anyone can register an available
-                # <name>.vercel.app subdomain, so a wildcard there would let
-                # attacker-controlled sites pass CORS.
-                allowed_origin = origin
+        allowed_origin = resolve_cors_origin(
+            origin, self.allowed_origins, self.allow_vercel_previews
+        )
+        if origin and path.startswith("/api/v1/auth"):
+            _log.info(
+                "debug_cors origin=%s allowed=%s path=%s method=%s allowlist=%s",
+                origin,
+                bool(allowed_origin),
+                path,
+                method,
+                sorted(self.allowed_origins),
+            )
 
         # ── Handle OPTIONS preflight ────────────────────────────────────
         if method == "OPTIONS" and b"access-control-request-method" in headers:

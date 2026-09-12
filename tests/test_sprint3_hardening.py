@@ -54,11 +54,11 @@ def _drive_cors(middleware_factory):
 
 
 class TestCorsMiddleware:
-    def _mw(self, *, vercel: bool):
+    def _mw(self, *, vercel: bool, extra_origins: set[str] | None = None):
         def factory(inner_app):
             return ASGICorsMiddleware(
                 app=inner_app,
-                allowed_origins={"https://app.example.com"},
+                allowed_origins={"https://app.example.com"} | (extra_origins or set()),
                 allow_credentials=True,
                 allow_vercel_previews=vercel,
             )
@@ -82,6 +82,16 @@ class TestCorsMiddleware:
     def test_unknown_origin_gets_no_cors_headers(self):
         run = _drive_cors(self._mw(vercel=False))
         resp = run(self._scope(origin="https://evil.example.com"))
+        assert "access-control-allow-origin" not in resp["headers"]
+
+    def test_vercel_preview_of_listed_project_allowed(self):
+        run = _drive_cors(self._mw(vercel=False, extra_origins={"https://self-correcting-sovrin1.vercel.app"}))
+        resp = run(self._scope(origin="https://self-correcting-greuf9gk2-sovrin1.vercel.app"))
+        assert resp["headers"]["access-control-allow-origin"] == "https://self-correcting-greuf9gk2-sovrin1.vercel.app"
+
+    def test_unrelated_vercel_preview_still_blocked(self):
+        run = _drive_cors(self._mw(vercel=False, extra_origins={"https://self-correcting-sovrin1.vercel.app"}))
+        resp = run(self._scope(origin="https://attacker-site.vercel.app"))
         assert "access-control-allow-origin" not in resp["headers"]
 
     def test_vercel_preview_blocked_when_disabled(self):
