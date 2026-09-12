@@ -10,11 +10,12 @@ interface AuthState {
   user: User | null;
   token: string | null;
   isLoading: boolean;
+  /** False until bootstrapAuth has proven (or rejected) a session with the API. */
+  authReady: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<string>;
   verifyEmail: (email: string, code: string) => Promise<void>;
   logout: () => void;
-  loadUser: () => void;
   bootstrapAuth: () => Promise<void>;
 }
 
@@ -36,19 +37,28 @@ function persistSession(
   // Access token in localStorage (short-lived); the refresh token is an
   // httpOnly cookie set by the server — never stored in JS-readable storage.
   localStorage.setItem("token", access);
-  set({ user: { user_id: parseJwtSub(access) ?? "", email }, token: access, isLoading: false });
+  set({
+    user: { user_id: parseJwtSub(access) ?? "", email },
+    token: access,
+    isLoading: false,
+    authReady: true,
+  });
 }
 
 function clearSession(set: (s: Partial<AuthState>) => void) {
   localStorage.removeItem("token");
   localStorage.removeItem("refresh_token");
-  set({ user: null, token: null, isLoading: false });
+  set({ user: null, token: null, isLoading: false, authReady: true });
 }
+
+let bootstrapInFlight: Promise<void> | null = null;
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
-  token: typeof window !== "undefined" ? localStorage.getItem("token") : null,
+  // Do not hydrate from localStorage for routing — a leftover JWT is not a session.
+  token: null,
   isLoading: false,
+  authReady: false,
 
   login: async (email, password) => {
     set({ isLoading: true });
@@ -95,63 +105,56 @@ export const useAuthStore = create<AuthState>((set) => ({
     clearSession(set);
   },
 
-  loadUser: () => {
-    if (typeof window === "undefined") return;
-    const token = localStorage.getItem("token");
-    if (token) {
-      const sub = parseJwtSub(token);
-      if (sub) {
-        set({ user: { user_id: sub, email: "" }, token });
-      } else {
-        clearSession(set);
-      }
-    }
-  },
-
   bootstrapAuth: async () => {
     // Prove the stored session is still valid on the server — WITHOUT rotating
     // the refresh token. The previous implementation called /auth/refresh on
     // every cold load: one rotation per page load, and two open tabs rotating
     // concurrently trip reuse detection and kill each other's sessions.
     if (typeof window === "undefined") return;
-    const access = localStorage.getItem("token");
-    // NOTE: the refresh token now lives in an httpOnly cookie — its presence
-    // can't be checked from JS. When no access token exists we still try the
-    // refresh round-trip (empty body); a missing cookie just fails and the
-    // session is cleared.
-    set({ isLoading: true });
+    if (bootstrapInFlight) return bootstrapInFlight;
 
-    // 1. Access token present → validate it against /auth/me (no rotation).
-    if (access) {
-      try {
-        const res = await authApi.me();
-        persistSession(access, res.data.email, set);
-        return;
-      } catch {
-        // invalid/expired access — fall through to a single refresh attempt
+    bootstrapInFlight = (async () => {
+      const access = localStorage.getItem("token");
+      // NOTE: the refresh token now lives in an httpOnly cookie — its presence
+      // can't be checked from JS. When no access token exists we still try the
+      // refresh round-trip (empty body); a missing cookie just fails and the
+      // session is cleared.
+
+      // 1. Access token present → validate it against /auth/me (no rotation).
+      if (access) {
+        try {
+          const res = await authApi.me();
+          persistSession(access, res.data.email, set);
+          return;
+        } catch {
+          // invalid/expired access — fall through to a single refresh attempt
+        }
       }
-    }
 
-    // 2. Rotate once (httpOnly cookie carries the token), then read the email
-    //    from /auth/me with the new token — through the SAME cross-tab-coordinated
-    //    refresh the 401 interceptor uses (Web Locks + freshness window), so a
-    //    multi-tab cold start performs at most ONE rotation for the whole browser.
-    try {
-      const newAccess = await refreshAccessToken();
-      if (!newAccess) {
+      // 2. Rotate once (httpOnly cookie carries the token), then read the email
+      //    from /auth/me with the new token — through the SAME cross-tab-coordinated
+      //    refresh the 401 interceptor uses (Web Locks + freshness window), so a
+      //    multi-tab cold start performs at most ONE rotation for the whole browser.
+      try {
+        const newAccess = await refreshAccessToken();
+        if (!newAccess) {
+          clearSession(set);
+          return;
+        }
+        try {
+          const me = await authApi.me();
+          persistSession(newAccess, me.data.email, set);
+        } catch {
+          persistSession(newAccess, "", set);
+        }
+      } catch {
         clearSession(set);
-        return;
       }
-      set({ token: newAccess });
-      try {
-        const me = await authApi.me();
-        set({ user: { user_id: me.data.user_id, email: me.data.email }, isLoading: false });
-      } catch {
-        set({ user: { user_id: parseJwtSub(newAccess) ?? "", email: "" }, isLoading: false });
-      }
-    } catch {
-      clearSession(set);
-    }
+    })().finally(() => {
+      bootstrapInFlight = null;
+    });
+
+    return bootstrapInFlight;
   },
 }));
 
@@ -163,7 +166,7 @@ if (typeof window !== "undefined") {
       localStorage.removeItem("token");
       localStorage.removeItem("refresh_token");
       localStorage.removeItem("token_refreshed_at");
-      useAuthStore.setState({ user: null, token: null, isLoading: false });
+      useAuthStore.setState({ user: null, token: null, isLoading: false, authReady: true });
     }
   });
 }

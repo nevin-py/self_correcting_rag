@@ -159,9 +159,9 @@ async def _stream_query(
         # Some edge proxies (Render's included, on free tiers) buffer SSE until
         # an internal size threshold or response end — the client then sees "no
         # activity" and the answer appearing at once. SSE comments are ignored
-        # by every parser, so padding the stream start with ~2KB of comments
+        # by every parser, so padding the stream start with ~8KB of comments
         # pushes proxies past their threshold and flushes the channel open.
-        yield ": " + ("0" * 2048) + "\n\n"
+        yield ": " + ("0" * 8192) + "\n\n"
 
         async def _producer():
             try:

@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
-import { useAuthStore } from "@/stores/authStore";
 import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
+import { useRequireAuth } from "@/hooks/useRequireAuth";
 import AppShell from "@/components/layout/AppShell";
 import ContextPanel from "@/components/chat/ContextPanel";
 import ChatMessage from "@/components/chat/ChatMessage";
@@ -48,9 +48,8 @@ function EmptyWorkspace() {
 
 export default function ChatSessionPage() {
   const params = useParams();
-  const router = useRouter();
   const sessionId = params.sessionId as string;
-  const { token, isLoading, bootstrapAuth } = useAuthStore();
+  const { token, authReady } = useRequireAuth();
   const {
     messages,
     isStreaming,
@@ -62,17 +61,8 @@ export default function ChatSessionPage() {
   const messagesEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bootstrapAuth();
-  }, [bootstrapAuth]);
-
-  useEffect(() => {
-    if (isLoading) return; // still validating the stored session — don't flash
-    if (!token) router.replace("/login");
-  }, [token, isLoading, router]);
-
-  useEffect(() => {
-    if (sessionId) selectChat(sessionId);
-  }, [sessionId, selectChat]);
+    if (sessionId && authReady && token) selectChat(sessionId);
+  }, [sessionId, selectChat, authReady, token]);
 
   // Scroll only when the user is already at/near the bottom — never fight
   // someone reading history. Smooth while pinned; instant if they scrolled away.

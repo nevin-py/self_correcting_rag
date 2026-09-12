@@ -1,4 +1,4 @@
-# Production stack — do not publish Postgres / SearXNG / Chroma to the host.
+# Production stack — do not publish Postgres / SearXNG / the API port to the host.
 # Usage:
 #   cp .env.example .env   # fill secrets
 #   docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
@@ -74,7 +74,7 @@ services:
       SMTP_FROM: ${SMTP_FROM:?set SMTP_FROM}
       SMTP_TLS: ${SMTP_TLS:-true}
     volumes:
-      - chroma_data:/app/data/chroma
+      - uploads_data:/app/data/uploads
     depends_on:
       db:
         condition: service_healthy
@@ -122,6 +122,6 @@ networks:
 
 volumes:
   pgdata:
-  chroma_data:
+  uploads_data:
   caddy_data:
   caddy_config:

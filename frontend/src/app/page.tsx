@@ -50,16 +50,16 @@ function PipelineDemo() {
 
 export default function HomePage() {
   const router = useRouter();
-  const { token, isLoading, bootstrapAuth } = useAuthStore();
+  const { token, authReady, bootstrapAuth } = useAuthStore();
 
   useEffect(() => {
-    bootstrapAuth();
+    void bootstrapAuth();
   }, [bootstrapAuth]);
 
   useEffect(() => {
-    if (isLoading) return; // still validating the stored session
+    if (!authReady) return;
     if (token) router.replace("/chat");
-  }, [token, isLoading, router]);
+  }, [token, authReady, router]);
 
   return (
     <div className="min-h-screen bg-void">

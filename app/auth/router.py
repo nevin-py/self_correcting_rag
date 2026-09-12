@@ -1,3 +1,4 @@
+import inspect
 import logging
 from datetime import UTC, datetime
 
@@ -45,22 +46,41 @@ logger = logging.getLogger(__name__)
 REFRESH_COOKIE = "refresh_token"
 
 
+def _refresh_cookie_flags() -> dict:
+    """Cookie flags that must match on Set-Cookie and delete, or the browser
+    keeps the old cookie. Production is always cross-site (Vercel ↔ Render),
+    so SameSite=None; Secure; Partitioned (CHIPS) is required."""
+    production = settings.ENVIRONMENT == "production"
+    return {
+        "key": REFRESH_COOKIE,
+        "httponly": True,
+        "secure": production,
+        "samesite": "none" if production else "lax",
+        "path": "/api/v1/auth",
+        "partitioned": production,
+    }
+
+
+def _cookie_kwargs(method, extra: dict | None = None) -> dict:
+    allowed = inspect.signature(method).parameters
+    merged = {**_refresh_cookie_flags(), **(extra or {})}
+    return {k: v for k, v in merged.items() if k in allowed}
+
+
 def _set_refresh_cookie(response: Response, raw_token: str) -> None:
     response.set_cookie(
-        key=REFRESH_COOKIE,
-        value=raw_token,
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",  # browsers allow Secure on localhost
-        # Cross-site frontend↔API (Vercel ↔ Cloud Run) requires SameSite=None;
-        # same-site dev (localhost:3000 → localhost:8000) uses Lax.
-        samesite="none" if settings.ENVIRONMENT == "production" else "lax",
-        path="/api/v1/auth",
+        **_cookie_kwargs(
+            response.set_cookie,
+            {
+                "value": raw_token,
+                "max_age": settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
+            },
+        )
     )
 
 
 def _clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth")
+    response.delete_cookie(**_cookie_kwargs(response.delete_cookie))
 
 
 def _refresh_token_from(request: Request, body: "RefreshRequest | None") -> str | None:

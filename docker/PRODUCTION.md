@@ -1,18 +1,21 @@
 # Production / ops runbook notes (do not put secrets here)
 
-## SECRET_KEY rotation
+## SECRET_KEY / ENCRYPTION_KEY rotation
 
-User API keys are Fernet-encrypted with a key derived from `SECRET_KEY`.
-Rotating `SECRET_KEY` without a migration **invalidates** stored provider keys and JWTs.
+JWTs are signed with `SECRET_KEY`. Per-user provider API keys are Fernet-encrypted
+with `ENCRYPTION_KEY` (must differ from `SECRET_KEY`).
+
+Rotating `SECRET_KEY` invalidates access JWTs. Rotating `ENCRYPTION_KEY` without a
+re-encrypt migration **invalidates** stored provider keys.
 
 Procedure:
 1. Announce maintenance; ask users to re-enter provider keys after cutover (or run a decrypt-with-old / encrypt-with-new script offline).
-2. Generate new key: `openssl rand -hex 32`
-3. Set `SECRET_KEY` in the deployment secret store / `.env` (never commit).
+2. Generate keys: `openssl rand -hex 32` (once for each of `SECRET_KEY` and `ENCRYPTION_KEY`).
+3. Set them in the deployment secret store / `.env` (never commit).
 4. Redeploy API containers; existing JWTs expire naturally (`ACCESS_TOKEN_EXPIRE_MINUTES`).
 5. Users re-save OpenRouter/Google/Groq keys in Settings if decryption fails.
 
-Prefer infrequent rotation; treat `SECRET_KEY` like a master KMS key.
+Prefer infrequent rotation; treat both like master KMS keys.
 
 ## Cloud Run (API only)
 

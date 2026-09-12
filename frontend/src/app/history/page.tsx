@@ -2,25 +2,21 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
+import { useRequireAuth } from "@/hooks/useRequireAuth";
 import AppShell from "@/components/layout/AppShell";
 import { Input } from "@/components/ui/Input";
 
 export default function HistoryPage() {
   const router = useRouter();
-  const { token, loadUser } = useAuthStore();
+  const { isAuthenticated } = useRequireAuth();
   const { chats, fetchChats, selectChat } = useChatStore();
   const [filter, setFilter] = useState("");
 
   useEffect(() => {
-    loadUser();
-    fetchChats();
-  }, [loadUser, fetchChats]);
-
-  useEffect(() => {
-    if (!token) router.replace("/login");
-  }, [token, router]);
+    if (!isAuthenticated) return;
+    void fetchChats();
+  }, [isAuthenticated, fetchChats]);
 
   const filtered = chats.filter((c) => c.title.toLowerCase().includes(filter.toLowerCase()));
 

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { chatApi, Citation, Claim, Conflict } from "@/lib/api";
+import { API_BASE, chatApi, refreshAccessToken, Citation, Claim, Conflict } from "@/lib/api";
 import { PipelinePhase, nodeToPhase } from "@/lib/pipeline";
 
 export interface Message {
@@ -289,25 +289,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const token = typeof window !== "undefined" ? localStorage.getItem("token") : "";
       const provider =
         typeof window !== "undefined" ? localStorage.getItem("llm_provider") || "auto" : "auto";
-      const resp = await fetch(`${API_BASE}/api/v1/agent/chats/${activeChatId}/query_stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ message: content, provider }),
-      });
 
-      if (!resp.ok) {
-        // A stale backend (older than /query_stream) or an auth/CORS failure
-        // lands here — say WHY in the console instead of silently degrading to
-        // the non-streaming path (which has no pipeline-activity events).
-        console.warn(
-          `[chat] /query_stream HTTP ${resp.status}; falling back to non-streaming /query. `
-          + "If this persists on a deployment, the backend is older than the frontend."
-        );
-        throw new Error(`HTTP ${resp.status}`);
+      const openStream = (access: string) =>
+        fetch(`${API_BASE}/api/v1/agent/chats/${activeChatId}/query_stream`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+          body: JSON.stringify({ message: content, provider }),
+        });
+
+      let token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+      let resp = await openStream(token);
+      if (resp.status === 401) {
+        const rotated = await refreshAccessToken();
+        if (rotated) {
+          token = rotated;
+          resp = await openStream(token);
+        }
+      }
+
+      const contentType = resp.headers.get("content-type") || "";
+      if (!resp.ok || !contentType.includes("text/event-stream")) {
+        const detail = `Streaming unavailable (HTTP ${resp.status}). The analysis panel needs live SSE from the API; check NEXT_PUBLIC_API_URL, CORS_ORIGINS, and that the backend is reachable.`;
+        console.warn(`[chat] /query_stream failed: HTTP ${resp.status} content-type=${contentType}`);
+        set((s) => ({
+          messages: [
+            ...s.messages,
+            {
+              id: `err-${Date.now()}`,
+              role: "assistant",
+              content: detail,
+              timestamp: new Date(),
+            },
+          ],
+          isStreaming: false,
+          graphStatus: null,
+        }));
+        return;
       }
 
       const reader = resp.body!.getReader();
@@ -538,45 +558,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
           graphStatus: null,
           selectedMessageId: msgId,
         }));
+      } else if (!provenance) {
+        set({ isStreaming: false, graphStatus: null });
       }
     } catch (streamErr) {
-      console.warn("[chat] streaming unavailable; using non-streaming fallback:", streamErr);
-      try {
-        const res = await chatApi.query(activeChatId, content);
-        const data = res.data;
-        const msgId = `ai-${Date.now()}`;
-        const aiMsg: Message = {
-          id: msgId,
-          role: "assistant",
-          content: data.answer,
-          timestamp: new Date(),
-          citations: data.citations,
-          claims: data.claims,
-          conflicts: data.conflicts,
-          finalStatus: data.final_status,
-          latencyMs: data.latency_ms,
-        };
-        set((s) => ({
-          messages: [...s.messages, aiMsg],
-          isStreaming: false,
-          graphStatus: null,
-          selectedMessageId: msgId,
-        }));
-      } catch {
-        set((s) => ({
-          messages: [
-            ...s.messages,
-            {
-              id: `err-${Date.now()}`,
-              role: "assistant",
-              content: "Operation failed. Retry query.",
-              timestamp: new Date(),
-            },
-          ],
-          isStreaming: false,
-          graphStatus: null,
-        }));
-      }
+      console.warn("[chat] streaming failed:", streamErr);
+      set((s) => ({
+        messages: [
+          ...s.messages,
+          {
+            id: `err-${Date.now()}`,
+            role: "assistant",
+            content:
+              "Streaming failed. The analysis panel cannot run without /query_stream. Check the API URL, CORS, and Render logs, then retry.",
+            timestamp: new Date(),
+          },
+        ],
+        isStreaming: false,
+        graphStatus: null,
+      }));
     }
   },
 

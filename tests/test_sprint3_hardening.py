@@ -105,6 +105,27 @@ class TestCorsMiddleware:
         assert resp["headers"]["access-control-allow-headers"] == "authorization,content-type"
 
 
+class TestRefreshCookieFlags:
+    def test_production_flags_are_cross_site(self, monkeypatch):
+        from app.auth import router as auth_router
+
+        monkeypatch.setattr(auth_router.settings, "ENVIRONMENT", "production")
+        flags = auth_router._refresh_cookie_flags()
+        assert flags["samesite"] == "none"
+        assert flags["secure"] is True
+        assert flags["partitioned"] is True
+        assert flags["path"] == "/api/v1/auth"
+
+    def test_dev_flags_are_lax(self, monkeypatch):
+        from app.auth import router as auth_router
+
+        monkeypatch.setattr(auth_router.settings, "ENVIRONMENT", "development")
+        flags = auth_router._refresh_cookie_flags()
+        assert flags["samesite"] == "lax"
+        assert flags["secure"] is False
+        assert flags["partitioned"] is False
+
+
 @pytest.mark.asyncio
 class TestRefreshCookie:
     async def test_login_sets_httponly_cookie(self, client, registered_user):

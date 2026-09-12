@@ -95,7 +95,8 @@ docker compose -f docker/docker-compose.prod.yml --env-file .env up -d --build
 
 **Google Cloud Run (Always Free only, no Cloud SQL):** see [docs/DEPLOY_CLOUD_RUN.md](docs/DEPLOY_CLOUD_RUN.md).
 
-**Render (free web service, Supabase-backed):** the repo ships a Blueprint — `render.yaml`.
+**Render (free web service, Supabase-backed):** the repo ships a Blueprint —
+`render.yaml`. Pair with Vercel: [docs/DEPLOY_RENDER_VERCEL.md](docs/DEPLOY_RENDER_VERCEL.md).
 
 **Split deploy (Oracle Cloud API + Vercel frontend):** see [docs/DEPLOY_ORACLE_VERCEL.md](docs/DEPLOY_ORACLE_VERCEL.md).
 

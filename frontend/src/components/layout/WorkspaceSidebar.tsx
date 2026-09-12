@@ -30,11 +30,12 @@ export default function WorkspaceSidebar() {
   const pathname = usePathname();
   const { chats, activeChatId, sidebarCollapsed, fetchChats, createChat, selectChat, deleteChat, toggleSidebar } =
     useChatStore();
-  const { logout } = useAuthStore();
+  const { logout, token, authReady } = useAuthStore();
 
   useEffect(() => {
-    fetchChats();
-  }, [fetchChats]);
+    if (!authReady || !token) return;
+    void fetchChats();
+  }, [fetchChats, authReady, token]);
 
     const handleNewChat = async () => {
     const title = nextSessionTitle(chats);

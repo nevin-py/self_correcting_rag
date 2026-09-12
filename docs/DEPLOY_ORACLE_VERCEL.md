@@ -359,7 +359,7 @@ DevTools → Network:
 | API | `http://localhost:8000` | `https://api.yourdomain.com` |
 | `NEXT_PUBLIC_API_URL` | unset / localhost | Oracle API HTTPS URL |
 | `CORS_ORIGINS` | optional in development | **required** (Vercel origin) |
-| Postgres / Chroma | local Docker | same VM via compose volumes |
+| Postgres / uploads | local Docker | same VM via compose volumes |
 
 ---
 

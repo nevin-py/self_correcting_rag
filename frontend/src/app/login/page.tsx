@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
 import { Input } from "@/components/ui/Input";
@@ -8,10 +8,18 @@ import { Button } from "@/components/ui/Button";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, isLoading } = useAuthStore();
+  const { login, isLoading, token, authReady, bootstrapAuth } = useAuthStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    void bootstrapAuth();
+  }, [bootstrapAuth]);
+
+  useEffect(() => {
+    if (authReady && token) router.replace("/chat");
+  }, [authReady, token, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

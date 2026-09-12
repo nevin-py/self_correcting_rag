@@ -50,8 +50,9 @@ is the default in the entrypoint.)
 ## Frontend (Vercel)
 
 Set `NEXT_PUBLIC_API_URL=https://<your-username>-scrag-api.hf.space` in the
-Vercel project env and redeploy. (`hf.space` URLs are HTTPS — the refresh
-cookie's `SameSite=None; Secure` works cross-site.)
+Vercel project env (**no trailing slash**) and **redeploy**. `NEXT_PUBLIC_*` is
+compile-time. HTTPS is required so the refresh cookie can be
+`SameSite=None; Secure; Partitioned` across Vercel ↔ API.
 
 ## Caveats
 

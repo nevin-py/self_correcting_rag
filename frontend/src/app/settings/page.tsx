@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Copy, Check, Trash2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
 import { authApi, settingsApi, type ProviderSettings } from "@/lib/api";
+import { useRequireAuth } from "@/hooks/useRequireAuth";
 import AppShell from "@/components/layout/AppShell";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -54,8 +54,8 @@ const TABS = [
 ];
 
 export default function SettingsPage() {
-  const router = useRouter();
-  const { token, user, loadUser } = useAuthStore();
+  const { token } = useRequireAuth();
+  const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState("profile");
   const [confirmClear, setConfirmClear] = useState(false);
   const [purgeMsg, setPurgeMsg] = useState("");
@@ -83,14 +83,6 @@ export default function SettingsPage() {
   const [newPassword, setNewPassword] = useState("");
   const [pwMsg, setPwMsg] = useState("");
   const [pwErr, setPwErr] = useState("");
-
-  useEffect(() => {
-    loadUser();
-  }, [loadUser]);
-
-  useEffect(() => {
-    if (!token) router.replace("/login");
-  }, [token, router]);
 
   useEffect(() => {
     if (!token) return;

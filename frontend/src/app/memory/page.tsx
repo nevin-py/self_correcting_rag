@@ -1,16 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/stores/authStore";
 import { memoryApi, type MemoryChunk } from "@/lib/api";
+import { useRequireAuth } from "@/hooks/useRequireAuth";
 import AppShell from "@/components/layout/AppShell";
 import { Input } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 
 export default function MemoryPage() {
-  const router = useRouter();
-  const { token, loadUser } = useAuthStore();
+  const { token } = useRequireAuth();
   const [q, setQ] = useState("");
   const [query, setQuery] = useState("");
   const [chunks, setChunks] = useState<MemoryChunk[]>([]);
@@ -18,14 +16,6 @@ export default function MemoryPage() {
   const [collection, setCollection] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    loadUser();
-  }, [loadUser]);
-
-  useEffect(() => {
-    if (!token) router.replace("/login");
-  }, [token, router]);
 
   useEffect(() => {
     if (!token) return;

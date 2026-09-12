@@ -2,26 +2,20 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/stores/authStore";
 import { nextSessionTitle, useChatStore } from "@/stores/chatStore";
+import { useRequireAuth } from "@/hooks/useRequireAuth";
 import AppShell from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
 
 export default function ChatPage() {
   const router = useRouter();
-  const { token, isLoading, bootstrapAuth } = useAuthStore();
+  const { isAuthenticated } = useRequireAuth();
   const { fetchChats } = useChatStore();
 
   useEffect(() => {
-    bootstrapAuth().finally(() => {
-      fetchChats();
-    });
-  }, [bootstrapAuth, fetchChats]);
-
-  useEffect(() => {
-    if (isLoading) return; // still validating the stored session — don't flash
-    if (!token) router.replace("/login");
-  }, [token, isLoading, router]);
+    if (!isAuthenticated) return;
+    void fetchChats();
+  }, [isAuthenticated, fetchChats]);
 
   const handleNewChat = async () => {
     const title = nextSessionTitle(useChatStore.getState().chats);
