@@ -86,6 +86,9 @@ export function onAuthEvent(cb: (type: string) => void): () => void {
  * null when the session is genuinely dead.
  */
 export async function refreshAccessToken(): Promise<string | null> {
+  if (typeof window !== "undefined" && localStorage.getItem("scrag_logged_out") === "1") {
+    return null;
+  }
   if (refreshInFlight) return refreshInFlight;
 
   const rotate = async (): Promise<string | null> => {

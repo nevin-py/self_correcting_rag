@@ -15,6 +15,14 @@ from app.documents.clients import tavily_client
 
 logger = logging.getLogger(__name__)
 
+
+def _searxng_base() -> str | None:
+    """Render sets SEARXNG_URL empty; httpx then errors 'missing http:// protocol'."""
+    raw = (settings.SEARXNG_URL or "").strip().rstrip("/")
+    if not raw or not raw.lower().startswith(("http://", "https://")):
+        return None
+    return raw
+
 # Process-wide cap on concurrent full-page fetch+parse (lxml trees cost ~10x
 # their input in RAM; see ENRICHMENT_CONCURRENCY in settings).
 _enrichment_sem: asyncio.Semaphore | None = None
@@ -341,7 +349,9 @@ async def search_searxng(query: str) -> Optional[str]:
     Aggregates results from Google, Bing, DuckDuckGo, Wikipedia, and more.
     """
     start = time.perf_counter()
-    searxng_url = settings.SEARXNG_URL.rstrip("/")
+    searxng_url = _searxng_base()
+    if not searxng_url:
+        return None
     url = f"{searxng_url}/search"
     params = {
         "q": query,
@@ -481,7 +491,9 @@ async def _searxng_structured(
     """``time_range=None`` for queries that already pin a year/event — the
     default recency filter otherwise buries historical match/event pages under
     this month's news about the same topic."""
-    searxng_url = settings.SEARXNG_URL.rstrip("/")
+    searxng_url = _searxng_base()
+    if not searxng_url:
+        return []
     url = f"{searxng_url}/search"
     params = {
         "q": query,
@@ -562,8 +574,9 @@ async def search_structured(  # noqa: C901
                     "tavily-variant",
                 )
             )
-    tasks.append(_safe(_searxng_structured(primary, max_results), "searxng"))
-    if len(variants) > 1:
+    if _searxng_base():
+        tasks.append(_safe(_searxng_structured(primary, max_results), "searxng"))
+    if _searxng_base() and len(variants) > 1:
         # Year-appended variant WITHOUT the recency filter: the variant pins its
         # own date, and time_range=year buries historical event pages under this
         # month's news about the same topic.

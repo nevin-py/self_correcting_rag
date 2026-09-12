@@ -89,6 +89,22 @@ class TestCorsMiddleware:
         resp = run(self._scope(origin="https://self-correcting-greuf9gk2-sovrin1.vercel.app"))
         assert resp["headers"]["access-control-allow-origin"] == "https://self-correcting-greuf9gk2-sovrin1.vercel.app"
 
+    def test_hostname_glob_allows_team_previews(self):
+        run = _drive_cors(self._mw(
+            vercel=False,
+            extra_origins={
+                "https://self-correcting-rag-kappa.vercel.app",
+                "https://*-sovrin1.vercel.app",
+            },
+        ))
+        for origin in (
+            "https://self-correcting-rag-kappa.vercel.app",
+            "https://self-correcting-rag-git-main-sovrin1.vercel.app",
+            "https://self-correcting-g5h0oilgb-sovrin1.vercel.app",
+        ):
+            resp = run(self._scope(origin=origin))
+            assert resp["headers"]["access-control-allow-origin"] == origin
+
     def test_unrelated_vercel_preview_still_blocked(self):
         run = _drive_cors(self._mw(vercel=False, extra_origins={"https://self-correcting-sovrin1.vercel.app"}))
         resp = run(self._scope(origin="https://attacker-site.vercel.app"))

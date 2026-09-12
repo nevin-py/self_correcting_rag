@@ -58,6 +58,7 @@ function persistSession(
   set: (s: Partial<AuthState>) => void
 ) {
   bootstrapEpoch += 1;
+  localStorage.removeItem("scrag_logged_out");
   // Access token in localStorage (short-lived); the refresh token is an
   // httpOnly cookie set by the server — never stored in JS-readable storage.
   localStorage.setItem("token", access);
@@ -70,6 +71,8 @@ function persistSession(
 }
 
 function clearSession(set: (s: Partial<AuthState>) => void) {
+  bootstrapEpoch += 1;
+  localStorage.setItem("scrag_logged_out", "1");
   localStorage.removeItem("token");
   localStorage.removeItem("refresh_token");
   set({ user: null, token: null, isLoading: false, authReady: true });
@@ -152,6 +155,10 @@ export const useAuthStore = create<AuthState>((set) => ({
     // every cold load: one rotation per page load, and two open tabs rotating
     // concurrently trip reuse detection and kill each other's sessions.
     if (typeof window === "undefined") return;
+    if (localStorage.getItem("scrag_logged_out") === "1") {
+      set({ user: null, token: null, isLoading: false, authReady: true });
+      return;
+    }
     if (bootstrapInFlight) return bootstrapInFlight;
     const epoch = bootstrapEpoch;
 
@@ -212,6 +219,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 if (typeof window !== "undefined") {
   onAuthEvent((type) => {
     if (type === "logout") {
+      localStorage.setItem("scrag_logged_out", "1");
       localStorage.removeItem("token");
       localStorage.removeItem("refresh_token");
       localStorage.removeItem("token_refreshed_at");

@@ -1,4 +1,5 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import MutableMapping
 from urllib.parse import urlparse
@@ -54,6 +55,25 @@ def _host(origin: str) -> str:
     return (urlparse(origin).hostname or "").lower()
 
 
+def origin_matches_pattern(origin: str, pattern: str) -> bool:
+    """Exact origin match, or hostname glob with * (hyphenated labels).
+
+    Vercel git previews are ``https://<project>-<hash>-<team>.vercel.app``
+    (hyphens, not extra DNS labels). Allow them with
+    ``https://*-sovrin1.vercel.app`` next to the production alias.
+    """
+    if origin == pattern:
+        return True
+    o, p = urlparse(origin), urlparse(pattern)
+    if o.scheme != p.scheme or (o.port or None) != (p.port or None):
+        return False
+    oh, ph = (o.hostname or "").lower(), (p.hostname or "").lower()
+    if "*" not in ph:
+        return oh == ph
+    rx = re.escape(ph).replace(r"\*", r"[a-z0-9-]+")
+    return bool(re.fullmatch(rx, oh))
+
+
 def is_vercel_preview_of_allowed(origin: str, allowed_origins: set[str]) -> bool:
     """Allow Vercel *preview* URLs for a project already listed in CORS_ORIGINS.
 
@@ -86,6 +106,8 @@ def resolve_cors_origin(
     if not origin:
         return None
     if origin in allowed_origins:
+        return origin
+    if any(origin_matches_pattern(origin, pattern) for pattern in allowed_origins):
         return origin
     if origin.endswith(".vercel.app") and allow_vercel_previews:
         return origin

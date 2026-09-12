@@ -19,7 +19,7 @@ Required secrets (exact names):
 
 | Variable | Notes |
 |---|---|
-| `CORS_ORIGINS` | Exact frontend origin, e.g. `https://your-app.vercel.app` — no trailing slash. Add a custom domain as a second comma-separated value if you use one. Preview URLs are **not** allowed in production. |
+| `CORS_ORIGINS` | Production UI origin **and** a preview glob. Example: `https://self-correcting-rag-kappa.vercel.app,https://*-sovrin1.vercel.app` (no trailing slash). Git preview URLs (`project-hash-team.vercel.app`) are a different host than the production alias — without the glob, login 200s on the API but the browser shows "Authentication failed". |
 | `DATABASE_URL` | `postgresql+asyncpg://…` (Supabase **transaction** pooler `:6543` is fine) |
 | `SECRET_KEY` | `openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | Different `openssl rand -hex 32` |
@@ -46,8 +46,15 @@ NEXT_PUBLIC_API_URL=https://scrag-api.onrender.com
 No trailing slash. `NEXT_PUBLIC_*` is baked in at **build** time — change it,
 then **redeploy**.
 
-3. After the Vercel URL exists, set Render `CORS_ORIGINS` to that origin and
-   restart the API.
+3. After the Vercel URL exists, set Render `CORS_ORIGINS` (comma-separated, no
+   spaces required) and **restart the API**:
+
+```text
+https://self-correcting-rag-kappa.vercel.app,https://*-sovrin1.vercel.app
+```
+
+That covers production (`…-kappa.vercel.app`) plus git/preview hosts
+(`…-git-main-sovrin1.vercel.app`, `…-<hash>-sovrin1.vercel.app`).
 
 ## Smoke test (DevTools → Network)
 
