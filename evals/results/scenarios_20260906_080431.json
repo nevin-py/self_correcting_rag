@@ -1,0 +1,34 @@
+[
+  {
+    "scenario": "S3",
+    "description": "Figure-heavy question that may need a repair pass",
+    "findings": [
+      "S3: status=answered latency=13.9s",
+      "S3: claims verified=3/3"
+    ],
+    "turns": [
+      {
+        "query": "What was Japan's GDP growth rate in 2024 and what is the latest inflation rate there?",
+        "answer": "- **GDP growth in 2024** \u2013 Trading Economics reports that Japan\u2019s full\u2011year GDP growth for 2024 was **0.10\u202f%** (the forecast for the calendar year ending\u202fDecember\u202f2024)[E1].  \n\n- **Latest inflation rate** \u2013 The most recent data available shows Japan\u2019s annual consumer\u2011price inflation at **1.9\u202f% year\u2011on\u2011year in July\u202f2026**[E3]. (Core CPI, which excludes fresh food and energy, was 1.8\u202f% YoY in the same month[E5][E7]).",
+        "final_status": "answered",
+        "provider_used": "mechanical-fast-path",
+        "latency_s": 13.9,
+        "claims": [
+          {
+            "text": "\u2013 Trading Economics reports that Japan\u2019s full\u2011year GDP growth for 2024 was **0.10\u202f%** (the forecast for the calendar yea",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 The most recent data available shows Japan\u2019s annual consumer\u2011price inflation at **1.9\u202f% year\u2011on\u2011year in July\u202f2026**[E3",
+            "status": "verified"
+          },
+          {
+            "text": "(Core CPI, which excludes fresh food and energy, was 1.8\u202f% YoY in the same month[E5][E7]).",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Japan GDP growth rate in 2024 and latest inflation rate in Japan' needs_documents=False needs_web=True search_queries=['Japan GDP growth rate 2024', 'Japan inflation rate 2026'] temporal_focus='2024 and 2026' geography='Japan' clarification_question=''"
+      }
+    ]
+  }
+]

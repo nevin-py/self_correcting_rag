@@ -1,0 +1,76 @@
+[
+  {
+    "scenario": "S2",
+    "description": "Cross-turn grounding on a factual topic",
+    "findings": [
+      "S2: turn1 status=answered_with_caveats (22.5s), turn2 status=answered_with_caveats (18.8s)",
+      "S2: follow-up answered with caveats (honest)"
+    ],
+    "turns": [
+      {
+        "query": "What is the capital of Australia and why is it not Sydney?",
+        "answer": "- The capital city of Australia is **Canberra**\u202f\u2014\u202fa purpose\u2011built city founded in\u202f1913\u202f[E1][E3].  \n\n- Sydney was not chosen as the capital for several reasons that are documented in the historical record:  \n\n  * **Political rivalry** \u2013 At Federation, the two largest colonial cities, Sydney and Melbourne, each wanted the seat of government, and the rivalry made a compromise necessary, leading to the decision to create a new capital rather than favour either existing city\u202f[E1].  \n\n  * **Constitutional requirement** \u2013 Section\u202f125 of the Australian Constitution stipulated that the permanent seat of government had to be in New\u202fSouth\u202fWales but **at least\u202f100\u202fmiles (\u2248\u202f160\u202fkm) from Sydney**; this rule rendered Sydney itself unsuitable\u202f[E2][E7][E8].  \n\n  * **Neutral, purpose\u2011built location** \u2013 Selecting a site between the two rival cities provided a neutral federal seat that would not be dominated by either state, satisfying the need for a \u201cneutral federal seat of government\u201d\u202f[E2][E4].  \n\n  * **Strategic safety** \u2013 The inland location was also seen as safer from potential wartime attacks, another factor cited in the decision to place the capital away from the coastal city of Sydney\u202f[E4].  \n\nThus, Canberra serves as Australia\u2019s capital because it met the constitutional, geographic, and political criteria that Sydney could not satisfy.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "groq",
+        "latency_s": 22.5,
+        "claims": [
+          {
+            "text": "The capital city of Australia is Canberra \u2014 a purpose-built city founded in 1913.",
+            "status": "verified"
+          },
+          {
+            "text": "At Federation, the two largest colonial cities, Sydney and Melbourne, each wanted the seat of government, and the rivalr",
+            "status": "verified"
+          },
+          {
+            "text": "Section 125 of the Australian Constitution stipulated that the permanent seat of government had to be in New South Wales",
+            "status": "verified"
+          },
+          {
+            "text": "Selecting a site between the two rival cities provided a neutral federal seat that would not be dominated by either stat",
+            "status": "verified"
+          },
+          {
+            "text": "The inland location was also seen as safer from potential wartime attacks, another factor cited in the decision to place",
+            "status": "verified"
+          },
+          {
+            "text": "Sydney was not chosen as the capital for several reasons that are documented in the historical record:",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What is the capital of Australia and why is it not Sydney?' needs_documents=False needs_web=True search_queries=['capital of Australia', 'why is Canberra the capital of Australia instead of Sydney', 'history of Australian capital selection'] temporal_focus='' geography='Australia' clarification_question=''"
+      },
+      {
+        "query": "and what is its population?",
+        "answer": "- The most recent **2026 estimate** for Canberra\u2019s population is **523,285**\u202fpeople\u202f[E2].\n\n- The **Australian Bureau of Statistics** reported an **estimated resident population of 487,202** for 31\u202fDecember\u202f2025, and projected that the city would pass **490,000** during 2026\u202f[E3].\n\n- **Wikipedia** lists a **population of 484,630** for June\u202f2025\u202f[E1].\n\nThese figures show that Canberra\u2019s population is growing rapidly, with the 2026 estimate (523\u202fk) being the latest available number.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "groq",
+        "latency_s": 18.8,
+        "claims": [
+          {
+            "text": "The most recent 2026 estimate for Canberra\u2019s population is 523,285 people.",
+            "status": "verified"
+          },
+          {
+            "text": "The Australian Bureau of Statistics reported an estimated resident population of 487,202 for 31 December 2025.",
+            "status": "verified"
+          },
+          {
+            "text": "The ABS projected that the city would pass 490,000 during 2026.",
+            "status": "verified"
+          },
+          {
+            "text": "Wikipedia lists a population of 484,630 for June 2025.",
+            "status": "verified"
+          },
+          {
+            "text": "These figures show that Canberra\u2019s population is growing rapidly, with the 2026 estimate (523\u202fk) being the latest availa",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='population of Canberra' needs_documents=False needs_web=True search_queries=['Canberra population', 'current population of Canberra'] temporal_focus='latest' geography='Canberra, Australia' clarification_question=''"
+      }
+    ]
+  }
+]

@@ -1,0 +1,45 @@
+[
+  {
+    "scenario": "S5",
+    "description": "Simple single-fact question (fast path candidate)",
+    "findings": [
+      "S5: status=answered_with_caveats latency=111.8s provider=groq"
+    ],
+    "turns": [
+      {
+        "query": "What is the tallest mountain on Earth?",
+        "answer": "The answer depends on which way the mountain\u2019s \u201ctallness\u201d is measured:\n\n- **Highest point above mean sea level:**\u202fMount\u202fEverest (8\u202f848.86\u202fm\u202f\u2248\u202f29\u202f031.7\u202fft) is the highest summit measured from sea level\u202f[E9][E7][E6].\n\n- **Greatest vertical rise from its base to its summit:**\u202fMauna\u202fKea in Hawai\u2018i rises about\u202f33\u202f497\u202fft\u202f(10\u202f203\u202fm) from the ocean floor to its peak, making it the tallest mountain when height is measured from base\u2011to\u2011summit\u202f[E2][E4][E1].\n\n- **Farthest point from the Earth\u2019s centre:**\u202fMount\u202fChimborazo in Ecuador is the point on Earth that sticks out the farthest from the planet\u2019s centre because the Earth bulges at the equator\u202f[E2][E3].\n\nSo, **Mount\u202fEverest** is the tallest *by sea\u2011level elevation*, **Mauna\u202fKea** is the tallest *by total height from base to summit*, and **Chimborazo** is the tallest *by distance from the Earth\u2019s centre*.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "groq",
+        "latency_s": 111.8,
+        "claims": [
+          {
+            "text": "Mount Everest (8 848.86 m \u2248 29 031.7 ft) is the highest summit measured from sea level",
+            "status": "verified"
+          },
+          {
+            "text": "Mauna Kea in Hawai\u2018i rises about 33 497 ft (10 203 m) from the ocean floor to its peak",
+            "status": "verified"
+          },
+          {
+            "text": "Mount Chimborazo in Ecuador is the point on Earth that sticks out the farthest from the planet\u2019s centre",
+            "status": "verified"
+          },
+          {
+            "text": "The answer depends on which way the mountain\u2019s \u201ctallness\u201d is measured:",
+            "status": "unverified"
+          },
+          {
+            "text": "Mauna\u202fKea in Hawai\u2018i rises about\u202f33\u202f497\u202fft\u202f(10\u202f203\u202fm) from the ocean floor to its peak, making it the tallest mountain w",
+            "status": "verified"
+          },
+          {
+            "text": "So, **Mount\u202fEverest** is the tallest *by sea\u2011level elevation*, **Mauna\u202fKea** is the tallest *by total height from base t",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What is the tallest mountain on Earth?' needs_documents=False needs_web=True search_queries=['tallest mountain on Earth', 'highest mountain on Earth', 'tallest mountain from base to peak'] temporal_focus='' geography='Earth' clarification_question=''"
+      }
+    ]
+  }
+]

@@ -1,0 +1,347 @@
+[
+  {
+    "case": "C1-doc-lookup",
+    "findings": [
+      "    turn1: answered_with_caveats 59.0s",
+      "    PASS turn1: contains ['412']",
+      "    PASS turn1: document-type evidence cited"
+    ],
+    "turns": [
+      {
+        "query": "According to the Zentro Dynamics report, what was their Q3 FY2025 revenue and how did it change?",
+        "answer": "The Zentro Dynamics\u202fQ3\u202fFY2025 Investor Report shows that revenue for the quarter was Rs\u202f412\u202fcrore, representing a 23\u202f% increase quarter\u2011over\u2011quarter[E1]. This figure pertains specifically to the third quarter of fiscal year\u202f2025.",
+        "final_status": "answered_with_caveats",
+        "latency_s": 59.0,
+        "claims": [
+          {
+            "text": "The Zentro Dynamics\u202fQ3\u202fFY2025 Investor Report shows that revenue for the quarter was Rs\u202f412\u202fcrore, representing a 23\u202f% increase quarter\u2011over\u2011quarter[E",
+            "status": "verified"
+          },
+          {
+            "text": "This figure pertains specifically to the third quarter of fiscal year\u202f2025[E1].",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Zentro Dynamics Q3 FY2025 revenue and how it changed' needs_documents=True needs_web=False search_queries=['Zentro Dynamics Q3 FY2025 revenue', 'Zentro Dynamics Q3 FY2025 revenue change YoY QoQ'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      }
+    ]
+  },
+  {
+    "case": "C2-doc-multifact-followup",
+    "findings": [
+      "    turn1: answered_with_caveats 126.2s",
+      "    turn2: answered_with_caveats 95.9s",
+      "    PASS turn2: contains ['2.1']",
+      "    PASS turn2: document-type evidence cited"
+    ],
+    "turns": [
+      {
+        "query": "What does the Zentro Dynamics report say about their expansion?",
+        "answer": "According to the uploaded **\u201cZentro Dynamics\u202f\u2014\u202fQ3\u202fFY2025 Investor Report\u201d**, the company expanded its operations to **27 new cities during the quarter**, raising its total city coverage to **89 locations across India and Southeast Asia**\u202f[E1]. This expansion figure pertains to **Q3\u202fFY2025**.",
+        "final_status": "answered_with_caveats",
+        "latency_s": 126.2,
+        "claims": [
+          {
+            "text": "During Q3 FY2025, Zentro Dynamics expanded its operations to 27 new cities.",
+            "status": "verified"
+          },
+          {
+            "text": "This expansion brought the total city coverage to 89 across India and Southeast Asia.",
+            "status": "verified"
+          },
+          {
+            "text": "According to the uploaded **\u201cZentro Dynamics\u202f\u2014\u202fQ3\u202fFY2025 Investor Report\u201d**, the company expanded its operations to **27 new cities during the quarter",
+            "status": "verified"
+          },
+          {
+            "text": "This expansion figure pertains to **Q3\u202fFY2025**. [E1]",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What does the Zentro Dynamics Q3 FY2025 Investor Report say about their expansion?' needs_documents=True needs_web=False search_queries=['Zentro Dynamics expansion Q3 FY2025 investor report', 'Zentro Dynamics report expansion plans'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      },
+      {
+        "query": "and what was their monthly churn rate again?",
+        "answer": "The report states that **monthly logo churn fell to\u202f2.1\u202f%**, the lowest level in the company\u2019s history\u202f[E1]. This churn rate is reported for **Q3\u202fFY2025**.",
+        "final_status": "answered_with_caveats",
+        "latency_s": 95.9,
+        "claims": [
+          {
+            "text": "The report states that **monthly logo churn fell to\u202f2.1\u202f%**, the lowest level in the company\u2019s history\u202f[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "This churn rate is reported for **Q3\u202fFY2025**. [E1]",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query=\"What was Zentro Dynamics' monthly churn rate according to the Q3 FY2025 Investor Report?\" needs_documents=True needs_web=False search_queries=['Zentro Dynamics monthly churn rate Q3 FY2025', 'Zentro Dynamics churn rate'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      }
+    ]
+  },
+  {
+    "case": "C3-doc-entities",
+    "findings": [
+      "    turn1: answered_with_caveats 136.5s",
+      "    PASS turn1: contains ['Pune']"
+    ],
+    "turns": [
+      {
+        "query": "Who founded Zentro Dynamics and where is the company headquartered?",
+        "answer": "Zentro Dynamics was founded by **Meera\u202fKrishnan** and its corporate headquarters are located in **Pune,\u202fIndia**[E1].",
+        "final_status": "answered_with_caveats",
+        "latency_s": 136.5,
+        "claims": [
+          {
+            "text": "Zentro Dynamics was founded by Meera Krishnan.",
+            "status": "verified"
+          },
+          {
+            "text": "Zentro Dynamics is headquartered in Pune, India.",
+            "status": "verified"
+          },
+          {
+            "text": "Zentro Dynamics was founded by **Meera\u202fKrishnan** and its corporate headquarters are located in **Pune,\u202fIndia**[E1].",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          },
+          {
+            "key": "E2",
+            "type": "web",
+            "name": "Zentro (Acquired) 2026 Company Profile: Valuation, Investors"
+          },
+          {
+            "key": "E3",
+            "type": "web",
+            "name": "SaaS Company Database \u2014 Revenue, ARR & Growth Data from 1,98"
+          },
+          {
+            "key": "E4",
+            "type": "web",
+            "name": "Untitled"
+          },
+          {
+            "key": "E5",
+            "type": "web",
+            "name": "Zentro Internet - Home, Multifamily & Business Internet"
+          },
+          {
+            "key": "E6",
+            "type": "web",
+            "name": "[Zentro Internet Information](/zentro-internet-profile_b7931"
+          },
+          {
+            "key": "E7",
+            "type": "web",
+            "name": "Zentro - 2026 Company Profile, Funding & Competitors - Tracx"
+          },
+          {
+            "key": "E8",
+            "type": "web",
+            "name": "Tom Morgans\u200f - \u200fFounder & CEO of zentro - LinkedIn"
+          },
+          {
+            "key": "E9",
+            "type": "web",
+            "name": "Untitled"
+          },
+          {
+            "key": "E10",
+            "type": "web",
+            "name": "At Jolie's, access is a given. Being ahead of the curve is ."
+          },
+          {
+            "key": "E11",
+            "type": "web",
+            "name": "Wikipedia: Zentro Dynamics founder headquarters"
+          },
+          {
+            "key": "E12",
+            "type": "web",
+            "name": "Wikipedia: Zentro Dynamics company headquarters location"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Who founded Zentro Dynamics and where is the company headquartered?' needs_documents=True needs_web=True search_queries=['Zentro Dynamics founder headquarters', 'Zentro Dynamics company headquarters location'] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  },
+  {
+    "case": "C4-cross-turn-pin",
+    "findings": [
+      "    turn1: answered_with_caveats 100.4s",
+      "    turn2: answered 117.7s",
+      "    PASS turn2: contains ['1,840']"
+    ],
+    "turns": [
+      {
+        "query": "Give me a quick summary of the Zentro Dynamics Q3 report.",
+        "answer": "**Quick summary of Zentro Dynamics\u202fQ3\u202fFY2025 (as reported in the uploaded \u201cZentro Dynamics Q3 FY2025 Investor Report\u201d)**\n\n- **Revenue & profitability** \u2013 The company closed Q3\u202fFY2025 with revenue of **Rs\u202f412\u202fcrore**, a **23\u202f% quarter\u2011over\u2011quarter increase**, and a **gross margin of 61\u202f%**[E1].  \n- **Geographic expansion** \u2013 During the quarter Zentro Dynamics added **27 new cities**, bringing its total coverage to **89 cities** across India and Southeast Asia[E1].  \n- **Customer performance** \u2013 Monthly logo churn fell to **2.1\u202f%**, the lowest ever for the firm, while **net revenue retention reached 118\u202f%** and the **NPS was 71**[E1].  \n- **Workforce** \u2013 Headcount stood at **1,840 employees** at the end of the quarter[E1].  \n- **Product launch** \u2013 **Orbit Analytics\u202f2.0** was launched in **September\u202f2025**, introducing real\u2011time forecasting capabilities[E1].  \n- **Guidance** \u2013 Management projects FY2026 revenue of **Rs\u202f1,900\u202fcrore**[E1].  \n\nAll figures pertain to the **Q3 FY2025** reporting period.",
+        "final_status": "answered_with_caveats",
+        "latency_s": 100.4,
+        "claims": [
+          {
+            "text": "\u2013 The company closed Q3\u202fFY2025 with revenue of **Rs\u202f412\u202fcrore**, a **23\u202f% quarter\u2011over\u2011quarter increase**, and a **gross margin of 61\u202f%**[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 During the quarter Zentro Dynamics added **27 new cities**, bringing its total coverage to **89 cities** across India and Southeast Asia[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Monthly logo churn fell to **2.1\u202f%**, the lowest ever for the firm, while **net revenue retention reached 118\u202f%** and the **NPS was 71**[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Headcount stood at **1,840 employees** at the end of the quarter[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 **Orbit Analytics\u202f2.0** was launched in **September\u202f2025**, introducing real\u2011time forecasting capabilities[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Management projects FY2026 revenue of **Rs\u202f1,900\u202fcrore**[E1].",
+            "status": "verified"
+          },
+          {
+            "text": "All figures pertain to the **Q3 FY2025** reporting period.",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Summary of Zentro Dynamics Q3 FY2025 Investor Report' needs_documents=True needs_web=False search_queries=['Zentro Dynamics Q3 FY2025 Investor Report summary', 'Zentro Dynamics Q3 FY2025 financial highlights', 'Zentro Dynamics Q3 FY2025 key metrics'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      },
+      {
+        "query": "what did you say about their headcount?",
+        "answer": "Zentro Dynamics reported that its headcount was **1,840\u202femployees** at the end of Q3\u202fFY2025, according to the uploaded \u201cZentro Dynamics Q3 FY2025 Investor Report\u201d[E1].",
+        "final_status": "answered",
+        "latency_s": 117.7,
+        "claims": [
+          {
+            "text": "Zentro Dynamics reported that its headcount was **1,840\u202femployees** at the end of Q3\u202fFY2025, according to the uploaded \u201cZentro Dynamics Q3 FY2025 Inve",
+            "status": "verified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "document",
+            "name": "Zentro Dynamics Q3 FY2025 Investor Report.md"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='headcount of Zentro Dynamics in the Q3 FY2025 investor report' needs_documents=True needs_web=False search_queries=['Zentro Dynamics headcount Q3 FY2025', 'Zentro Dynamics employee count Q3 FY2025'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      }
+    ]
+  },
+  {
+    "case": "C5-no-doc-control",
+    "findings": [
+      "    turn1: answered_with_caveats 117.9s"
+    ],
+    "turns": [
+      {
+        "query": "According to the Zentro Dynamics report, what was their Q3 FY2025 revenue?",
+        "answer": "I\u2019m sorry, but none of the provided sources contain a \u201cZentro Dynamics\u201d report or any Q3\u202fFY\u202f2025 revenue figure for that company. Without a relevant citation I cannot give a verified answer.",
+        "final_status": "answered_with_caveats",
+        "latency_s": 117.9,
+        "claims": [
+          {
+            "text": "Without a relevant citation I cannot give a verified answer.",
+            "status": "unverified"
+          }
+        ],
+        "citations": [
+          {
+            "key": "E1",
+            "type": "web",
+            "name": "Zentro Internet - Home, Multifamily & Business Internet"
+          },
+          {
+            "key": "E2",
+            "type": "web",
+            "name": "Annual Report 2026 - BHP"
+          },
+          {
+            "key": "E3",
+            "type": "web",
+            "name": "Annual Report 2025"
+          },
+          {
+            "key": "E4",
+            "type": "web",
+            "name": "General Dynamics Q3 2025 Financial Results"
+          },
+          {
+            "key": "E5",
+            "type": "web",
+            "name": "Tubacex q3 financial results 2025 - Stainless steel pipe man"
+          },
+          {
+            "key": "E6",
+            "type": "web",
+            "name": "Steel Dynamics Reports Strong Q3 2025 Financial Performance "
+          },
+          {
+            "key": "E7",
+            "type": "web",
+            "name": "ServiceNow Financial Results for Q3 2025"
+          },
+          {
+            "key": "E8",
+            "type": "web",
+            "name": "Hurco reports $47.3M revenue and $2.3M net income in Q3 FY20"
+          },
+          {
+            "key": "E9",
+            "type": "web",
+            "name": "Untitled"
+          },
+          {
+            "key": "E10",
+            "type": "web",
+            "name": "Steel Dynamics Q3 2025 Earnings Call Announcement"
+          },
+          {
+            "key": "E11",
+            "type": "web",
+            "name": "Untitled"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Zentro Dynamics Q3 FY2025 revenue' needs_documents=False needs_web=True search_queries=['Zentro Dynamics Q3 FY2025 revenue', 'Zentro Dynamics Q3 2025 financial report revenue'] temporal_focus='Q3 FY2025' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

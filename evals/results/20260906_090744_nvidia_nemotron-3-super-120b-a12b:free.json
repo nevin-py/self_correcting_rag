@@ -1,0 +1,52 @@
+{
+ "results": [
+  {
+   "id": "world-cup-latest",
+   "query": "Who won the most recent FIFA World Cup and what was the score?",
+   "answer": "The most recent FIFA World Cup was the 2022 edition held in Qatar.\u202f[E1]  \nArgentina won the tournament, defeating France in the final.\u202f[E2]  \nThe match ended 3\u20133 after extra time, and Argentina secured victory with a 4\u20132 win in the penalty shootout.\u202f[E2][E5]",
+   "final_status": "answered",
+   "latency_s": 35.1,
+   "claims_total": 3,
+   "claims_verified": 3,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer directly addresses both parts of the question with specific names and scores, includes citations to sources, and is internally consistent."
+  },
+  {
+   "id": "capital-australia",
+   "query": "What is the capital of Australia?",
+   "answer": "The capital of Australia is Canberra.[E1][E2]",
+   "final_status": "answered",
+   "latency_s": 28.4,
+   "claims_total": 1,
+   "claims_verified": 1,
+   "claims_unverified": 0,
+   "judge_score": 5,
+   "judge_reason": "The answer is correct, complete, and directly answers the question."
+  },
+  {
+   "id": "india-capital-gdp",
+   "query": "Which city is India's financial capital and what is India's approximate GDP size in USD?",
+   "answer": "Mumbai is widely recognized as India's financial capital [E4].  \nIndia's nominal GDP in 2026 was approximately $4.15 trillion [E7].",
+   "final_status": "answered",
+   "latency_s": 28.0,
+   "claims_total": 2,
+   "claims_verified": 2,
+   "claims_unverified": 0,
+   "judge_score": 4,
+   "judge_reason": "The assistant correctly identifies Mumbai as India's financial capital, but provides a GDP estimate slightly above the reference range, indicating minor imprecision."
+  }
+ ],
+ "unstable_cases": [],
+ "repeats": 1,
+ "traces": [
+  {
+   "model": "nvidia/nemotron-3-super-120b-a12b:free",
+   "status": "ok",
+   "n": 6,
+   "avg_lat": 11924.416666666666,
+   "pt": 10092,
+   "ct": 302
+  }
+ ]
+}

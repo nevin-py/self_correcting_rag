@@ -1,0 +1,41 @@
+[
+  {
+    "scenario": "S1",
+    "description": "Person-ambiguity lookup (the atharva-bhede log)",
+    "findings": [
+      "S1: clarification in 159.1s",
+      "S1: clarification axis looks entity-level",
+      "S1: enumerated identity signals: 1",
+      "S1: no caveat section"
+    ],
+    "turns": [
+      {
+        "query": "who is atharva bhede give me his background",
+        "answer": "I found several distinct matches for that name and need one detail to answer accurately:\n\nWhich one did you mean?\n\n- Atharva Bhede \u2014 student at Rashtrasant Tukadoji Maharaj Nagpur University (RTMNU), hackathon participant, club founder, and intern\n- Atharva Bhide \u2014 MSCS student at USC, AI intern at Sigma Healthsense",
+        "final_status": "needs_clarification",
+        "provider_used": "openrouter",
+        "latency_s": 159.1,
+        "claims": [],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Atharva Bhede background' needs_documents=False needs_web=True search_queries=['Atharva Bhede biography', 'Atharva Bhede profile', 'Atharva Bhede background'] temporal_focus='' geography='' clarification_question=''"
+      },
+      {
+        "query": "the moneyworks4me one \u2014 what is his investment philosophy?",
+        "answer": "Atharva Bhide, Manager \u2013 Investment Advisory at MoneyWorks4Me, believes that lasting investment outcomes are built through structured thinking, not short-term reactions to market movements [E2]. He emphasizes a disciplined, repeatable system for making investment decisions\u2014defining, researching, constructing, and reviewing investments\u2014rather than relying on one-off recommendations [E5].",
+        "final_status": "answered",
+        "provider_used": "mechanical-fast-path",
+        "latency_s": 15.1,
+        "claims": [
+          {
+            "text": "Atharva Bhide, Manager \u2013 Investment Advisory at MoneyWorks4Me, believes that lasting investment outcomes are built throu",
+            "status": "verified"
+          },
+          {
+            "text": "He emphasizes a disciplined, repeatable system for making investment decisions\u2014defining, researching, constructing, and ",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What is the investment philosophy of the person associated with MoneyWorks4Me named Atharva Bhede?' needs_documents=True needs_web=True search_queries=['What is the investment philosophy of the person associated with MoneyWorks4Me named Atharva Bhede?'] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

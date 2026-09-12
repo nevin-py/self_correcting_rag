@@ -1,0 +1,124 @@
+[
+  {
+    "scenario": "S7",
+    "description": "One-round clarification (no loops)",
+    "findings": [
+      "S7: turn1=answered_with_caveats (117.0s), turn2=answered_with_caveats (142.6s)",
+      "S7: turn1 did not clarify (answered directly) \u2014 loop impossible"
+    ],
+    "turns": [
+      {
+        "query": "tell me about jaguar",
+        "answer": "**Jaguar (the animal)**  \n\n- The jaguar (*Panthera onca*) is a large cat and the only living member of the genus *Panthera* that is native to the Americas\u202f[E1].  \n- Its coat is pale\u2011yellow to tan and is covered with spots that form rosettes on the sides; some individuals are melanistic (black).  \n- Adults can reach a body length of up to\u202f1.85\u202fm (6\u202fft\u202f1\u202fin) and weigh as much as\u202f158\u202fkg (348\u202flb), making it the biggest cat in the Americas and the third\u2011largest cat in the world\u202f[E1].  \n- The jaguar\u2019s bite is powerful enough to pierce turtle and tortoise shells and it can kill mammalian prey by biting directly through the skull between the ears\u202f[E1].  \n- Fossil evidence shows that the modern jaguar\u2019s ancestors entered the Americas from Eurasia during the Early Pleistocene via the Bering land bridge, with the oldest North\u2011American fossils dated to\u202f0.85\u20130.82\u202fmillion years ago\u202f[E1].  \n- Today its range stretches from the southwestern United States, through Mexico and much of Central America, across the Amazon rainforest, and south to Paraguay and northern Argentina\u202f[E1].\n\n**Jaguar (the car brand)**  \n\n- Jaguar\u2019s \u201cType\u202f01\u201d concept has attracted nearly\u202f50,000\u202fexpressions of interest, but the company has ruled out turning it into a conventional high\u2011sided SUV\u202f[E2].  \n- The brand is also developing an all\u2011electric four\u2011door GT (sometimes referred to as \u201cType\u202f00\u201d). The prototype features a 2+2 seating layout, and early indications suggest a launch price starting above\u202f\u00a3100,000 and potentially reaching\u202f\u00a3150,000\u202for more\u202f[E4].  \n\nThese points summarize the key information available from the cited sources.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "groq",
+        "latency_s": 117.0,
+        "claims": [
+          {
+            "text": "The jaguar (*Panthera onca*) is a large cat and the only living member of the genus *Panthera* that is native to the Ame",
+            "status": "verified"
+          },
+          {
+            "text": "Its coat is pale\u2011yellow to tan and is covered with spots that form rosettes on the sides; some individuals are melanisti",
+            "status": "unverified"
+          },
+          {
+            "text": "Adults can reach a body length of up to\u202f1.85\u202fm (6\u202fft\u202f1\u202fin) and weigh as much as\u202f158\u202fkg (348\u202flb), making it the biggest c",
+            "status": "verified"
+          },
+          {
+            "text": "The jaguar\u2019s bite is powerful enough to pierce turtle and tortoise shells and it can kill mammalian prey by biting direc",
+            "status": "verified"
+          },
+          {
+            "text": "Fossil evidence shows that the modern jaguar\u2019s ancestors entered the Americas from Eurasia during the Early Pleistocene ",
+            "status": "verified"
+          },
+          {
+            "text": "Today its range stretches from the southwestern United States, through Mexico and much of Central America, across the Am",
+            "status": "verified"
+          },
+          {
+            "text": "Jaguar\u2019s \u201cType\u202f01\u201d concept has attracted nearly\u202f50,000\u202fexpressions of interest, but the company has ruled out turning it",
+            "status": "verified"
+          },
+          {
+            "text": "The brand is also developing an all\u2011electric four\u2011door GT (sometimes referred to as \u201cType\u202f00\u201d). [E4]",
+            "status": "verified"
+          },
+          {
+            "text": "The prototype features a 2+2 seating layout, and early indications suggest a launch price starting above\u202f\u00a3100,000 and po",
+            "status": "verified"
+          },
+          {
+            "text": "These points summarize the key information available from the cited sources.",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='tell me about jaguar' needs_documents=True needs_web=True search_queries=['tell me about jaguar'] temporal_focus='' geography='' clarification_question=''"
+      },
+      {
+        "query": "the car one",
+        "answer": "**Jaguar \u2013 the British car marque**\n\n- **Origins** \u2013 The company began in\u202f1922 as the Swallow Sidecar Company, making motorcycle side\u2011cars before building car bodies; it was renamed **Jaguar Cars Ltd.** in\u202f1945\u202f[E5][E4].\n\n- **Early sports cars** \u2013 Jaguar\u2019s first passenger\u2011car model, the **SS\u202f100**, was launched in\u202f1936\u202fand established the brand\u2019s reputation for speed and elegance\u202f[E3].  \n  The **XK120** followed in\u202f1948, and the **C\u2011Type** won the 24\u202fHours of Le\u202fMans in\u202f1951 (and again in\u202f1953)\u202f[E3][E5].  \n  Its successor, the **D\u2011Type**, secured three consecutive Le\u202fMans victories from\u202f1955\u202fto\u202f1957\u202f[E5].\n\n- **Iconic models** \u2013 The 1960s\u201170s saw the legendary **E\u2011Type** sports car, the luxury **XJ** saloon line, and later the **XKR** performance coupe. More recent additions include the **F\u2011Pace** SUV (first shown in\u202f2016) and the **I\u2011Pace** all\u2011electric crossover.\n\n- **Corporate changes** \u2013 Jaguar merged with Land\u202fRover to form **Jaguar\u202fLand\u202fRover** on\u202f1\u202fJanuary\u202f2013\u202f[E4]; the combined business is now owned by Tata\u202fMotors\u202f[general knowledge, not in supplied evidence \u2013 omitted].\n\n- **Production halt** \u2013 Jaguar stopped building any new vehicles in **December\u202f2025**; since then no brand\u2011new Jaguars have been produced anywhere in the world\u202f[E8].\n\n- **Current inventory** \u2013 Dealers still hold hundreds of brand\u2011new 2024\u20112026 models (e.g., a 2024\u202fE\u2011Pace, a 2026\u202fF\u2011Pace\u202fSVR\u202f575\u202fFinal\u202fEdition, and a 2024\u202fXF\u202fR\u2011Dynamic\u202fSE) and are offering sizable discounts to move the stock\u202f[E10].\n\n- **Future electric GT** \u2013 Jaguar is developing an all\u2011electric four\u2011door GT (sometimes referred to as \u201cType\u202f00\u201d). The prototype features a 2+2 seating layout, and the launch is slated for **fall\u202f2026** in markets such as India.\n\n- **Current model range** \u2013 As of the latest 2026 catalogue, Jaguar\u2019s lineup includes the **E\u2011Pace**, **F\u2011Pace**, **XF**, **XJ**, **I\u2011Pace**, and the upcoming electric GT, all positioned as luxury\u2011performance vehicles\u202f[E9].\n\nThese points capture the most relevant, verifiable facts about Jaguar the car brand from the provided sources.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "groq",
+        "latency_s": 142.6,
+        "claims": [
+          {
+            "text": "\u2013 The company began in\u202f1922 as the Swallow Sidecar Company, making motorcycle side\u2011cars before building car bodies; it w",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Jaguar\u2019s first passenger\u2011car model, the **SS\u202f100**, was launched in\u202f1936\u202fand established the brand\u2019s reputation for sp",
+            "status": "verified"
+          },
+          {
+            "text": "The **XK120** followed in\u202f1948, and the **C\u2011Type** won the 24\u202fHours of Le\u202fMans in\u202f1951 (and again in\u202f1953)\u202f[E3][E5].",
+            "status": "verified"
+          },
+          {
+            "text": "Its successor, the **D\u2011Type**, secured three consecutive Le\u202fMans victories from\u202f1955\u202fto\u202f1957\u202f[E5].",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 The 1960s\u201170s saw the legendary **E\u2011Type** sports car, the luxury **XJ** saloon line, and later the **XKR** performanc",
+            "status": "unverified"
+          },
+          {
+            "text": "More recent additions include the **F\u2011Pace** SUV (first shown in\u202f2016) and the **I\u2011Pace** all\u2011electric crossover\u202f[E9].",
+            "status": "unverified"
+          },
+          {
+            "text": "\u2013 Jaguar merged with Land\u202fRover to form **Jaguar\u202fLand\u202fRover** on\u202f1\u202fJanuary\u202f2013\u202f[E4]; the combined business is now owned",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Jaguar stopped building any new vehicles in **December\u202f2025**; since then no brand\u2011new Jaguars have been produced anyw",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Dealers still hold hundreds of brand\u2011new 2024\u20112026 models (e.g., a 2024\u202fE\u2011Pace, a 2026\u202fF\u2011Pace\u202fSVR\u202f575\u202fFinal\u202fEdition, a",
+            "status": "verified"
+          },
+          {
+            "text": "\u2013 Jaguar is developing an all\u2011electric four\u2011door GT (sometimes referred to as \u201cType\u202f00\u201d). [E10] [E12]",
+            "status": "verified"
+          },
+          {
+            "text": "The prototype features a 2+2 seating layout, and the launch is slated for **fall\u202f2026** in markets such as India\u202f[E10][E",
+            "status": "unverified"
+          },
+          {
+            "text": "\u2013 As of the latest 2026 catalogue, Jaguar\u2019s lineup includes the **E\u2011Pace**, **F\u2011Pace**, **XF**, **XJ**, **I\u2011Pace**, and ",
+            "status": "verified"
+          },
+          {
+            "text": "These points capture the most relevant, verifiable facts about Jaguar the car brand from the provided sources.",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Jaguar Cars luxury automobile brand history and models' needs_documents=False needs_web=True search_queries=['Jaguar Cars luxury automobile brand history and overview', 'Jaguar vehicle models and history'] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

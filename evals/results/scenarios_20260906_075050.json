@@ -1,0 +1,32 @@
+[
+  {
+    "scenario": "S1",
+    "description": "Person-ambiguity lookup (the atharva-bhede log)",
+    "findings": [
+      "S1: clarification in 5.7s",
+      "S1: clarification axis looks entity-level",
+      "S1: enumerated identity signals: 0",
+      "S1: no caveat section"
+    ],
+    "turns": [
+      {
+        "query": "who is atharva bhede give me his background",
+        "answer": "Could you clarify which Atharva Bhede you're referring to? There may be multiple individuals with this name, such as a researcher, student, or professional in fields like technology, science, or academia.",
+        "final_status": "needs_clarification",
+        "provider_used": "openrouter",
+        "latency_s": 5.7,
+        "claims": [],
+        "understanding": "mode=<QueryMode.CLARIFICATION: 'clarification'> rewritten_query='' needs_documents=False needs_web=False search_queries=[] temporal_focus='' geography='' clarification_question=\"Could you clarify which Atharva Bhede you're referring to? There may be multiple individuals with this name, such as a researcher, student, or professional in fields like technology, science, or academia.\""
+      },
+      {
+        "query": "the moneyworks4me one \u2014 what is his investment philosophy?",
+        "answer": "Could you clarify which 'MoneyWorks4Me' individual you're referring to? There may be multiple people associated with the brand, such as the founder, a content creator, or a financial advisor. Please confirm the full name or role if possible.",
+        "final_status": "needs_clarification",
+        "provider_used": "openrouter",
+        "latency_s": 3.9,
+        "claims": [],
+        "understanding": "mode=<QueryMode.CLARIFICATION: 'clarification'> rewritten_query='What is the investment philosophy of the founder or main financial advisor of MoneyWorks4Me?' needs_documents=False needs_web=True search_queries=['MoneyWorks4Me founder investment philosophy', 'MoneyWorks4Me financial advisor investment strategy', 'MoneyWorks4Me investment principles'] temporal_focus='' geography='' clarification_question=\"Could you clarify which 'MoneyWorks4Me' individual you're referring to? There may be multiple people associated with the brand, such as the founder, a content creator, or a financial advisor. Please confirm the full name or role if possible.\""
+      }
+    ]
+  }
+]

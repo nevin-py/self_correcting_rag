@@ -1,0 +1,81 @@
+[
+  {
+    "scenario": "S1",
+    "description": "Person-ambiguity lookup (the atharva-bhede log)",
+    "findings": [
+      "S1: clarification in 137.8s",
+      "S1: clarification axis looks entity-level",
+      "S1: enumerated identity signals: 0",
+      "S1: no caveat section"
+    ],
+    "turns": [
+      {
+        "query": "who is atharva bhede give me his background",
+        "answer": "I found several distinct matches for that name and need one detail to answer accurately:\n\nWhich one did you mean?\n\n- Atharva Bhide \u2013 quantitative\u2011finance professional, Senior Consultant at EY (E1)\n- Atharva Bhide \u2013 Operations Manager at Google Cloud, industrial\u2011engineer background (E2)\n- Atharva Bhide/Bhede \u2013 Instagram user @atharva_onicares (E3)",
+        "final_status": "needs_clarification",
+        "provider_used": "openrouter",
+        "latency_s": 137.8,
+        "claims": [],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Atharva Bhede background' needs_documents=False needs_web=True search_queries=['Atharva Bhede biography', 'Atharva Bhede profile', 'Atharva Bhede background'] temporal_focus='' geography='' clarification_question=''"
+      },
+      {
+        "query": "the moneyworks4me one \u2014 what is his investment philosophy?",
+        "answer": "Atharva\u202fBhide\u2019s investment philosophy, as expressed in his MoneyWorks4Me writings, centers on a disciplined, long\u2011term, structured approach rather than reacting to short\u2011term market noise. Key elements include:\n\n- **Structured thinking over short\u2011term reactions** \u2013 lasting outcomes come from a thoughtful process, not from panic\u2011driven moves[E2\u2020L1-L2].  \n- **Stay invested for the long term** \u2013 keep the surplus earmarked for long\u2011term investing and avoid selling recommended stocks in volatile periods unless advised[E3\u2020L1-L4].  \n- **Avoid extreme expectations and chasing high returns** \u2013 most disappointment stems from unrealistic expectations; don\u2019t chase very high returns by buying more when prices fall[E3\u2020L5-L9].  \n- **Diversify and rebalance** \u2013 build a diversified portfolio across asset classes and rebalance periodically to maintain the target allocation[E9\u2020L1-L4].  \n- **Risk management and goal\u2011setting** \u2013 set clear financial goals, maintain an emergency fund, and align investments with risk tolerance and time horizon[E9\u2020L5-L8].  \n- **Long\u2011term perspective and discipline** \u2013 treat investing as a long\u2011term endeavor, stay disciplined during market volatility, and avoid emotional decisions[E9\u2020L9-L13].  \n- **Stay informed** \u2013 continuously educate yourself about investment options and markets to make informed choices[E9\u2020L14-L16].\n\nTogether, these principles form his core investment philosophy: a structured, goal\u2011based, diversified, and disciplined long\u2011term strategy that resists short\u2011term market temptations.\n\n\nCaveats:\nThe following points could not be fully verified against the retrieved evidence:\n- Key elements include:",
+        "final_status": "answered_with_caveats",
+        "provider_used": "openrouter",
+        "latency_s": 73.2,
+        "claims": [
+          {
+            "text": "Structured thinking over short\u2011term reactions \u2013 lasting outcomes come from a thoughtful process, not from panic\u2011driven m",
+            "status": "verified"
+          },
+          {
+            "text": "Stay invested for the long term \u2013 keep the surplus earmarked for long\u2011term investing and avoid selling recommended stock",
+            "status": "verified"
+          },
+          {
+            "text": "Avoid extreme expectations and chasing high returns \u2013 most disappointment stems from unrealistic expectations; don\u2019t cha",
+            "status": "verified"
+          },
+          {
+            "text": "Diversify and rebalance \u2013 build a diversified portfolio across asset classes and rebalance periodically to maintain the ",
+            "status": "verified"
+          },
+          {
+            "text": "Risk management and goal\u2011setting \u2013 set clear financial goals, maintain an emergency fund, and align investments with ris",
+            "status": "verified"
+          },
+          {
+            "text": "Long\u2011term perspective and discipline \u2013 treat investing as a long\u2011term endeavor, stay disciplined during market volatilit",
+            "status": "verified"
+          },
+          {
+            "text": "Stay informed \u2013 continuously educate yourself about investment options and markets to make informed choices.",
+            "status": "verified"
+          },
+          {
+            "text": "Atharva\u202fBhide\u2019s investment philosophy, as expressed in his MoneyWorks4Me writings, centers on a disciplined, long\u2011term, ",
+            "status": "unverified"
+          },
+          {
+            "text": "Key elements include:",
+            "status": "unverified"
+          },
+          {
+            "text": "\u2013 lasting outcomes come from a thoughtful process, not from panic\u2011driven moves[E2\u2020L1-L2].",
+            "status": "unverified"
+          },
+          {
+            "text": "\u2013 most disappointment stems from unrealistic expectations; don\u2019t chase very high returns by buying more when prices fall",
+            "status": "unverified"
+          },
+          {
+            "text": "Together, these principles form his core investment philosophy: a structured, goal\u2011based, diversified, and disciplined l",
+            "status": "unverified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Atharva Bhide investment philosophy Moneyworks4me' needs_documents=False needs_web=True search_queries=['Atharva Bhide investment philosophy', 'Atharva Bhide Moneyworks4me', 'Atharva Bhide investment strategy'] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

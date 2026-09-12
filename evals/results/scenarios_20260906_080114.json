@@ -1,0 +1,32 @@
+[
+  {
+    "scenario": "S1",
+    "description": "Person-ambiguity lookup (the atharva-bhede log)",
+    "findings": [
+      "S1: clarification in 116.7s",
+      "S1: clarification axis looks entity-level",
+      "S1: enumerated identity signals: 0",
+      "S1: no caveat section"
+    ],
+    "turns": [
+      {
+        "query": "who is atharva bhede give me his background",
+        "answer": "I found several distinct matches for that name and need one detail to answer accurately:\n\nWhich one did you mean?\n\n- Atharva Bhede \u2013 React Native Developer at ONICARES AI, Top\u201130 participant in ISRO Bhartiya Antariksh Hackathon, graduate of St.\u202fVincent Pallotti College of Engineering.\n- Atharva Bhide \u2013 Operations Manager at Google Cloud, industrial engineer specializing in AI manufacturing scale\u2011up and supply\u2011chain resilience.",
+        "final_status": "needs_clarification",
+        "provider_used": "openrouter",
+        "latency_s": 116.7,
+        "claims": [],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='who is Atharva Bhede and what is his background' needs_documents=True needs_web=True search_queries=['who is Atharva Bhede and what is his background'] temporal_focus='' geography='' clarification_question=''"
+      },
+      {
+        "query": "the moneyworks4me one \u2014 what is his investment philosophy?",
+        "answer": "I don't have enough reliable information to answer this question.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "openrouter",
+        "latency_s": 6.9,
+        "claims": [],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What is the investment philosophy of the person associated with MoneyWorks4Me?' needs_documents=True needs_web=False search_queries=['What is the investment philosophy of the person associated with MoneyWorks4Me?'] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

@@ -1,0 +1,21 @@
+[
+  {
+    "scenario": "S4",
+    "description": "Greeting (conversational short-circuit)",
+    "findings": [
+      "S4: status=conversational latency=9.5s",
+      "S4: greeting fast enough"
+    ],
+    "turns": [
+      {
+        "query": "hi",
+        "answer": "Hi! I'm here to help you with answers to your questions\u2014whether it's from documents you share or information from the web. Just let me know what you need!",
+        "final_status": "conversational",
+        "provider_used": "openrouter+primary",
+        "latency_s": 9.5,
+        "claims": [],
+        "understanding": "mode=<QueryMode.CONVERSATIONAL: 'conversational'> rewritten_query='hi' needs_documents=False needs_web=False search_queries=[] temporal_focus='' geography='' clarification_question=''"
+      }
+    ]
+  }
+]

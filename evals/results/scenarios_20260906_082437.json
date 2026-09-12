@@ -1,0 +1,64 @@
+[
+  {
+    "scenario": "S2",
+    "description": "Cross-turn grounding on a factual topic",
+    "findings": [
+      "S2: turn1 status=answered_with_caveats (57.3s), turn2 status=answered (39.0s)",
+      "S2: follow-up answered cleanly (pinned facts + fresh evidence)"
+    ],
+    "turns": [
+      {
+        "query": "What is the capital of Australia and why is it not Sydney?",
+        "answer": "The capital of Australia is Canberra. [E1]  \nCanberra was founded in 1913. [E1]  \nIt was chosen as a compromise between Sydney and Melbourne. [E2]  \nNew South Wales wanted the capital to be in Sydney while Victoria wanted it in Melbourne. [E5]  \nBecause of this disagreement, a new city was built rather than selecting either existing city.",
+        "final_status": "answered_with_caveats",
+        "provider_used": "openrouter",
+        "latency_s": 57.3,
+        "claims": [
+          {
+            "text": "The capital of Australia is Canberra.",
+            "status": "verified"
+          },
+          {
+            "text": "Canberra was founded in 1913.",
+            "status": "verified"
+          },
+          {
+            "text": "It was chosen as a compromise between Sydney and Melbourne.",
+            "status": "verified"
+          },
+          {
+            "text": "New South Wales wanted the capital to be in Sydney while Victoria wanted it in Melbourne.",
+            "status": "verified"
+          },
+          {
+            "text": "Because of this disagreement, a new city was built rather than selecting either existing city.",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='What is the capital of Australia and why is it not Sydney?' needs_documents=False needs_web=True search_queries=['capital of Australia', 'why is Canberra the capital of Australia not Sydney'] temporal_focus='' geography='Australia' clarification_question=''"
+      },
+      {
+        "query": "and what is its population?",
+        "answer": "Canberra's estimated resident population was 487,202 at 31\u202fDecember\u202f2025 (ABS) [E1].  \nWith an annual growth of about\u202f1.3%, it is projected to pass 490,000 residents during 2026 [E1].  \nSeparate metro\u2011area estimates for 2026 put the population at 489,000, a 1.24% increase from 2025 [E3][E5].",
+        "final_status": "answered",
+        "provider_used": "mechanical-fast-path",
+        "latency_s": 39.0,
+        "claims": [
+          {
+            "text": "Canberra's estimated resident population was 487,202 at 31\u202fDecember\u202f2025 (ABS) [E1].",
+            "status": "verified"
+          },
+          {
+            "text": "With an annual growth of about\u202f1.3%, it is projected to pass 490,000 residents during 2026 [E1].",
+            "status": "verified"
+          },
+          {
+            "text": "Separate metro\u2011area estimates for 2026 put the population at 489,000, a 1.24% increase from 2025 [E3][E5].",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='population of Canberra' needs_documents=False needs_web=True search_queries=['Canberra', 'population of Canberra', 'Canberra population 2024'] temporal_focus='latest' geography='Canberra' clarification_question=''"
+      }
+    ]
+  }
+]

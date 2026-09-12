@@ -1,0 +1,26 @@
+[
+  {
+    "scenario": "S5",
+    "description": "Simple single-fact question (fast path candidate)",
+    "findings": [
+      "S5: status=answered latency=39.1s provider=mechanical-fast-path",
+      "S5: fast path fired \u2014 judge skipped"
+    ],
+    "turns": [
+      {
+        "query": "What is the tallest mountain on Earth?",
+        "answer": "Mauna Kea is the tallest mountain on Earth when measured from base to peak. [E1][E2]",
+        "final_status": "answered",
+        "provider_used": "mechanical-fast-path",
+        "latency_s": 39.1,
+        "claims": [
+          {
+            "text": "Mauna Kea is the tallest mountain on Earth when measured from base to peak. [E1] [E2]",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='tallest mountain on Earth' needs_documents=False needs_web=True search_queries=['tallest mountain on Earth', 'highest mountain above sea level', 'Mount Everest elevation'] temporal_focus='' geography='Earth' clarification_question=''"
+      }
+    ]
+  }
+]

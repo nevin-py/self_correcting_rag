@@ -1,0 +1,30 @@
+[
+  {
+    "scenario": "S3",
+    "description": "Figure-heavy question that may need a repair pass",
+    "findings": [
+      "S3: status=answered_with_caveats latency=82.4s",
+      "S3: claims verified=2/2"
+    ],
+    "turns": [
+      {
+        "query": "What was Japan's GDP growth rate in 2024 and what is the latest inflation rate there?",
+        "answer": "There is no evidence provided for Japan's GDP growth rate for the year in question.  \n\nThe most recent inflation figure available is for July\u202f2026, when Japan\u2019s year\u2011over\u2011year inflation rate was\u202f2.1\u202f%[E4].",
+        "final_status": "answered_with_caveats",
+        "provider_used": "openrouter",
+        "latency_s": 82.4,
+        "claims": [
+          {
+            "text": "There is no evidence provided for Japan's GDP growth rate for the year in question.",
+            "status": "verified"
+          },
+          {
+            "text": "The most recent inflation figure available is for July\u202f2026, when Japan\u2019s year\u2011over\u2011year inflation rate was\u202f2.1\u202f%.",
+            "status": "verified"
+          }
+        ],
+        "understanding": "mode=<QueryMode.RESEARCH: 'research'> rewritten_query='Japan GDP growth rate 2024 and latest inflation rate Japan' needs_documents=False needs_web=True search_queries=['Japan GDP growth rate 2024', 'Japan inflation rate latest 2024', 'Japan inflation rate 2024'] temporal_focus='2024' geography='Japan' clarification_question=''"
+      }
+    ]
+  }
+]
