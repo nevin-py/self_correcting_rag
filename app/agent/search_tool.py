@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import html as html_lib
 import json
 import logging
@@ -230,66 +231,105 @@ async def search_wiki(query: str, lang: str = "en") -> Optional[str]:
 
 async def _wiki_text(query: str, lang: str = "en") -> Optional[str]:
     start = time.perf_counter()
-    clean_query = query.strip().replace(" ", "_")
-    encoded_query = urllib.parse.quote(clean_query)
-    
     base_domain = f"https://{lang}.wikipedia.org"
-    direct_url = f"{base_domain}/wiki/{encoded_query}"
-    
     headers = {
         "User-Agent": "MySelfCorrectingRAGBot/1.0 (contact@your-domain.com)"
     }
-
     client = get_http_client()
-    response = None
-
+    skip_direct = _looks_like_search_phrase(query)
+    # #region agent log
     try:
-        response = await client.get(direct_url, headers=headers, timeout=10.0)
-        response.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            logger.info("Direct Wikipedia page missing (404). Falling back to search for: %s", query)
-            search_url = f"{base_domain}/w/index.php"
-            search_params = {"search": query}
+        with open(
+            "/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-05b494.log",
+            "a",
+            encoding="utf-8",
+        ) as _df:
+            _df.write(json.dumps({
+                "sessionId": "05b494",
+                "hypothesisId": "C",
+                "location": "search_tool.py:_wiki_text",
+                "message": "wiki_start",
+                "data": {"skip_direct": skip_direct, "q_words": len(query.split())},
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
-            try:
-                response = await client.get(search_url, params=search_params, headers=headers, timeout=10.0)
-                response.raise_for_status()
-            except httpx.HTTPError as search_err:
-                logger.error("Wikipedia search backup route failed: %s", str(search_err))
+    response = None
+    if not skip_direct:
+        clean_query = query.strip().replace(" ", "_")
+        encoded_query = urllib.parse.quote(clean_query)
+        direct_url = f"{base_domain}/wiki/{encoded_query}"
+        try:
+            response = await client.get(direct_url, headers=headers, timeout=10.0)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                logger.warning("Wikipedia returned status code %s for query: %s", e.response.status_code, query)
                 return None
-        else:
-            logger.warning("Wikipedia returned status code %s for query: %s", e.response.status_code, query)
+            response = None
+        except httpx.RequestError as e:
+            logger.error("Primary network request failed for Wikipedia query '%s': %s", query, str(e))
             return None
 
-    except httpx.RequestError as e:
-        logger.error("Primary network request failed for Wikipedia query '%s': %s", query, str(e))
-        return None
-
-    if not response:
-        return None
-
-    soup = _bs(response.text)
-
-    if soup.title and "Search results" in soup.title.text:
-        first_res = soup.find("div", class_="mw-search-result-heading") or soup.find("div", id="mw-search-result-heading")
-        if not first_res:
-            logger.info("No matching Wikipedia search results found for: %s", query)
+    if response is None:
+        api_url = f"{base_domain}/w/api.php"
+        try:
+            api = await client.get(
+                api_url,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": 5,
+                    "format": "json",
+                },
+                headers=headers,
+                timeout=10.0,
+            )
+            api.raise_for_status()
+            hits = (api.json().get("query") or {}).get("search") or []
+        except (httpx.HTTPError, ValueError) as search_err:
+            logger.error("Wikipedia search API failed: %s", str(search_err))
             return None
-
-        link_tag = first_res.find("a")
-        if not link_tag or not link_tag.get("href"):
+        title = next(
+            (h.get("title") for h in hits if _wiki_title_relevant(query, h.get("title") or "")),
+            None,
+        )
+        # #region agent log
+        try:
+            with open(
+                "/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-05b494.log",
+                "a",
+                encoding="utf-8",
+            ) as _df:
+                _df.write(json.dumps({
+                    "sessionId": "05b494",
+                    "hypothesisId": "C",
+                    "location": "search_tool.py:_wiki_text",
+                    "message": "wiki_api",
+                    "data": {
+                        "picked": title,
+                        "top": [h.get("title") for h in hits[:3]],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        if not title:
+            logger.info("Wikipedia search had no relevant title for: %s", query)
             return None
-
-        target_url = f"{base_domain}{link_tag['href']}"
+        target_url = f"{base_domain}/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
         try:
             response = await client.get(target_url, headers=headers, timeout=10.0)
             response.raise_for_status()
-            soup = _bs(response.text)
         except httpx.HTTPError as e:
-            logger.error("Failed to fetch article from search result link: %s", str(e))
+            logger.error("Failed to fetch Wikipedia article %s: %s", title, e)
             return None
 
+    soup = _bs(response.text)
     result = _extract_wiki_text(soup)
     if soup.title and soup.title.text:
         raw = soup.title.text.strip()
@@ -457,7 +497,7 @@ async def _tavily_structured(
 ) -> List[Dict[str, Any]]:
     kwargs: Dict[str, Any] = {
         "query": query,
-        "search_depth": "advanced",
+        "search_depth": "basic",
         "max_results": max_results,
         "include_answer": False,
         "topic": topic,
@@ -526,6 +566,29 @@ async def _searxng_structured(
 _QUESTIONY_RE = re.compile(r"\b(who|what|when|where|why|how|which|list of)\b|\?", re.I)
 
 
+def _looks_like_search_phrase(query: str) -> bool:
+    """Planner queries are lowercase keyword strings, not article titles.
+
+    Hitting /wiki/top_young_football_prospects_2026 404s then picks an
+    unrelated first search hit (e.g. an Everton season page).
+    """
+    words = query.strip().split()
+    if len(words) >= 4:
+        return True
+    if len(words) >= 3 and query == query.lower():
+        return True
+    return False
+
+
+def _wiki_title_relevant(query: str, title: str) -> bool:
+    q, t = query.lower().strip(), (title or "").lower().strip()
+    if not q or not t:
+        return False
+    if q in t or t in q:
+        return True
+    return difflib.SequenceMatcher(None, q, t).ratio() >= 0.42
+
+
 async def search_structured(  # noqa: C901
     query: str,
     max_results: int = 10,
@@ -553,27 +616,16 @@ async def search_structured(  # noqa: C901
     # FIFA World Cup final") whose body states the fact outright — far stronger
     # evidence than news snippets. Question-shaped queries don't.
     wiki_direct = None
-    if not _QUESTIONY_RE.search(query):
+    if not _QUESTIONY_RE.search(query) and not _looks_like_search_phrase(query):
         wiki_direct = asyncio.ensure_future(_safe(search_wiki_with_title(query), "wikipedia-direct"))
 
     tasks = []
     if allow_tavily:
+        # One Tavily call per planner query. News+variant used to 3× every
+        # query (9 calls for a 3-query plan) — quota burn and extra latency.
         tasks.append(
             _safe(_tavily_structured(primary, max_results, topic="general", time_range="year"), "tavily-general")
         )
-        tasks.append(
-            _safe(
-                _tavily_structured(primary, max(4, max_results // 2), topic="news", time_range="year"),
-                "tavily-news",
-            )
-        )
-        if len(variants) > 1:
-            tasks.append(
-                _safe(
-                    _tavily_structured(variants[1], max(3, max_results // 3), topic="general", time_range="year"),
-                    "tavily-variant",
-                )
-            )
     if _searxng_base():
         tasks.append(_safe(_searxng_structured(primary, max_results), "searxng"))
     if _searxng_base() and len(variants) > 1:
@@ -624,6 +676,8 @@ async def search_structured(  # noqa: C901
         targets = [r for r in results if r.get("url")][:fetch_n]
 
         async def _fetch(url: str) -> str:
+            if url.rstrip("/").endswith("/feed") or "rss" in url.lower():
+                return ""
             # Bounded by a process-wide semaphore: each fetch+parse holds an
             # lxml tree worth ~10x its input size; 20 concurrent queries each
             # fetching 2 pages unbounded was a multi-hundred-MB spike.

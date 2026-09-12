@@ -74,26 +74,55 @@ def origin_matches_pattern(origin: str, pattern: str) -> bool:
     return bool(re.fullmatch(rx, oh))
 
 
+_VERCEL_DEPLOY_HASH = re.compile(r"^[a-z0-9]{8,14}$")
+
+
+def _vercel_project_slugs(hostname: str) -> set[str]:
+    """Hyphen prefixes of a Vercel host (min two labels).
+
+    Production aliases look like ``self-correcting-rag-kappa`` while git/preview
+    hosts are ``self-correcting-rag-git-main-sovrin1`` or
+    ``self-correcting-<hash>-sovrin1``. Sharing a slug prefix is enough to
+    treat them as the same Vercel project without a CORS glob in env.
+    """
+    if not hostname.endswith(".vercel.app"):
+        return set()
+    labels = hostname[: -len(".vercel.app")].split("-")
+    return {"-".join(labels[:n]) for n in range(2, len(labels) + 1)}
+
+
 def is_vercel_preview_of_allowed(origin: str, allowed_origins: set[str]) -> bool:
-    """Allow Vercel *preview* URLs for a project already listed in CORS_ORIGINS.
+    """Allow Vercel git/preview URLs for a project already listed in CORS_ORIGINS.
 
-    Prod:  https://self-correcting-sovrin1.vercel.app
-    Preview: https://self-correcting-<hash>-sovrin1.vercel.app
+    Classic: prod ``self-correcting-sovrin1`` → preview inserts one hash label.
+    Alias:   prod ``self-correcting-rag-kappa`` →
+             ``…-git-main-sovrin1`` / ``self-correcting-<hash>-sovrin1``.
 
-    Does NOT allow arbitrary *.vercel.app (those stay blocked).
+    Does NOT allow arbitrary ``*.vercel.app``.
     """
     oh = _host(origin)
     if not oh.endswith(".vercel.app"):
         return False
     p = oh[: -len(".vercel.app")].split("-")
+    allowed_slugs: set[str] = set()
     for allowed in allowed_origins:
         ah = _host(allowed)
         if not ah.endswith(".vercel.app"):
             continue
         a = ah[: -len(".vercel.app")].split("-")
-        if len(p) != len(a) + 1:
+        allowed_slugs |= _vercel_project_slugs(ah)
+        if len(p) == len(a) + 1 and any(p[:i] + p[i + 1 :] == a for i in range(len(p))):
+            return True
+    leaf = "-".join(p)
+    for slug in sorted(allowed_slugs, key=len, reverse=True):
+        prefix = slug + "-"
+        if not leaf.startswith(prefix):
             continue
-        if any(p[:i] + p[i + 1 :] == a for i in range(len(p))):
+        rest = leaf[len(prefix) :]
+        parts = rest.split("-")
+        if rest.startswith("git-") and len(parts) >= 2:
+            return True
+        if len(parts) >= 2 and _VERCEL_DEPLOY_HASH.fullmatch(parts[0]):
             return True
     return False
 

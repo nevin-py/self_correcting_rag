@@ -58,9 +58,36 @@ const SHORTCUTS: Record<string, { label: string; icon: React.ReactNode }> = {
   ask_clarification: { label: "Asked for clarification", icon: <AlertTriangle size={13} /> },
 };
 
-function fmtMs(ms?: number): string {
-  if (typeof ms !== "number" || ms <= 0) return "";
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+function SearchScaffold({ queries, running }: { queries: string[]; running: boolean }) {
+  if (!queries.length) return null;
+  return (
+    <div className="border-t border-border bg-surface-inset px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="label-caps">Search graph</span>
+        {running && (
+          <span className="flex items-center gap-1 font-mono text-[9px] text-accent-bright">
+            <Loader2 size={9} className="animate-spin" /> querying
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {queries.map((q, i) => (
+          <div key={`${i}-${q}`} className="flex items-center gap-2">
+            <span className="w-4 shrink-0 text-center font-mono text-[9px] text-text-muted">{i + 1}</span>
+            <span
+              className={cn(
+                "h-1.5 w-1.5 shrink-0 rounded-full",
+                running ? "animate-pulse bg-accent-bright" : "bg-accent"
+              )}
+            />
+            <div className="min-w-0 flex-1 rounded-sm border border-border bg-surface px-2 py-1">
+              <p className="truncate font-mono text-[10px] text-text-primary">{q}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export default function PipelineTracker({
@@ -97,6 +124,8 @@ export default function PipelineTracker({
     (e) => !GRAPH_NODES.some((n) => n.id === e.node)
   );
 
+  const searchQueries = [...events].reverse().find((e) => e.queries && e.queries.length > 0)?.queries ?? [];
+  const gathering = nodes.find((n) => n.id === "gather_evidence")?.status === "running";
   const repairPasses = nodes.find((n) => n.id === "generate_answer")?.passes ?? 0;
   const started = events.length > 0;
   const finished =
@@ -271,6 +300,8 @@ export default function PipelineTracker({
           );
         })}
       </div>
+
+      <SearchScaffold queries={searchQueries} running={Boolean(isStreaming && gathering)} />
 
       {hasConflicts && !isStreaming && (
         <div className="border-t border-accent bg-accent-glow px-3 py-2">

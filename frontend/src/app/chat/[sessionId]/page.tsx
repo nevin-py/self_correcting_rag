@@ -120,6 +120,9 @@ export default function ChatSessionPage() {
             <EmptyWorkspace />
           ) : (
             <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
+              {isStreaming && (
+                <PipelineTracker events={pipelineEvents} isStreaming />
+              )}
               {messages.map((msg, i) => (
                 <ChatMessage
                   key={msg.id}

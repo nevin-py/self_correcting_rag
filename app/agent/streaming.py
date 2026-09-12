@@ -226,10 +226,14 @@ async def _stream_query(
                     accumulated_state.update(out)
     
                 detail = ""
+                queries: list[str] = []
                 if name == "classify_and_plan":
                     u = out.get("understanding") if isinstance(out, dict) else None
                     mode = getattr(u, "mode", None)
+                    queries = [q for q in (getattr(u, "search_queries", None) or []) if str(q).strip()]
                     detail = f"Mode: {getattr(mode, 'value', mode)}"
+                    if queries:
+                        detail += " · " + " | ".join(queries[:3])
                 elif name == "gather_evidence":
                     ev_count = len((out.get("evidence") or []) if isinstance(out, dict) else [])
                     detail = f"Found {ev_count} evidence items"
@@ -248,7 +252,11 @@ async def _stream_query(
                     payload["node_ms"] = node_ms
                 if detail:
                     payload["detail"] = detail
+                if queries:
+                    payload["queries"] = queries
                 yield f"event: status\ndata: {json.dumps(payload)}\n\n"
+                if queries:
+                    yield f"event: search_plan\ndata: {json.dumps({'queries': queries, 'elapsed_ms': total_ms})}\n\n"
     
                 if name in ("gather_evidence", "generate_answer") and isinstance(out, dict):
                     evid = accumulated_state.get("evidence") or []

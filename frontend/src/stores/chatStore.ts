@@ -110,6 +110,7 @@ export interface PipelineEvent {
   node: string;
   label: string;
   detail?: string;
+  queries?: string[];
   phase: PipelinePhase;
   status: "running" | "done" | "error";
   elapsedMs?: number;
@@ -367,11 +368,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 const elapsedMs = typeof data.elapsed_ms === "number" ? data.elapsed_ms : undefined;
                 const nodeMs = typeof data.node_ms === "number" ? data.node_ms : undefined;
                 const detail = data.detail ? String(data.detail) : undefined;
+                const queries = Array.isArray(data.queries)
+                  ? data.queries.map((q) => String(q)).filter(Boolean)
+                  : undefined;
                 const event: PipelineEvent = {
                   id: `evt-${Date.now()}-${node}-${status}`,
                   node,
                   label: String(data.label),
                   detail,
+                  queries,
                   phase: nodeToPhase(node),
                   status,
                   elapsedMs,
@@ -389,6 +394,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   } else {
                     pipelineEvents.push(event);
                   }
+                  // #region agent log
+                  fetch("http://127.0.0.1:7414/ingest/c9f169d4-33bb-4576-a7c6-7358a7e9745d", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "05b494" },
+                    body: JSON.stringify({
+                      sessionId: "05b494",
+                      hypothesisId: "D",
+                      location: "chatStore.ts:status",
+                      message: "pipeline_status",
+                      data: { node, status, nodeMs, queryN: event.queries?.length ?? 0 },
+                      timestamp: Date.now(),
+                    }),
+                  }).catch(() => {});
+                  // #endregion
                   return {
                     graphStatus: {
                       node,
@@ -400,6 +419,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     pipelineEvents,
                   };
                 });
+              } else if (currentEvent === "search_plan") {
+                const queries = Array.isArray(data.queries)
+                  ? data.queries.map((q) => String(q)).filter(Boolean)
+                  : [];
+                // #region agent log
+                fetch("http://127.0.0.1:7414/ingest/c9f169d4-33bb-4576-a7c6-7358a7e9745d", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "05b494" },
+                  body: JSON.stringify({
+                    sessionId: "05b494",
+                    hypothesisId: "D",
+                    location: "chatStore.ts:search_plan",
+                    message: "search_plan",
+                    data: { n: queries.length },
+                    timestamp: Date.now(),
+                  }),
+                }).catch(() => {});
+                // #endregion
+                set((s) => ({
+                  pipelineEvents: [
+                    ...s.pipelineEvents,
+                    {
+                      id: `evt-${Date.now()}-search_plan`,
+                      node: "search_plan",
+                      label: "Search graph",
+                      queries,
+                      detail: queries.join(" · "),
+                      phase: "search" as const,
+                      status: "running" as const,
+                      timestamp: new Date(),
+                    },
+                  ],
+                }));
               } else if (currentEvent === "ping") {
                 const elapsedMs = typeof data.elapsed_ms === "number" ? data.elapsed_ms : undefined;
                 set((s) => (s.graphStatus ? { graphStatus: { ...s.graphStatus, elapsedMs } } : {}));

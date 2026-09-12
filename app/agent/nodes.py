@@ -215,8 +215,29 @@ def _response_text(response: Any) -> str:
 
 
 
+# #region agent log
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        with open(
+            "/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-05b494.log",
+            "a",
+            encoding="utf-8",
+        ) as _df:
+            _df.write(json.dumps({
+                "sessionId": "05b494",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+    except Exception:
+        pass
+# #endregion
+
+
 def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_schema: Any,
-                       role: str = "", timeout: int = 30):
+                       role: str = "", timeout: int = 30, max_attempts: int | None = None):
     """Call primary LLM; on failure walk fallbacks with structured output.
 
     Every attempt is traced (model, latency, size, outcome) for observability.
@@ -227,6 +248,13 @@ def _llm_with_fallback(primary: Any, fallbacks: Any, messages: list, output_sche
         chain.extend(fallbacks)
     elif fallbacks is not None:
         chain.append(fallbacks)
+    if max_attempts is not None:
+        chain = chain[: max(1, max_attempts)]
+    # #region agent log
+    _agent_dbg("B", "nodes.py:_llm_with_fallback", "chain", {
+        "role": role, "n": len(chain), "timeout": timeout, "max_attempts": max_attempts,
+    })
+    # #endregion
     prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
     last_exc: Exception | None = None
     for idx, llm in enumerate(chain):
@@ -293,14 +321,22 @@ def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: in
             raise ValueError(f"Could not parse JSON from model output: {text[:200]}")
         return _validate_structured(data, output_schema)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    # Do NOT use `with ThreadPoolExecutor`: on TimeoutError the context
+    # manager calls shutdown(wait=True) and blocks until the hung HTTP call
+    # finishes (observed 344s classify after a "20s" timeout).
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    t_exec = time.perf_counter()
+    try:
         future = executor.submit(_do_structured)
         try:
             result = future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
-            # A timeout means the model is slow, not malformed — retrying the
-            # same model doubles the wait for the same likely outcome. Bail to
-            # the next model in the chain immediately.
+            # #region agent log
+            _agent_dbg("A", "nodes.py:_structured_invoke", "structured_timeout", {
+                "timeout_s": timeout,
+                "elapsed_s": round(time.perf_counter() - t_exec, 2),
+            })
+            # #endregion
             raise ValueError(f"LLM call timed out after {timeout}s (structured attempt)")
         if result is not None:
             return result
@@ -315,6 +351,14 @@ def _structured_invoke(llm: Any, messages: list, output_schema: Any, timeout: in
             raise
         except Exception as exc:
             raise ValueError(f"LLM call failed: {exc}")
+    finally:
+        t_sd = time.perf_counter()
+        executor.shutdown(wait=False, cancel_futures=True)
+        # #region agent log
+        _agent_dbg("A", "nodes.py:_structured_invoke", "executor_shutdown", {
+            "shutdown_wait_s": round(time.perf_counter() - t_sd, 3),
+        })
+        # #endregion
 
 
 def _invoke_chat(primary: Any, fallbacks: tuple[Any, ...] | list[Any], messages: list, role: str = "generator") -> tuple[str, str]:
@@ -828,6 +872,7 @@ def classify_and_plan(state: dict) -> dict:
         u: QueryUnderstanding = _llm_with_fallback(
             llms.planner, llms.planner_fallbacks, messages, QueryUnderstanding, role="planner",
             timeout=settings.PLANNER_TIMEOUT_SECONDS,
+            max_attempts=2,
         )
     except Exception as exc:
         # Honest safe default: treat as research, search everything with the raw query.

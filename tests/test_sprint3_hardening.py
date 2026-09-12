@@ -105,6 +105,23 @@ class TestCorsMiddleware:
             resp = run(self._scope(origin=origin))
             assert resp["headers"]["access-control-allow-origin"] == origin
 
+    def test_production_alias_allows_git_and_hash_previews(self):
+        """Vercel prod aliases (…-kappa) are not a prefix of git/preview hosts.
+        Listing only the alias must still CORS-allow this project's other URLs.
+        """
+        run = _drive_cors(self._mw(
+            vercel=False,
+            extra_origins={"https://self-correcting-rag-kappa.vercel.app"},
+        ))
+        for origin in (
+            "https://self-correcting-rag-git-main-sovrin1.vercel.app",
+            "https://self-correcting-g5h0oilgb-sovrin1.vercel.app",
+        ):
+            resp = run(self._scope(origin=origin))
+            assert resp["headers"]["access-control-allow-origin"] == origin
+        blocked = run(self._scope(origin="https://unrelated-project.vercel.app"))
+        assert "access-control-allow-origin" not in blocked["headers"]
+
     def test_unrelated_vercel_preview_still_blocked(self):
         run = _drive_cors(self._mw(vercel=False, extra_origins={"https://self-correcting-sovrin1.vercel.app"}))
         resp = run(self._scope(origin="https://attacker-site.vercel.app"))
