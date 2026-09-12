@@ -1,5 +1,8 @@
 import inspect
+import json
 import logging
+import sys
+import time
 from datetime import UTC, datetime
 
 import jwt
@@ -61,26 +64,116 @@ def _refresh_cookie_flags() -> dict:
     }
 
 
+def _dbg_cookie(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    rec = {
+        "sessionId": "05b494",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open(
+            "/home/ariva/work/project_self_rag/self_correcting_rag/.cursor/debug-05b494.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    logger.info("debug_cookie %s %s", message, data)
+
+
 def _cookie_kwargs(method, extra: dict | None = None) -> dict:
     allowed = inspect.signature(method).parameters
     merged = {**_refresh_cookie_flags(), **(extra or {})}
     return {k: v for k, v in merged.items() if k in allowed}
 
 
+def _append_partitioned_attr(response: Response) -> None:
+    """Emit CHIPS Partitioned without Starlette's Python 3.14 http.cookies path."""
+    for i in range(len(response.raw_headers) - 1, -1, -1):
+        name, val = response.raw_headers[i]
+        if name.lower() == b"set-cookie" and b"partitioned" not in val.lower():
+            response.raw_headers[i] = (name, val + b"; Partitioned")
+            return
+
+
 def _set_refresh_cookie(response: Response, raw_token: str) -> None:
-    response.set_cookie(
-        **_cookie_kwargs(
-            response.set_cookie,
-            {
-                "value": raw_token,
-                "max_age": settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
-            },
-        )
+    kwargs = _cookie_kwargs(
+        response.set_cookie,
+        {
+            "value": raw_token,
+            "max_age": settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
+        },
     )
+    want_partitioned = bool(kwargs.pop("partitioned", False))
+    py = list(sys.version_info[:2])
+    # #region agent log
+    _dbg_cookie(
+        "A",
+        "app/auth/router.py:_set_refresh_cookie",
+        "set_cookie_before",
+        {
+            "want_partitioned": want_partitioned,
+            "py": py,
+            "env": settings.ENVIRONMENT,
+            "kwargs_has_partitioned": "partitioned" in kwargs,
+            "delete_has_partitioned": "partitioned" in inspect.signature(response.delete_cookie).parameters,
+        },
+    )
+    # #endregion
+    if want_partitioned and sys.version_info >= (3, 14):
+        kwargs["partitioned"] = True
+    try:
+        response.set_cookie(**kwargs)
+    except ValueError as exc:
+        # #region agent log
+        _dbg_cookie(
+            "A",
+            "app/auth/router.py:_set_cookie_valueerror",
+            "set_cookie_valueerror",
+            {"err": str(exc), "py": py},
+        )
+        # #endregion
+        kwargs.pop("partitioned", None)
+        response.set_cookie(**kwargs)
+    if want_partitioned and sys.version_info < (3, 14):
+        _append_partitioned_attr(response)
+    # #region agent log
+    last = ""
+    for name, val in reversed(response.raw_headers):
+        if name.lower() == b"set-cookie":
+            last = val.decode("latin-1", errors="replace")
+            break
+    _dbg_cookie(
+        "D",
+        "app/auth/router.py:_set_refresh_cookie",
+        "set_cookie_after",
+        {"header_has_partitioned": "partitioned" in last.lower(), "samesite_none": "samesite=none" in last.lower()},
+    )
+    # #endregion
 
 
 def _clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(**_cookie_kwargs(response.delete_cookie))
+    kwargs = _cookie_kwargs(response.delete_cookie)
+    want_partitioned = bool(kwargs.pop("partitioned", False))
+    # #region agent log
+    _dbg_cookie(
+        "E",
+        "app/auth/router.py:_clear_refresh_cookie",
+        "delete_cookie_before",
+        {
+            "want_partitioned": want_partitioned,
+            "kwargs_keys": sorted(kwargs.keys()),
+            "py": list(sys.version_info[:2]),
+        },
+    )
+    # #endregion
+    response.delete_cookie(**kwargs)
+    if want_partitioned:
+        _append_partitioned_attr(response)
 
 
 def _refresh_token_from(request: Request, body: "RefreshRequest | None") -> str | None:

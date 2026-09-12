@@ -125,6 +125,19 @@ class TestRefreshCookieFlags:
         assert flags["secure"] is False
         assert flags["partitioned"] is False
 
+    def test_production_set_cookie_does_not_raise_on_py312(self, monkeypatch):
+        """Starlette's partitioned= kwarg raises on Python < 3.14; Render is 3.12."""
+        from starlette.responses import Response
+        from app.auth import router as auth_router
+
+        monkeypatch.setattr(auth_router.settings, "ENVIRONMENT", "production")
+        resp = Response()
+        auth_router._set_refresh_cookie(resp, "tok_" + "x" * 40)
+        header = resp.headers.get("set-cookie", "").lower()
+        assert "refresh_token=" in header
+        assert "partitioned" in header
+        assert "samesite=none" in header
+
 
 @pytest.mark.asyncio
 class TestRefreshCookie:
